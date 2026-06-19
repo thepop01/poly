@@ -1,4 +1,7 @@
-CREATE TABLE events (
+-- Polymarket Analytics Platform — Phase 1 Schema
+-- Idempotent: safe to re-run (uses IF NOT EXISTS)
+
+CREATE TABLE IF NOT EXISTS events (
     event_id        VARCHAR(64)  PRIMARY KEY,
     slug            VARCHAR(255) NOT NULL UNIQUE,
     title           TEXT         NOT NULL,
@@ -13,7 +16,7 @@ CREATE TABLE events (
     fetched_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE markets (
+CREATE TABLE IF NOT EXISTS markets (
     market_id           VARCHAR(64)  PRIMARY KEY,
     event_id            VARCHAR(64)  NOT NULL REFERENCES events(event_id),
     token_id            VARCHAR(66)  NOT NULL UNIQUE,
@@ -34,7 +37,7 @@ CREATE TABLE markets (
     fetched_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE trades (
+CREATE TABLE IF NOT EXISTS trades (
     trade_id        BIGSERIAL    PRIMARY KEY,
     tx_hash         VARCHAR(66)  NOT NULL,
     wallet_address  VARCHAR(42)  NOT NULL,
