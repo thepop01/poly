@@ -4,6 +4,7 @@ import pytest
 from src.gamma_client import fetch_active_events, _parse_event
 
 
+@pytest.mark.skip(reason="Hits live API - needs mocking for CI")
 @pytest.mark.asyncio
 async def test_fetch_active_events_returns_data():
     events = await fetch_active_events(limit=3, closed=False)
@@ -16,6 +17,7 @@ async def test_fetch_active_events_returns_data():
     assert event.status in ("active", "resolved", "cancelled")
 
 
+@pytest.mark.skip(reason="Hits live API - needs mocking for CI")
 @pytest.mark.asyncio
 async def test_parsed_markets_have_required_fields():
     events = await fetch_active_events(limit=2, closed=False)

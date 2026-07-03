@@ -3,3 +3,12 @@ asyncpg
 python-dotenv
 pytest
 pytest-asyncio
+websockets
+fastapi
+uvicorn
+httpx
+pyjwt
+passlib[bcrypt]
+slowapi
+async-lru
+alembic

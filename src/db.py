@@ -13,12 +13,15 @@ DATABASE_URL = os.getenv(
     "postgres://poly_user:poly_password@localhost:5432/poly_db",
 )
 
+DB_POOL_MIN = int(os.getenv("DB_POOL_MIN", "5"))
+DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "30"))
+
 
 async def get_pool() -> asyncpg.Pool:
     """Return a shared connection pool, creating it on first call."""
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=DB_POOL_MIN, max_size=DB_POOL_MAX)
     return _pool
 
 
@@ -31,9 +34,7 @@ async def close_pool() -> None:
 
 
 async def init_db(pool: asyncpg.Pool) -> None:
-    """Apply the schema.sql file to the database (idempotent)."""
-    schema_path = os.path.join(os.path.dirname(__file__), "..", "db", "schema.sql")
-    with open(schema_path, "r") as f:
-        schema_sql = f.read()
-    async with pool.acquire() as conn:
-        await conn.execute(schema_sql)
+    """Database initialization is now handled by Alembic migrations."""
+    import logging
+    logger = logging.getLogger("db")
+    logger.info("Database schema is managed by Alembic. Skipping manual init.")
