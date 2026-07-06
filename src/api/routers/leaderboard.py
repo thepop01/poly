@@ -3,16 +3,96 @@
 Two sections:
   - /leaderboard/global   → all discovered wallets (deposits + trades), no filters
   - /leaderboard/curated  → filtered subset based on conditions (win rate, ROI, tier, etc.)
+
+Category filter: when a category is specified (SPORTS, POLITICS, etc.), the endpoint
+fetches directly from Polymarket's /v1/leaderboard API for that category.
 """
 
 from typing import Any, Optional
 from fastapi import APIRouter, Request, HTTPException
 import time
+import aiohttp
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/leaderboard", tags=["leaderboard"])
 
 _cache: dict[str, dict] = {}
 CACHE_TTL = 60
+
+DATA_API = "https://data-api.polymarket.com"
+
+VALID_CATEGORIES = {
+    "OVERALL", "POLITICS", "SPORTS", "ESPORTS", "CRYPTO",
+    "CULTURE", "WEATHER", "ECONOMICS", "TECH", "FINANCE",
+}
+
+
+async def _fetch_pm_leaderboard(
+    category: str = "OVERALL",
+    time_period: str = "ALL",
+    order_by: str = "PNL",
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    """Fetch from Polymarket's public /v1/leaderboard endpoint."""
+    params = {
+        "category": category,
+        "timePeriod": time_period,
+        "orderBy": order_by,
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+    qs = "&".join(f"{k}={v}" for k, v in params.items())
+    url = f"{DATA_API}/v1/leaderboard?{qs}"
+    try:
+        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                if not isinstance(data, list):
+                    return []
+                return data
+    except Exception as e:
+        logger.warning("PM leaderboard fetch error: %s", e)
+        return []
+
+
+def _pm_entry_to_wallet(entry: dict) -> dict:
+    """Convert a Polymarket leaderboard entry to our wallet format."""
+    name = (entry.get("userName") or "").strip()[:255]
+    if name.lower().startswith("0x") and len(name) > 10:
+        name = ""
+    pnl = float(entry.get("pnl", 0) or 0)
+    vol = float(entry.get("vol", 0) or 0)
+    roi = (pnl / vol * 100) if vol > 0 else 0.0
+    return {
+        "address": entry.get("proxyWallet", ""),
+        "username": name,
+        "website_pnl": pnl,
+        "website_volume": vol,
+        "website_rank": int(entry.get("rank", 0) or 0),
+        "total_pnl": pnl,
+        "total_volume": vol,
+        "roi_pct": round(roi, 2),
+        "win_rate": None,
+        "resolved_count": 0,
+        "winning_count": 0,
+        "realized_pnl": 0,
+        "unrealized_pnl": 0,
+        "tier": "",
+        "strategy": None,
+        "active_days": 0,
+        "alpha_score": None,
+        "biggest_win": None,
+        "biggest_loss": None,
+        "position_value": 0,
+        "max_trade_size": 0,
+        "added_reason": None,
+        "added_at": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -26,9 +106,16 @@ async def get_global_leaderboard(
     limit: int = 50,
     offset: int = 0,
     search: Optional[str] = None,
+    category: Optional[str] = None,
+    time_period: str = "ALL",
 ) -> dict[str, Any]:
-    """All discovered wallets (from deposit watcher + trade watcher). No filters."""
-    cache_key = f"global_{sort_by}_{limit}_{offset}_{search}"
+    """All discovered wallets (from deposit watcher + trade watcher). No filters.
+
+    When category is set to a specific category (not OVERALL), the stats columns
+    (PnL, volume, win_rate, ROI, resolved_count) show per-category numbers
+    instead of overall numbers.
+    """
+    cache_key = f"global_{sort_by}_{limit}_{offset}_{search}_{category}_{time_period}"
     cached = _cache.get(cache_key)
     if cached and time.time() - cached["time"] < CACHE_TTL:
         return cached["data"]
@@ -37,71 +124,140 @@ async def get_global_leaderboard(
     if not pool:
         raise HTTPException(status_code=500, detail="Database pool not initialized")
 
-    allowed_sorts = {
-        "win_rate": "ws.win_rate",
-        "roi_pct": "ws.roi_pct",
-        "total_volume": "ws.total_volume",
-        "total_pnl": "ws.total_pnl",
-        "realized_pnl": "COALESCE(tw.realized_pnl, 0)",
-        "unrealized_pnl": "COALESCE(tw.unrealized_pnl, 0)",
-        "biggest_win": "ws.biggest_win",
-        "alpha_score": "ws.alpha_score",
-        "position_value": "COALESCE(tw.position_value, 0)",
-        "max_trade_size": "COALESCE(tw.max_trade_size, 0)",
-        "resolved_count": "ws.resolved_count",
-        "tier": "ws.tier",
-        "website_pnl": "COALESCE(tw.website_pnl, 0)",
-        "website_rank": "COALESCE(tw.website_rank, 999999999)",
-    }
-    order_col = allowed_sorts.get(sort_by, "ws.total_pnl")
+    cat_upper = (category or "OVERALL").upper().strip()
+    use_category = cat_upper and cat_upper in VALID_CATEGORIES and cat_upper != "OVERALL"
 
-    query = """
-        SELECT
-            ws.address,
-            ws.win_rate,
-            ws.roi_pct,
-            ws.resolved_count,
-            ws.winning_count,
-            ws.total_volume,
-            ws.total_pnl,
-            COALESCE(tw.realized_pnl, 0) as realized_pnl,
-            COALESCE(tw.unrealized_pnl, 0) as unrealized_pnl,
-            ws.tier,
-            ws.strategy,
-            ws.active_days,
-            ws.alpha_score,
-            ws.biggest_win,
-            ws.biggest_loss,
-            COALESCE(tw.position_value, 0) as position_value,
-            COALESCE(tw.max_trade_size, 0) as max_trade_size,
-            ws.added_reason,
-            tw.added_at,
-            tw.website_pnl,
-            tw.website_volume,
-            tw.website_rank,
-            tw.username
-        FROM wallet_stats ws
-        LEFT JOIN tracked_wallets tw ON ws.address = tw.address
-    """
-    conditions: list[str] = []
-    args: list[Any] = []
+    if use_category:
+        # Per-category view: use wallet_category_stats for the selected category
+        allowed_sorts = {
+            "win_rate": "COALESCE(wcs.win_rate, 0)",
+            "roi_pct": "COALESCE(wcs.roi_pct, 0)",
+            "total_volume": "COALESCE(wcs.total_volume, 0)",
+            "total_pnl": "COALESCE(wcs.total_pnl, 0)",
+            "resolved_count": "COALESCE(wcs.resolved_count, 0)",
+            "website_pnl": "COALESCE(tw.website_pnl, 0)",
+            "website_rank": "COALESCE(tw.website_rank, 999999999)",
+            "tier": "ws.tier",
+            "alpha_score": "ws.alpha_score",
+        }
+        order_col = allowed_sorts.get(sort_by, "COALESCE(wcs.total_pnl, 0)")
 
-    if search:
-        conditions.append(f"ws.address ILIKE ${len(args) + 1}")
-        args.append(f"%{search}%")
+        query = """
+            SELECT
+                ws.address,
+                COALESCE(wcs.win_rate, 0) as win_rate,
+                COALESCE(wcs.roi_pct, 0) as roi_pct,
+                COALESCE(wcs.resolved_count, 0) as resolved_count,
+                COALESCE(wcs.winning_count, 0) as winning_count,
+                COALESCE(wcs.total_volume, 0) as total_volume,
+                COALESCE(wcs.total_pnl, 0) as total_pnl,
+                0 as realized_pnl,
+                0 as unrealized_pnl,
+                ws.tier,
+                ws.strategy,
+                ws.active_days,
+                ws.alpha_score,
+                ws.biggest_win,
+                ws.biggest_loss,
+                COALESCE(tw.position_value, 0) as position_value,
+                COALESCE(tw.max_trade_size, 0) as max_trade_size,
+                ws.added_reason,
+                tw.added_at,
+                tw.website_pnl,
+                tw.website_volume,
+                tw.website_rank,
+                tw.username,
+                $1 as active_category
+            FROM wallet_stats ws
+            LEFT JOIN tracked_wallets tw ON ws.address = tw.address
+            LEFT JOIN wallet_category_stats wcs ON ws.address = wcs.address AND wcs.category = $1
+        """
+        args: list[Any] = [cat_upper]
+        conditions: list[str] = ["wcs.address IS NOT NULL"]
 
-    if conditions:
+        if search:
+            conditions.append(f"ws.address ILIKE ${len(args) + 1}")
+            args.append(f"%{search}%")
+
         query += " WHERE " + " AND ".join(conditions)
+        query += f" ORDER BY {order_col} DESC NULLS LAST"
+        query += f" LIMIT ${len(args) + 1} OFFSET ${len(args) + 2}"
+        args.extend([limit, offset])
 
-    query += f" ORDER BY {order_col} DESC NULLS LAST"
-    query += f" LIMIT ${len(args) + 1} OFFSET ${len(args) + 2}"
-    args.extend([limit, offset])
+        async with pool.acquire() as conn:
+            count_sql = "SELECT COUNT(*) FROM (" + query.rsplit(" ORDER BY", 1)[0] + ") sub"
+            count_args = args[:-2]
+            total_count = await conn.fetchval(count_sql, *count_args)
+            rows = await conn.fetch(query, *args)
 
-    async with pool.acquire() as conn:
-        count_sql = "SELECT COUNT(*) FROM (" + query.rsplit(" ORDER BY", 1)[0] + ") sub"
-        count_args = args[:-2] if len(args) >= 2 else []
-        total_count = await conn.fetchval(count_sql, *count_args)
-        rows = await conn.fetch(query, *args)
+    else:
+        # Overall view: use wallet_stats (existing behavior)
+        allowed_sorts = {
+            "win_rate": "ws.win_rate",
+            "roi_pct": "ws.roi_pct",
+            "total_volume": "ws.total_volume",
+            "total_pnl": "ws.total_pnl",
+            "realized_pnl": "COALESCE(tw.realized_pnl, 0)",
+            "unrealized_pnl": "COALESCE(tw.unrealized_pnl, 0)",
+            "biggest_win": "ws.biggest_win",
+            "alpha_score": "ws.alpha_score",
+            "position_value": "COALESCE(tw.position_value, 0)",
+            "max_trade_size": "COALESCE(tw.max_trade_size, 0)",
+            "resolved_count": "ws.resolved_count",
+            "tier": "ws.tier",
+            "website_pnl": "COALESCE(tw.website_pnl, 0)",
+            "website_rank": "COALESCE(tw.website_rank, 999999999)",
+        }
+        order_col = allowed_sorts.get(sort_by, "ws.total_pnl")
+
+        query = """
+            SELECT
+                ws.address,
+                ws.win_rate,
+                ws.roi_pct,
+                ws.resolved_count,
+                ws.winning_count,
+                ws.total_volume,
+                ws.total_pnl,
+                COALESCE(tw.realized_pnl, 0) as realized_pnl,
+                COALESCE(tw.unrealized_pnl, 0) as unrealized_pnl,
+                ws.tier,
+                ws.strategy,
+                ws.active_days,
+                ws.alpha_score,
+                ws.biggest_win,
+                ws.biggest_loss,
+                COALESCE(tw.position_value, 0) as position_value,
+                COALESCE(tw.max_trade_size, 0) as max_trade_size,
+                ws.added_reason,
+                tw.added_at,
+                tw.website_pnl,
+                tw.website_volume,
+                tw.website_rank,
+                tw.username,
+                'OVERALL' as active_category
+            FROM wallet_stats ws
+            LEFT JOIN tracked_wallets tw ON ws.address = tw.address
+        """
+        conditions: list[str] = []
+        args: list[Any] = []
+
+        if search:
+            conditions.append(f"ws.address ILIKE ${len(args) + 1}")
+            args.append(f"%{search}%")
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += f" ORDER BY {order_col} DESC NULLS LAST"
+        query += f" LIMIT ${len(args) + 1} OFFSET ${len(args) + 2}"
+        args.extend([limit, offset])
+
+        async with pool.acquire() as conn:
+            count_sql = "SELECT COUNT(*) FROM (" + query.rsplit(" ORDER BY", 1)[0] + ") sub"
+            count_args = args[:-2] if len(args) >= 2 else []
+            total_count = await conn.fetchval(count_sql, *count_args)
+            rows = await conn.fetch(query, *args)
 
     data = [dict(r) for r in rows]
     result = {"wallets": data, "total_count": total_count}
@@ -127,9 +283,19 @@ async def get_curated_leaderboard(
     min_realized_pnl: Optional[float] = None,
     min_active_days: Optional[int] = None,
     search: Optional[str] = None,
+    trade_window: Optional[str] = None,
+    category: Optional[str] = None,
+    time_period: str = "ALL",
 ) -> dict[str, Any]:
-    """Curated wallets — filtered by performance conditions."""
-    cache_key = f"curated_{sort_by}_{limit}_{offset}_{tier}_{min_win_rate}_{min_roi}_{min_volume}_{min_resolved}_{min_realized_pnl}_{min_active_days}_{search}"
+    """Curated wallets — filtered by performance conditions.
+
+    trade_window: "all" | "100" | "500" | "1000" | "2000"
+      When set to anything other than "all", the endpoint returns an empty list
+      until per-wallet trade-window stats are pre-computed and stored.
+
+    category: Polymarket market category (SPORTS, POLITICS, CRYPTO, etc.)
+    """
+    cache_key = f"curated_{sort_by}_{limit}_{offset}_{tier}_{min_win_rate}_{min_roi}_{min_volume}_{min_resolved}_{min_realized_pnl}_{min_active_days}_{search}_{trade_window}_{category}_{time_period}"
     cached = _cache.get(cache_key)
     if cached and time.time() - cached["time"] < CACHE_TTL:
         return cached["data"]
@@ -138,107 +304,674 @@ async def get_curated_leaderboard(
     if not pool:
         raise HTTPException(status_code=500, detail="Database pool not initialized")
 
-    allowed_sorts = {
-        "win_rate": "ws.win_rate",
-        "roi_pct": "ws.roi_pct",
-        "total_volume": "ws.total_volume",
-        "total_pnl": "ws.total_pnl",
-        "realized_pnl": "COALESCE(tw.realized_pnl, 0)",
-        "unrealized_pnl": "COALESCE(tw.unrealized_pnl, 0)",
-        "biggest_win": "ws.biggest_win",
-        "alpha_score": "ws.alpha_score",
-        "position_value": "COALESCE(tw.position_value, 0)",
-        "max_trade_size": "COALESCE(tw.max_trade_size, 0)",
-        "resolved_count": "ws.resolved_count",
-        "tier": "ws.tier",
-        "website_pnl": "COALESCE(tw.website_pnl, 0)",
-        "website_rank": "COALESCE(tw.website_rank, 999999999)",
-    }
-    order_col = allowed_sorts.get(sort_by, "ws.total_pnl")
+    if trade_window and trade_window != "all":
+        result = {"wallets": [], "total_count": 0}
+        _cache[cache_key] = {"time": time.time(), "data": result}
+        return result
 
-    query = """
-        SELECT
-            ws.address,
-            ws.win_rate,
-            ws.roi_pct,
-            ws.resolved_count,
-            ws.winning_count,
-            ws.total_volume,
-            ws.total_pnl,
-            COALESCE(tw.realized_pnl, 0) as realized_pnl,
-            COALESCE(tw.unrealized_pnl, 0) as unrealized_pnl,
-            ws.tier,
-            ws.strategy,
-            ws.active_days,
-            ws.alpha_score,
-            ws.biggest_win,
-            ws.biggest_loss,
-            COALESCE(tw.position_value, 0) as position_value,
-            COALESCE(tw.max_trade_size, 0) as max_trade_size,
-            ws.added_reason,
-            tw.added_at,
-            tw.website_pnl,
-            tw.website_volume,
-            tw.website_rank,
-            tw.username
-        FROM wallet_stats ws
-        LEFT JOIN tracked_wallets tw ON ws.address = tw.address
-        WHERE 1=1
-    """
-    args: list[Any] = []
-    param_idx = 1
+    cat_upper = (category or "OVERALL").upper().strip()
+    use_category = cat_upper and cat_upper in VALID_CATEGORIES and cat_upper != "OVERALL"
 
-    if tier and tier.lower() != "all tiers":
-        query += f" AND ws.tier ILIKE ${param_idx}"
-        args.append(tier)
-        param_idx += 1
+    if use_category:
+        allowed_sorts = {
+            "win_rate": "COALESCE(wcs.win_rate, 0)",
+            "roi_pct": "COALESCE(wcs.roi_pct, 0)",
+            "total_volume": "COALESCE(wcs.total_volume, 0)",
+            "total_pnl": "COALESCE(wcs.total_pnl, 0)",
+            "resolved_count": "COALESCE(wcs.resolved_count, 0)",
+            "website_pnl": "COALESCE(tw.website_pnl, 0)",
+            "website_rank": "COALESCE(tw.website_rank, 999999999)",
+            "tier": "ws.tier",
+            "alpha_score": "ws.alpha_score",
+        }
+        order_col = allowed_sorts.get(sort_by, "COALESCE(wcs.total_pnl, 0)")
 
-    if min_win_rate is not None:
-        query += f" AND ws.win_rate >= ${param_idx}"
-        args.append(min_win_rate)
-        param_idx += 1
+        query = """
+            SELECT
+                ws.address,
+                COALESCE(wcs.win_rate, 0) as win_rate,
+                COALESCE(wcs.roi_pct, 0) as roi_pct,
+                COALESCE(wcs.resolved_count, 0) as resolved_count,
+                COALESCE(wcs.winning_count, 0) as winning_count,
+                COALESCE(wcs.total_volume, 0) as total_volume,
+                COALESCE(wcs.total_pnl, 0) as total_pnl,
+                0 as realized_pnl,
+                0 as unrealized_pnl,
+                ws.tier,
+                ws.strategy,
+                ws.active_days,
+                ws.alpha_score,
+                ws.biggest_win,
+                ws.biggest_loss,
+                COALESCE(tw.position_value, 0) as position_value,
+                COALESCE(tw.max_trade_size, 0) as max_trade_size,
+                ws.added_reason,
+                tw.added_at,
+                tw.website_pnl,
+                tw.website_volume,
+                tw.website_rank,
+                tw.username,
+                $1 as active_category
+            FROM wallet_stats ws
+            LEFT JOIN tracked_wallets tw ON ws.address = tw.address
+            LEFT JOIN wallet_category_stats wcs ON ws.address = wcs.address AND wcs.category = $1
+            WHERE wcs.address IS NOT NULL
+        """
+        args: list[Any] = [cat_upper]
+        param_idx = 2
 
-    if min_roi is not None:
-        query += f" AND ws.roi_pct >= ${param_idx}"
-        args.append(min_roi)
-        param_idx += 1
+        if tier and tier.lower() != "all tiers":
+            query += f" AND ws.tier ILIKE ${param_idx}"
+            args.append(tier)
+            param_idx += 1
 
-    if min_volume is not None:
-        query += f" AND ws.total_volume >= ${param_idx}"
-        args.append(min_volume)
-        param_idx += 1
+        if min_win_rate is not None:
+            query += f" AND COALESCE(wcs.win_rate, 0) >= ${param_idx}"
+            args.append(min_win_rate)
+            param_idx += 1
 
-    if min_resolved is not None:
-        query += f" AND ws.resolved_count >= ${param_idx}"
-        args.append(min_resolved)
-        param_idx += 1
+        if min_roi is not None:
+            query += f" AND COALESCE(wcs.roi_pct, 0) >= ${param_idx}"
+            args.append(min_roi)
+            param_idx += 1
 
-    if min_realized_pnl is not None:
-        query += f" AND COALESCE(tw.realized_pnl, 0) >= ${param_idx}"
-        args.append(min_realized_pnl)
-        param_idx += 1
+        if min_volume is not None:
+            query += f" AND COALESCE(wcs.total_volume, 0) >= ${param_idx}"
+            args.append(min_volume)
+            param_idx += 1
 
-    if min_active_days is not None:
-        query += f" AND ws.active_days >= ${param_idx}"
-        args.append(min_active_days)
-        param_idx += 1
+        if min_resolved is not None:
+            query += f" AND COALESCE(wcs.resolved_count, 0) >= ${param_idx}"
+            args.append(min_resolved)
+            param_idx += 1
 
-    if search:
-        query += f" AND ws.address ILIKE ${param_idx}"
-        args.append(f"%{search}%")
-        param_idx += 1
+        if search:
+            query += f" AND ws.address ILIKE ${param_idx}"
+            args.append(f"%{search}%")
+            param_idx += 1
 
-    query += f" ORDER BY {order_col} DESC NULLS LAST"
-    query += f" LIMIT ${param_idx} OFFSET ${param_idx + 1}"
-    args.extend([limit, offset])
+        query += f" ORDER BY {order_col} DESC NULLS LAST"
+        query += f" LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        args.extend([limit, offset])
 
-    async with pool.acquire() as conn:
-        count_sql = "SELECT COUNT(*) FROM (" + query.rsplit(" ORDER BY", 1)[0] + ") sub"
-        count_args = args[:-2]
-        total_count = await conn.fetchval(count_sql, *count_args)
-        rows = await conn.fetch(query, *args)
+        async with pool.acquire() as conn:
+            count_sql = "SELECT COUNT(*) FROM (" + query.rsplit(" ORDER BY", 1)[0] + ") sub"
+            count_args = args[:-2]
+            total_count = await conn.fetchval(count_sql, *count_args)
+            rows = await conn.fetch(query, *args)
+
+    else:
+        allowed_sorts = {
+            "win_rate": "ws.win_rate",
+            "roi_pct": "ws.roi_pct",
+            "total_volume": "ws.total_volume",
+            "total_pnl": "ws.total_pnl",
+            "realized_pnl": "COALESCE(tw.realized_pnl, 0)",
+            "unrealized_pnl": "COALESCE(tw.unrealized_pnl, 0)",
+            "biggest_win": "ws.biggest_win",
+            "alpha_score": "ws.alpha_score",
+            "position_value": "COALESCE(tw.position_value, 0)",
+            "max_trade_size": "COALESCE(tw.max_trade_size, 0)",
+            "resolved_count": "ws.resolved_count",
+            "tier": "ws.tier",
+            "website_pnl": "COALESCE(tw.website_pnl, 0)",
+            "website_rank": "COALESCE(tw.website_rank, 999999999)",
+        }
+        order_col = allowed_sorts.get(sort_by, "ws.total_pnl")
+
+        query = """
+            SELECT
+                ws.address,
+                ws.win_rate,
+                ws.roi_pct,
+                ws.resolved_count,
+                ws.winning_count,
+                ws.total_volume,
+                ws.total_pnl,
+                COALESCE(tw.realized_pnl, 0) as realized_pnl,
+                COALESCE(tw.unrealized_pnl, 0) as unrealized_pnl,
+                ws.tier,
+                ws.strategy,
+                ws.active_days,
+                ws.alpha_score,
+                ws.biggest_win,
+                ws.biggest_loss,
+                COALESCE(tw.position_value, 0) as position_value,
+                COALESCE(tw.max_trade_size, 0) as max_trade_size,
+                ws.added_reason,
+                tw.added_at,
+                tw.website_pnl,
+                tw.website_volume,
+                tw.website_rank,
+                tw.username,
+                'OVERALL' as active_category
+            FROM wallet_stats ws
+            LEFT JOIN tracked_wallets tw ON ws.address = tw.address
+            WHERE 1=1
+        """
+        args: list[Any] = []
+        param_idx = 1
+
+        if tier and tier.lower() != "all tiers":
+            query += f" AND ws.tier ILIKE ${param_idx}"
+            args.append(tier)
+            param_idx += 1
+
+        if min_win_rate is not None:
+            query += f" AND ws.win_rate >= ${param_idx}"
+            args.append(min_win_rate)
+            param_idx += 1
+
+        if min_roi is not None:
+            query += f" AND ws.roi_pct >= ${param_idx}"
+            args.append(min_roi)
+            param_idx += 1
+
+        if min_volume is not None:
+            query += f" AND ws.total_volume >= ${param_idx}"
+            args.append(min_volume)
+            param_idx += 1
+
+        if min_resolved is not None:
+            query += f" AND ws.resolved_count >= ${param_idx}"
+            args.append(min_resolved)
+            param_idx += 1
+
+        if min_realized_pnl is not None:
+            query += f" AND COALESCE(tw.realized_pnl, 0) >= ${param_idx}"
+            args.append(min_realized_pnl)
+            param_idx += 1
+
+        if min_active_days is not None:
+            query += f" AND ws.active_days >= ${param_idx}"
+            args.append(min_active_days)
+            param_idx += 1
+
+        if search:
+            query += f" AND ws.address ILIKE ${param_idx}"
+            args.append(f"%{search}%")
+            param_idx += 1
+
+        query += f" ORDER BY {order_col} DESC NULLS LAST"
+        query += f" LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        args.extend([limit, offset])
+
+        async with pool.acquire() as conn:
+            count_sql = "SELECT COUNT(*) FROM (" + query.rsplit(" ORDER BY", 1)[0] + ") sub"
+            count_args = args[:-2]
+            total_count = await conn.fetchval(count_sql, *count_args)
+            rows = await conn.fetch(query, *args)
 
     data = [dict(r) for r in rows]
     result = {"wallets": data, "total_count": total_count}
     _cache[cache_key] = {"time": time.time(), "data": result}
     return result
+
+
+# ---------------------------------------------------------------------------
+# MIGHT COOK WALLETS
+# ---------------------------------------------------------------------------
+
+@router.get("/might-cook")
+async def get_might_cook_wallets(
+    request: Request,
+    sort_by: str = "deposited_at",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Wallets with deposit >= $100k and 0 trades - potential insiders."""
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    allowed_sorts = {"deposited_at": "wd.deposited_at", "amount_usdc": "wd.amount_usdc"}
+    order_col = allowed_sorts.get(sort_by, "wd.deposited_at")
+
+    query = (
+        "SELECT wd.wallet_address, wd.amount_usdc, wd.deposited_at, wd.tx_hash, "
+        "COALESCE(tw.total_pnl, 0) as total_pnl, "
+        "COALESCE(tw.website_pnl, 0) as website_pnl, "
+        "COALESCE(tw.balance, 0) as balance, "
+        "COALESCE(tw.position_value, 0) as position_value, "
+        "COALESCE(tw.resolved_count, 0) as resolved_count, "
+        "tw.username, wt.category, wt.subcategory "
+        "FROM wallet_deposits wd "
+        "LEFT JOIN tracked_wallets tw ON wd.wallet_address = tw.address "
+        "LEFT JOIN wallet_tags wt ON wd.wallet_address = wt.address "
+        "WHERE wd.is_might_cook = TRUE "
+        f"ORDER BY {order_col} DESC NULLS LAST "
+        "LIMIT $1 OFFSET $2"
+    )
+
+    async with pool.acquire() as conn:
+        total_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM wallet_deposits WHERE is_might_cook = TRUE"
+        )
+        rows = await conn.fetch(query, limit, offset)
+
+    return {"wallets": [dict(r) for r in rows], "total_count": total_count}
+
+
+# ---------------------------------------------------------------------------
+# SUBCATEGORIES (for filter dropdown)
+# ---------------------------------------------------------------------------
+
+@router.get("/subcategories")
+async def get_subcategories(
+    request: Request,
+    category: Optional[str] = None,
+) -> dict[str, Any]:
+    """Return distinct subcategories for a given category from wallet_tags."""
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    if not category or category.lower() == "all":
+        return {"subcategories": []}
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT subcategory FROM wallet_tags WHERE category ILIKE $1 AND subcategory IS NOT NULL ORDER BY subcategory",
+            category,
+        )
+
+    return {"subcategories": [r["subcategory"] for r in rows]}
+
+
+# ---------------------------------------------------------------------------
+# GLOBAL WALLET LIST (with source_type + dormancy filters)
+# ---------------------------------------------------------------------------
+
+@router.get("/global-wallets")
+async def get_global_wallet_list(
+    request: Request,
+    sort_by: str = "total_pnl",
+    limit: int = 50,
+    offset: int = 0,
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    source: Optional[str] = None,
+    include_dormant: bool = True,
+    filter_tier: Optional[str] = None,
+    filter_category: Optional[str] = None,
+    filter_subcategory: Optional[str] = None,
+) -> dict[str, Any]:
+    """All tracked wallets with source type and dormancy info."""
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    cat_upper = (category or "").upper().strip()
+    use_category = cat_upper and cat_upper in VALID_CATEGORIES and cat_upper != "OVERALL"
+
+    # Always join wallet_stats (for tier) and wallet_tags (for category/subcategory)
+    if use_category:
+        order_col = {
+            "total_pnl": "COALESCE(wcs.total_pnl, 0)",
+            "win_rate": "COALESCE(wcs.win_rate, 0)",
+            "roi_pct": "COALESCE(wcs.roi_pct, 0)",
+            "total_volume": "COALESCE(wcs.total_volume, 0)",
+            "resolved_count": "COALESCE(wcs.resolved_count, 0)",
+            "website_pnl": "COALESCE(tw.website_pnl, 0)",
+        }.get(sort_by, "COALESCE(wcs.total_pnl, 0)")
+        query = (
+            "SELECT tw.address, tw.username, tw.source_type, tw.is_dormant, "
+            "tw.last_trade_at, tw.added_at, tw.track_count, "
+            "COALESCE(wcs.total_pnl, 0) as total_pnl, "
+            "COALESCE(wcs.win_rate, 0) as win_rate, "
+            "COALESCE(wcs.roi_pct, 0) as roi_pct, "
+            "COALESCE(wcs.total_volume, 0) as total_volume, "
+            "COALESCE(wcs.resolved_count, 0) as resolved_count, "
+            "COALESCE(tw.website_pnl, 0) as website_pnl, "
+            "COALESCE(tw.website_volume, 0) as website_volume, "
+            "COALESCE(tw.position_value, 0) as position_value, "
+            "wt.category, wt.subcategory, $1 as active_category "
+            "FROM tracked_wallets tw "
+            "LEFT JOIN wallet_stats ws ON tw.address=ws.address "
+            "LEFT JOIN wallet_category_stats wcs ON tw.address=wcs.address AND wcs.category ILIKE $1 "
+            "LEFT JOIN wallet_tags wt ON tw.address=wt.address "
+            "WHERE wcs.address IS NOT NULL"
+        )
+        args: list[Any] = [cat_upper]
+    else:
+        order_col = {
+            "total_pnl": "COALESCE(ws.total_pnl, 0)",
+            "win_rate": "ws.win_rate",
+            "roi_pct": "ws.roi_pct",
+            "total_volume": "ws.total_volume",
+            "resolved_count": "ws.resolved_count",
+            "website_pnl": "COALESCE(tw.website_pnl, 0)",
+            "last_trade_at": "tw.last_trade_at",
+        }.get(sort_by, "COALESCE(ws.total_pnl, 0)")
+        query = (
+            "SELECT tw.address, tw.username, tw.source_type, tw.is_dormant, "
+            "tw.last_trade_at, tw.added_at, tw.track_count, "
+            "COALESCE(ws.total_pnl, 0) as total_pnl, "
+            "ws.win_rate, ws.roi_pct, "
+            "COALESCE(ws.total_volume, 0) as total_volume, "
+            "ws.resolved_count, ws.winning_count, "
+            "COALESCE(tw.website_pnl, 0) as website_pnl, "
+            "COALESCE(tw.website_volume, 0) as website_volume, "
+            "COALESCE(tw.position_value, 0) as position_value, "
+            "wt.category, wt.subcategory, NULL as active_category "
+            "FROM tracked_wallets tw "
+            "LEFT JOIN wallet_stats ws ON tw.address=ws.address "
+            "LEFT JOIN wallet_tags wt ON tw.address=wt.address "
+            "WHERE 1=1"
+        )
+        args = []
+
+    if not include_dormant:
+        query += " AND (tw.is_dormant = FALSE OR tw.is_dormant IS NULL)"
+    if source and source in ("deposit", "trade", "manual", "leaderboard"):
+        query += f" AND tw.source_type = ${len(args)+1}"
+        args.append(source)
+    if search:
+        query += f" AND (tw.address ILIKE ${len(args)+1} OR tw.username ILIKE ${len(args)+1})"
+        args.append(f"%{search}%")
+    if filter_tier and filter_tier.lower() != "all":
+        query += f" AND ws.tier = ${len(args)+1}"
+        args.append(filter_tier)
+    if filter_category and filter_category.lower() != "all":
+        query += f" AND wt.category = ${len(args)+1}"
+        args.append(filter_category)
+    if filter_subcategory and filter_subcategory.lower() != "all":
+        query += f" AND wt.subcategory = ${len(args)+1}"
+        args.append(filter_subcategory)
+
+    query += f" ORDER BY {order_col} DESC NULLS LAST"
+    query += f" LIMIT ${len(args)+1} OFFSET ${len(args)+2}"
+    args.extend([limit, offset])
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *args)
+        # Count query with same joins and filters
+        count_query = (
+            "SELECT COUNT(*) FROM tracked_wallets tw "
+            "LEFT JOIN wallet_stats ws ON tw.address=ws.address "
+            "LEFT JOIN wallet_tags wt ON tw.address=wt.address "
+        )
+        if use_category:
+            count_query += " LEFT JOIN wallet_category_stats wcs ON tw.address=wcs.address AND wcs.category=$1 "
+        count_query += " WHERE 1=1"
+        count_args: list[Any] = []
+        if use_category:
+            count_args.append(cat_upper)
+            count_query += f" AND wcs.address IS NOT NULL"
+        if not include_dormant:
+            count_query += " AND (tw.is_dormant = FALSE OR tw.is_dormant IS NULL)"
+        if source and source in ("deposit", "trade", "manual", "leaderboard"):
+            count_query += f" AND tw.source_type = ${len(count_args)+1}"
+            count_args.append(source)
+        if search:
+            count_query += f" AND (tw.address ILIKE ${len(count_args)+1} OR tw.username ILIKE ${len(count_args)+1})"
+            count_args.append(f"%{search}%")
+        if filter_tier and filter_tier.lower() != "all":
+            count_query += f" AND ws.tier = ${len(count_args)+1}"
+            count_args.append(filter_tier)
+        if filter_category and filter_category.lower() != "all":
+            count_query += f" AND wt.category = ${len(count_args)+1}"
+            count_args.append(filter_category)
+        if filter_subcategory and filter_subcategory.lower() != "all":
+            count_query += f" AND wt.subcategory = ${len(count_args)+1}"
+            count_args.append(filter_subcategory)
+        total_count = await conn.fetchval(count_query, *count_args)
+
+    return {"wallets": [dict(r) for r in rows], "total_count": total_count}
+
+
+# ---------------------------------------------------------------------------
+# CURATED WALLET LIST
+# ---------------------------------------------------------------------------
+
+@router.get("/curated-wallets")
+async def get_curated_wallet_list(
+    request: Request,
+    sort_by: str = "total_pnl",
+    limit: int = 50,
+    offset: int = 0,
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    window: Optional[int] = None,
+    filter_tier: Optional[str] = None,
+    filter_category: Optional[str] = None,
+    filter_subcategory: Optional[str] = None,
+    min_roi: Optional[float] = None,
+    max_roi: Optional[float] = None,
+    min_pnl: Optional[float] = None,
+    max_pnl: Optional[float] = None,
+    min_wins: Optional[int] = None,
+    max_wins: Optional[int] = None,
+    min_win_rate: Optional[float] = None,
+    max_win_rate: Optional[float] = None,
+) -> dict[str, Any]:
+    """Quality wallets meeting curated criteria, with category filtering."""
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    cat_upper = (category or "").upper().strip()
+    use_category = cat_upper and cat_upper in VALID_CATEGORIES and cat_upper != "OVERALL"
+
+    # Windowed sourcing: when a whitelisted window is requested, every metric is
+    # served from the precomputed wallet_window_<win> table for the relevant
+    # category. `win` comes ONLY from the validated int (never raw user input).
+    win = window if window in (100, 300, 800, 1500, 2500) else None
+    win_cat = cat_upper if use_category else "OVERALL"
+
+    if use_category:
+        order_col = {
+            "total_pnl": "COALESCE(wcs.total_pnl, 0)",
+            "win_rate": "COALESCE(wcs.win_rate, 0)",
+            "roi_pct": "COALESCE(wcs.roi_pct, 0)",
+            "total_volume": "COALESCE(wcs.total_volume, 0)",
+            "resolved_count": "COALESCE(wcs.resolved_count, 0)",
+        }.get(sort_by, "COALESCE(wcs.total_pnl, 0)")
+        args: list[Any] = [cat_upper]
+        if win:
+            args.append(win_cat)
+            _wp = len(args)
+            win_tbl = f"wallet_window_{win}"
+            win_join = (
+                f" LEFT JOIN {win_tbl} ww ON tw.address=ww.address "
+                f"AND ww.category=${_wp} "
+            )
+            metric_select = (
+                "COALESCE(ww.pnl, 0) as total_pnl, "
+                "COALESCE(ww.win_rate, 0) as win_rate, "
+                "COALESCE(ww.roi_pct, 0) as roi_pct, "
+                "COALESCE(ww.volume, 0) as total_volume, "
+                "COALESCE(ww.resolved_count, 0) as resolved_count, "
+                "COALESCE(ww.winning_count, 0) as winning_count, "
+                "ww.last_active as last_active, "
+            )
+        else:
+            win_join = ""
+            metric_select = (
+                "COALESCE(wcs.total_pnl, 0) as total_pnl, "
+                "COALESCE(wcs.win_rate, 0) as win_rate, "
+                "COALESCE(wcs.roi_pct, 0) as roi_pct, "
+                "COALESCE(wcs.total_volume, 0) as total_volume, "
+                "COALESCE(wcs.resolved_count, 0) as resolved_count, "
+                "COALESCE(wcs.winning_count, 0) as winning_count, "
+            )
+        query = (
+            "SELECT tw.address, tw.username, tw.source_type, tw.is_dormant, "
+            "tw.last_trade_at, tw.curated_at, "
+            "tw.last_checked_for_curated, tw.track_count, "
+            + metric_select +
+            "COALESCE(tw.website_pnl, 0) as website_pnl, "
+            "COALESCE(tw.position_value, 0) as position_value, "
+            "ws.tier, "
+            "wt.category, wt.subcategory, $1 as active_category "
+            "FROM tracked_wallets tw "
+            "LEFT JOIN wallet_stats ws ON tw.address=ws.address "
+            "LEFT JOIN wallet_category_stats wcs ON tw.address=wcs.address AND wcs.category ILIKE $1 "
+            "LEFT JOIN wallet_tags wt ON tw.address=wt.address "
+            + win_join +
+            "WHERE tw.is_curated=TRUE AND tw.is_dormant=FALSE AND wcs.address IS NOT NULL"
+        )
+    else:
+        order_col = {
+            "total_pnl": "COALESCE(ws.total_pnl, 0)",
+            "win_rate": "ws.win_rate",
+            "roi_pct": "ws.roi_pct",
+            "total_volume": "ws.total_volume",
+            "resolved_count": "ws.resolved_count",
+            "winning_count": "ws.winning_count",
+            "website_pnl": "COALESCE(tw.website_pnl, 0)",
+        }.get(sort_by, "COALESCE(ws.total_pnl, 0)")
+        args = []
+        if win:
+            args.append(win_cat)
+            _wp = len(args)
+            win_tbl = f"wallet_window_{win}"
+            win_join = (
+                f" LEFT JOIN {win_tbl} ww ON tw.address=ww.address "
+                f"AND ww.category=${_wp} "
+            )
+            metric_select = (
+                "COALESCE(ww.pnl, 0) as total_pnl, "
+                "COALESCE(ww.win_rate, 0) as win_rate, "
+                "COALESCE(ww.roi_pct, 0) as roi_pct, "
+                "COALESCE(ww.volume, 0) as total_volume, "
+                "COALESCE(ww.resolved_count, 0) as resolved_count, "
+                "COALESCE(ww.winning_count, 0) as winning_count, "
+                "ww.last_active as last_active, "
+            )
+        else:
+            win_join = ""
+            metric_select = (
+                "COALESCE(ws.total_pnl, 0) as total_pnl, "
+                "ws.win_rate, ws.roi_pct, "
+                "COALESCE(ws.total_volume, 0) as total_volume, "
+                "ws.resolved_count, ws.winning_count, "
+            )
+        query = (
+            "SELECT tw.address, tw.username, tw.source_type, tw.is_dormant, "
+            "tw.last_trade_at, tw.curated_at, "
+            "tw.last_checked_for_curated, tw.track_count, "
+            + metric_select +
+            "COALESCE(tw.website_pnl, 0) as website_pnl, "
+            "COALESCE(tw.position_value, 0) as position_value, "
+            "ws.tier, "
+            "wt.category, wt.subcategory, NULL as active_category "
+            "FROM tracked_wallets tw "
+            "LEFT JOIN wallet_stats ws ON tw.address=ws.address "
+            "LEFT JOIN wallet_tags wt ON tw.address=wt.address "
+            + win_join +
+            "WHERE tw.is_curated=TRUE AND (tw.is_dormant=FALSE OR tw.is_dormant IS NULL)"
+        )
+
+    # When windowed, ordering must also come from the window table.
+    if win:
+        _pnl_sorts = {"total_pnl", "pnl_100", "pnl_300", "pnl_800", "pnl_1500", "pnl_2500"}
+        _ww_order = {
+            "win_rate": "COALESCE(ww.win_rate, 0)",
+            "roi_pct": "COALESCE(ww.roi_pct, 0)",
+            "total_volume": "COALESCE(ww.volume, 0)",
+            "resolved_count": "COALESCE(ww.resolved_count, 0)",
+            "winning_count": "COALESCE(ww.winning_count, 0)",
+        }
+        if sort_by in _pnl_sorts:
+            order_col = "COALESCE(ww.pnl, 0)"
+        elif sort_by in _ww_order:
+            order_col = _ww_order[sort_by]
+
+    if search:
+        query += f" AND (tw.address ILIKE ${len(args)+1} OR tw.username ILIKE ${len(args)+1})"
+        args.append(f"%{search}%")
+    if filter_tier and filter_tier.lower() != "all":
+        query += f" AND ws.tier = ${len(args)+1}"
+        args.append(filter_tier)
+    if filter_category and filter_category.lower() != "all":
+        query += f" AND wt.category ILIKE ${len(args)+1}"
+        args.append(filter_category)
+    if filter_subcategory and filter_subcategory.lower() != "all":
+        query += f" AND wt.subcategory = ${len(args)+1}"
+        args.append(filter_subcategory)
+    if min_roi is not None:
+        query += f" AND ws.roi_pct >= ${len(args)+1}"
+        args.append(min_roi)
+    if max_roi is not None:
+        query += f" AND ws.roi_pct <= ${len(args)+1}"
+        args.append(max_roi)
+    if min_pnl is not None:
+        query += f" AND COALESCE(ws.total_pnl, 0) >= ${len(args)+1}"
+        args.append(min_pnl)
+    if max_pnl is not None:
+        query += f" AND COALESCE(ws.total_pnl, 0) <= ${len(args)+1}"
+        args.append(max_pnl)
+    if min_wins is not None:
+        query += f" AND ws.winning_count >= ${len(args)+1}"
+        args.append(min_wins)
+    if max_wins is not None:
+        query += f" AND ws.winning_count <= ${len(args)+1}"
+        args.append(max_wins)
+    if min_win_rate is not None:
+        query += f" AND ws.win_rate >= ${len(args)+1}"
+        args.append(min_win_rate)
+    if max_win_rate is not None:
+        query += f" AND ws.win_rate <= ${len(args)+1}"
+        args.append(max_win_rate)
+
+    query += f" ORDER BY {order_col} DESC NULLS LAST"
+    query += f" LIMIT ${len(args)+1} OFFSET ${len(args)+2}"
+    args.extend([limit, offset])
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *args)
+        # Build count query with same filters
+        count_query = (
+            "SELECT COUNT(*) FROM tracked_wallets tw "
+            "LEFT JOIN wallet_stats ws ON tw.address=ws.address "
+            "LEFT JOIN wallet_tags wt ON tw.address=wt.address "
+        )
+        if use_category:
+            count_query += " LEFT JOIN wallet_category_stats wcs ON tw.address=wcs.address AND wcs.category=$1 "
+        count_query += " WHERE tw.is_curated=TRUE"
+        count_args: list[Any] = []
+        if use_category:
+            count_args.append(cat_upper)
+            count_query += " AND tw.is_dormant=FALSE AND wcs.address IS NOT NULL"
+        else:
+            count_query += " AND (tw.is_dormant=FALSE OR tw.is_dormant IS NULL)"
+        if search:
+            count_query += f" AND (tw.address ILIKE ${len(count_args)+1} OR tw.username ILIKE ${len(count_args)+1})"
+            count_args.append(f"%{search}%")
+        if filter_tier and filter_tier.lower() != "all":
+            count_query += f" AND ws.tier = ${len(count_args)+1}"
+            count_args.append(filter_tier)
+        if filter_category and filter_category.lower() != "all":
+            count_query += f" AND wt.category = ${len(count_args)+1}"
+            count_args.append(filter_category)
+        if filter_subcategory and filter_subcategory.lower() != "all":
+            count_query += f" AND wt.subcategory = ${len(count_args)+1}"
+            count_args.append(filter_subcategory)
+        if min_roi is not None:
+            count_query += f" AND ws.roi_pct >= ${len(count_args)+1}"
+            count_args.append(min_roi)
+        if max_roi is not None:
+            count_query += f" AND ws.roi_pct <= ${len(count_args)+1}"
+            count_args.append(max_roi)
+        if min_pnl is not None:
+            count_query += f" AND COALESCE(ws.total_pnl, 0) >= ${len(count_args)+1}"
+            count_args.append(min_pnl)
+        if max_pnl is not None:
+            count_query += f" AND COALESCE(ws.total_pnl, 0) <= ${len(count_args)+1}"
+            count_args.append(max_pnl)
+        if min_wins is not None:
+            count_query += f" AND ws.winning_count >= ${len(count_args)+1}"
+            count_args.append(min_wins)
+        if max_wins is not None:
+            count_query += f" AND ws.winning_count <= ${len(count_args)+1}"
+            count_args.append(max_wins)
+        if min_win_rate is not None:
+            count_query += f" AND ws.win_rate >= ${len(count_args)+1}"
+            count_args.append(min_win_rate)
+        if max_win_rate is not None:
+            count_query += f" AND ws.win_rate <= ${len(count_args)+1}"
+            count_args.append(max_win_rate)
+        total_count = await conn.fetchval(count_query, *count_args)
+
+    return {"wallets": [dict(r) for r in rows], "total_count": total_count}
