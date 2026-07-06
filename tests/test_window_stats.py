@@ -40,3 +40,21 @@ def test_window_smaller_than_count():
 def test_empty():
     out = compute_category_window_stats([], [100], _classify)
     assert out == {}
+
+from src.workers.window_stats import select_headline_pnl
+
+def test_headline_uses_leaderboard_when_present():
+    r = select_headline_pnl(website={"pnl": 1234.5, "volume": 999.0},
+                            computed_pnl=10.0, computed_volume=20.0)
+    assert r == {"pnl": 1234.5, "volume": 999.0, "pnl_source": "leaderboard"}
+
+def test_headline_falls_back_when_absent():
+    r = select_headline_pnl(website=None, computed_pnl=10.0, computed_volume=20.0)
+    assert r == {"pnl": 10.0, "volume": 20.0, "pnl_source": "computed"}
+
+def test_headline_leaderboard_zero_still_leaderboard():
+    # A genuine break-even wallet on the leaderboard keeps leaderboard source
+    r = select_headline_pnl(website={"pnl": 0.0, "volume": 0.0},
+                            computed_pnl=99.0, computed_volume=99.0)
+    assert r["pnl_source"] == "leaderboard"
+    assert r["pnl"] == 0.0

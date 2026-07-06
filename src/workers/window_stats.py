@@ -81,3 +81,14 @@ def compute_category_window_stats(
         for cat, positions in by_cat.items():
             result[(cat, window)] = _aggregate(positions[:window])
     return result
+
+
+def select_headline_pnl(website: dict | None, computed_pnl: float, computed_volume: float) -> dict:
+    """Headline pnl/volume come from the leaderboard when the wallet appears on it
+    (presence of the `website` object), else from our computed realized+unrealized.
+    Presence — not `!= 0` — distinguishes a real break-even from a missing fetch."""
+    if website is not None:
+        return {"pnl": _parse(website.get("pnl")),
+                "volume": _parse(website.get("volume")),
+                "pnl_source": "leaderboard"}
+    return {"pnl": computed_pnl, "volume": computed_volume, "pnl_source": "computed"}
