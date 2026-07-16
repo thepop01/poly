@@ -1,0 +1,430 @@
+"""
+Wallet Trade History Worker
+
+Vets UNCLASSIFIED wallets_v2 rows (the v2 discovery queue, fed by
+trade_tracker / deposit_tracker / manual adds) and assigns a tier:
+  - Balance = 0                     → DEAD
+  - 0 < balance < $1k               → LOW_BALANCE
+  - Balance ≥ $1k, never traded     → NEW
+  - Balance ≥ $1k, stale > 30d      → STANDARD + is_dormant
+  - Balance ≥ $1k, recent trade     → STANDARD (global list)
+
+Assigning the tier is what removes a wallet from the queue.
+Runs on a schedule (every 60s recommended).
+"""
+
+import asyncio
+import asyncpg
+import aiohttp
+import os
+import logging
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
+
+BATCH_SIZE = 100       # wallets to process per run
+
+
+def _parse(val, default=0.0) -> float:
+    try:
+        return float(val or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def canonical_source(queue_source: str) -> str:
+    """Map queue source strings ('trade_tracker', 'deposit_tracker',
+    'Manual Queue', ...) to the canonical wallet_sources_v2 values."""
+    s = (queue_source or "").lower()
+    if "deposit" in s:
+        return "deposit"
+    if "trade" in s or "whale" in s:
+        return "trade"
+    if "leaderboard" in s:
+        return "leaderboard"
+    return "manual"
+
+
+async def fetch_positions(session: aiohttp.ClientSession, address: str) -> list[dict]:
+    """Fetch all positions for a wallet from Polymarket Data API with pagination."""
+    all_positions = []
+    offset = 0
+    limit = 500
+
+    while True:
+        url = f"https://data-api.polymarket.com/positions?user={address}&limit={limit}&offset={offset}"
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if not data:
+                        break
+                    if not isinstance(data, list) or (len(data) > 0 and not isinstance(data[0], dict)):
+                        break
+                    all_positions.extend(data)
+                    if len(data) < limit:
+                        break
+                    offset += limit
+                else:
+                    break
+        except Exception as e:
+            logger.warning(f"Failed to fetch positions for {address} at offset {offset}: {e}")
+            break
+
+    return all_positions
+
+
+async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -> list[dict]:
+    """Fetch all resolved/closed positions for a wallet."""
+    all_closed = []
+    offset = 0
+    limit = 50
+
+    while True:
+        url = f"https://data-api.polymarket.com/closed-positions?user={address}&limit={limit}&offset={offset}"
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if not data or not isinstance(data, list):
+                        break
+                    all_closed.extend(data)
+                    if len(data) < limit:
+                        break
+                    offset += limit
+                    if offset > 15000:
+                        break
+                else:
+                    # Skip failed page, continue with next
+                    offset += limit
+                    if offset > 15000:
+                        break
+                    await asyncio.sleep(1)
+        except Exception as e:
+            logger.warning(f"Failed to fetch closed positions for {address} at offset {offset}: {e}")
+            offset += limit
+            if offset > 15000:
+                break
+            await asyncio.sleep(1)
+
+    return all_closed
+
+
+async def _get_tiered(session: aiohttp.ClientSession, url: str) -> list | dict | None:
+    """Helper to fetch from Polymarket with progressive tiered timeouts: 10s, 30s, 60s, 90s, 150s."""
+    timeouts = [10, 30, 60, 90, 150]
+    for i, t in enumerate(timeouts):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=t)) as resp:
+                if resp.status == 429:
+                    await asyncio.sleep(2)
+                    continue
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+        except Exception as e:
+            if i < len(timeouts) - 1:
+                logger.debug(f"Timeout {t}s failed for {url}. Retrying with {timeouts[i+1]}s...")
+                await asyncio.sleep(1)
+                continue
+            logger.warning(f"All tiered timeouts failed for {url}: {e}")
+            return None
+    return None
+
+
+async def fetch_website_pnl(session: aiohttp.ClientSession, address: str) -> dict | None:
+    """Fetch all-time PnL/volume/rank/username from Polymarket's public leaderboard."""
+    url = f"https://data-api.polymarket.com/v1/leaderboard?user={address}&category=OVERALL&timePeriod=ALL"
+    data = await _get_tiered(session, url)
+    if not isinstance(data, list) or not data:
+        return None
+    item = data[0]
+    raw_name = (item.get("userName") or "").strip()[:255]
+    if raw_name.lower().startswith("0x") and len(raw_name) > 10:
+        raw_name = ""
+    return {
+        "pnl": _parse(item.get("pnl")),
+        "volume": _parse(item.get("vol")),
+        "rank": int(item.get("rank") or 0),
+        "username": raw_name,
+    }
+
+
+async def fetch_all_trades(session: aiohttp.ClientSession, address: str) -> list[dict]:
+    """Fetch all historical trades for a wallet from Polymarket Data API (paginated).
+    Uses ?user= param for complete coverage.
+    If the 3,500 trade limit is hit, falls back to Polygonscan deep fetch."""
+    from src.utils.etherscan_client import fetch_historical_trades_polygonscan
+
+    all_trades = []
+    limit = 500
+    needs_deep_fetch = False
+    offset = 0
+
+    while True:
+        if offset >= 3000:
+            needs_deep_fetch = True
+            break
+
+        url = f"https://data-api.polymarket.com/trades?user={address}&limit={limit}&offset={offset}"
+        data = await _get_tiered(session, url)
+        if data is None:
+            break
+        if not data:
+            break
+        if isinstance(data, dict) and "error" in data:
+            needs_deep_fetch = True
+            break
+        if not isinstance(data, list) or (len(data) > 0 and not isinstance(data[0], dict)):
+            break
+        
+        all_trades.extend(data)
+        if len(data) < limit:
+            break
+        offset += limit
+
+    if needs_deep_fetch:
+        proxies = set(t.get("proxyWallet") for t in all_trades if t.get("proxyWallet") and isinstance(t.get("proxyWallet"), str))
+        addresses_to_query = [address] + list(proxies)
+        logger.info(f"Wallet {address} hit 3500 trade limit. Falling back to Polygonscan deep fetch with proxies: {list(proxies)}")
+        return await fetch_historical_trades_polygonscan(session, addresses_to_query)
+
+    return all_trades
+
+
+async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
+    """Fetch exact portfolio balance from Alchemy."""
+    from src.utils.alchemy_client import alchemy_get_token_balances, PUSD_CONTRACT
+    try:
+        b = await alchemy_get_token_balances(session, address, [PUSD_CONTRACT])
+        if b and b.get("tokenBalances"):
+            val = b["tokenBalances"][0].get("tokenBalance")
+            if val and val != "0x":
+                return int(val, 16) / 10**6
+    except Exception as e:
+        logger.warning(f"Failed to fetch balance for {address}: {e}")
+    return 0.0
+
+
+async def _fetch_last_trade_dt(session: aiohttp.ClientSession, address: str) -> datetime | None:
+    """Fetch the most recent trade timestamp using the correct ?user= param."""
+    url = f"https://data-api.polymarket.com/trades?user={address}&limit=1&offset=0"
+    data = await _get_tiered(session, url)
+    if isinstance(data, list) and data:
+        ts = data[0].get("timestamp")
+        if ts:
+            return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    return None
+
+
+async def process_batch(conn: asyncpg.Connection, session: aiohttp.ClientSession, wallets: list[dict]):
+    """Vet UNCLASSIFIED wallets: fetch balance + positions + website_pnl,
+    assign a tier. leaderboard_stats picks up promoted wallets via next_check_at."""
+    BALANCE_THRESHOLD = 1000.0
+
+    for item in wallets:
+        address = item["address"]
+        queue_source = item["source"]
+
+        is_leaderboard = queue_source and "leaderboard" in queue_source.lower()
+
+        try:
+            balance = await fetch_balance(session, address)
+            website = await fetch_website_pnl(session, address)
+            last_trade_dt = await _fetch_last_trade_dt(session, address)
+            # Only fetch positions for non-leaderboard wallets
+            positions = [] if is_leaderboard else await fetch_positions(session, address)
+        except Exception as e:
+            # Leave the wallet UNCLASSIFIED — it will be retried next run
+            # instead of being misclassified as DEAD on a transient failure.
+            logger.warning(f"Error fetching data for wallet {address[:10]}..., will retry: {e}")
+            continue
+
+        # Compute position_value from open positions
+        position_value = 0.0
+        for pos in (positions or []):
+            curr_val = _parse(pos.get("currentValue"))
+            if curr_val > 0:
+                position_value += curr_val
+
+        # Use website_pnl/volume if available, else fallback to 0
+        website_pnl = website["pnl"] if website else 0.0
+        website_volume = website["volume"] if website else 0.0
+        website_rank = website["rank"] if website else None
+        username = website["username"] if website else ""
+
+        # ── decide promotion ──
+        # Vetting gate: balance + last_trade_at determine global list entry
+
+        if balance <= 0:
+            # Zero balance → mark as DEAD
+            await conn.execute("""
+                INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
+                VALUES ($1, $2, 'DEAD', 'zero balance', FALSE, $3, NOW(), NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'DEAD' END,
+                    tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'zero balance' END,
+                    username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
+                    last_trade_at = GREATEST(COALESCE(wallets_v2.last_trade_at, EXCLUDED.last_trade_at), EXCLUDED.last_trade_at),
+                    is_dormant = FALSE,
+                    updated_at = NOW()
+            """, address, username, last_trade_dt)
+            logger.info(f"Zero balance: {address[:10]}... marking DEAD")
+            continue
+
+        if balance < BALANCE_THRESHOLD:
+            # 0 < balance < $1k → LOW_BALANCE tier
+            await conn.execute("""
+                INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
+                VALUES ($1, $2, 'LOW_BALANCE', 'balance < $1k at vetting', FALSE, $3, NOW(), NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'LOW_BALANCE' END,
+                    tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'balance < $1k at vetting' END,
+                    username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
+                    last_trade_at = GREATEST(COALESCE(wallets_v2.last_trade_at, EXCLUDED.last_trade_at), EXCLUDED.last_trade_at),
+                    is_dormant = FALSE,
+                    updated_at = NOW()
+            """, address, username, last_trade_dt)
+            logger.debug(f"Low balance: {address[:10]}... balance={balance:.0f} → LOW_BALANCE")
+            continue
+
+        # Balance > $1k — check last trade recency
+        has_trades = last_trade_dt is not None
+        now_utc = datetime.now(timezone.utc)
+
+        if not has_trades:
+            # Balance > $1k but no trades → New Wallets (Might Cook badge)
+            await conn.execute("""
+                INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
+                VALUES ($1, $2, 'NEW', 'balance >= $1k, 0 trades', FALSE, NULL, NOW(), NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'NEW' END,
+                    tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'balance >= $1k, 0 trades' END,
+                    username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
+                    is_dormant = FALSE,
+                    updated_at = NOW()
+            """, address, username)
+            logger.info(f"New wallet no trades: {address[:10]}... balance={balance:.0f} → NEW (Might Cook)")
+            continue
+
+        is_stale = (now_utc - last_trade_dt) >= timedelta(days=30)
+
+        if is_stale:
+            # Stale → STANDARD but dormant (hibernated)
+            await conn.execute("""
+                INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
+                VALUES ($1, $2, 'STANDARD', 'hibernated: >30d inactive', TRUE, $3, NOW(), NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'STANDARD' END,
+                    tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'hibernated: >30d inactive' END,
+                    username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
+                    last_trade_at = GREATEST(COALESCE(wallets_v2.last_trade_at, EXCLUDED.last_trade_at), EXCLUDED.last_trade_at),
+                    is_dormant = TRUE,
+                    updated_at = NOW()
+            """, address, username, last_trade_dt)
+            logger.info(f"Hibernating stale wallet: {address[:10]}... balance={balance:.0f} last_trade={last_trade_dt}")
+            continue
+
+        # ── Passed vetting: balance > $1k + recent trade → add to global list ──
+        logger.info(f"Promoting {address[:10]}... balance={balance:.0f} pos_val={position_value:.0f} pnl=${website_pnl:.0f} vol=${website_volume:.0f}")
+
+        await conn.execute("""
+            INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
+            VALUES ($1, $2, 'STANDARD', 'passed vetting', FALSE, $3, NOW(), NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'STANDARD' END,
+                tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'passed vetting' END,
+                username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
+                last_trade_at = GREATEST(COALESCE(wallets_v2.last_trade_at, EXCLUDED.last_trade_at), EXCLUDED.last_trade_at),
+                is_dormant = FALSE,
+                updated_at = NOW()
+        """, address, username, last_trade_dt)
+
+        await conn.execute("""
+            INSERT INTO wallet_sources_v2 (address, source, source_detail, spotted_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (address, source) DO NOTHING
+        """, address, canonical_source(queue_source), queue_source if queue_source else 'Unknown')
+
+        await conn.execute("""
+            INSERT INTO wallet_metrics_v2 (
+                address, balance, deposits, withdrawals, position_value,
+                pm_pnl, pm_volume, pm_rank, computed_at
+            ) VALUES ($1, $2, 0, 0, $3, $4, $5, $6, NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                balance = EXCLUDED.balance,
+                position_value = EXCLUDED.position_value,
+                pm_pnl = EXCLUDED.pm_pnl,
+                pm_volume = EXCLUDED.pm_volume,
+                pm_rank = EXCLUDED.pm_rank,
+                computed_at = NOW()
+        """, address, balance, position_value, website_pnl, website_volume, website_rank)
+
+
+async def run_discovery(db_url: str = DB_URL):
+    """Main entry point for the discovery worker."""
+    logger.info("Starting wallet discovery worker...")
+    conn = await asyncpg.connect(db_url)
+
+    # The v2 discovery queue: UNCLASSIFIED wallets awaiting vetting
+    rows = await conn.fetch(
+        """
+        SELECT address, tier_reason AS source FROM wallets_v2
+        WHERE tier = 'UNCLASSIFIED'
+          AND (next_check_at IS NULL OR next_check_at <= NOW())
+        ORDER BY added_at ASC LIMIT $1
+        """,
+        BATCH_SIZE
+    )
+    wallets = [{"address": r["address"], "source": r["source"]} for r in rows]
+    logger.info(f"Found {len(wallets)} wallets to evaluate.")
+
+    if wallets:
+        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
+            await process_batch(conn, session, wallets)
+
+    await conn.close()
+    logger.info("Discovery worker finished.")
+
+
+async def main():
+    """Infinite loop for the orchestrator."""
+    import signal
+    shutdown = asyncio.Event()
+
+    def _signal_handler():
+        logger.info("Shutdown signal received")
+        shutdown.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _signal_handler)
+        except NotImplementedError:
+            pass
+
+    logger.info("Starting Wallet Queue Processor (interval=60s)")
+    while not shutdown.is_set():
+        try:
+            await run_discovery()
+        except Exception:
+            logger.exception("Error in wallet discovery queue processor")
+
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            pass
+    logger.info("Wallet Queue Processor shut down cleanly")
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    asyncio.run(main())

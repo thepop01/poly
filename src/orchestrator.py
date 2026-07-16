@@ -11,12 +11,12 @@ import signal
 import sys
 import traceback
 
-from src.workers.whale_watcher import _standalone as whale_watcher_main
-from src.workers.deposit_watcher import run_deposit_watcher as deposit_watcher_main
-from src.workers.wallet_discovery import main as discovery_queue_processor_main
-from src.workers.leaderboard_stats import main as leaderboard_stats_main
-from src.workers.global_discovery import run_global_discovery as global_discovery_main
+from src.workers.trade_tracker import _standalone as trade_tracker_main
+from src.workers.wallet_trade_history import main as wallet_trade_history_main
+from src.workers.leaderboard_stats_v2 import run_leaderboard_stats_v2 as leaderboard_stats_main
+from src.workers.deposit_tracker import run_deposit_tracker as deposit_tracker_main
 from src.workers.stats_refresher import main as stats_refresher_main
+from src.workers.poly_leaderboard_sync import main as poly_leaderboard_sync_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,11 +117,11 @@ async def main():
 
     internal_workers = [
         (leaderboard_stats_main, "leaderboard_stats"),
-        (whale_watcher_main, "whale_watcher"),
-        (deposit_watcher_main, "deposit_watcher"),
-        (discovery_queue_processor_main, "discovery_queue_processor"),
-        (global_discovery_main, "global_discovery"),
+        (trade_tracker_main, "trade_tracker"),
+        (wallet_trade_history_main, "wallet_trade_history"),
+        (deposit_tracker_main, "deposit_tracker"),
         (stats_refresher_main, "stats_refresher"),
+        (poly_leaderboard_sync_main, "poly_leaderboard_sync"),
     ]
 
     external_bots = [

@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import asyncpg
 import aiohttp
 import os
@@ -6,24 +6,24 @@ import signal
 import logging
 from datetime import datetime, timezone, timedelta
 
-from src.workers.wallet_discovery import fetch_positions, _parse
+from src.workers.wallet_trade_history import fetch_positions, _parse
 from src.utils.alchemy_client import (
     fetch_usdc_deposits,
     fetch_usdc_withdrawals,
     alchemy_get_token_balances,
-    USDC_CONTRACT,
+    PUSD_CONTRACT,
 )
 
 logger = logging.getLogger(__name__)
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
 
-REFRESH_STALE_AFTER_HOURS = 1
+REFRESH_STALE_AFTER_HOURS = 12
 BATCH_SIZE = 100
 POLL_INTERVAL = 600  # run every 10 minutes
 
 async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
     try:
-        b = await alchemy_get_token_balances(session, address, [USDC_CONTRACT])
+        b = await alchemy_get_token_balances(session, address, [PUSD_CONTRACT])
         if b and b.get("tokenBalances"):
             val = b["tokenBalances"][0].get("tokenBalance")
             if val and val != "0x":
@@ -34,26 +34,71 @@ async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
 
 async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.ClientSession):
     stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=REFRESH_STALE_AFTER_HOURS)
+    
+    # Auto-hibernate wallets that haven't traded in 30 days
+    hibernate_cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    await conn.execute("""
+        UPDATE wallets_v2
+        SET is_dormant = TRUE
+        WHERE is_dormant = FALSE AND last_trade_at < $1
+    """, hibernate_cutoff)
+
+    # Reverse: wake wallets that traded again (or whose fake last_trade_at
+    # was nulled — never-traded is NEW, not dormant)
+    await conn.execute("""
+        UPDATE wallets_v2
+        SET is_dormant = FALSE
+        WHERE is_dormant = TRUE
+          AND (last_trade_at IS NULL OR last_trade_at >= $1)
+    """, hibernate_cutoff)
+
+    # Sweep tiers to the canonical model for every wallet with metrics.
+    # CURATED is never auto-demoted; UNCLASSIFIED rows are the vetting
+    # queue owned by wallet_trade_history — don't dequeue them here.
+    await conn.execute("""
+        UPDATE wallets_v2 w
+        SET tier = sub.new_tier, tier_reason = 'stats_refresher reclassify', updated_at = NOW()
+        FROM (
+            SELECT w2.address,
+                CASE
+                    WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) <= 0 THEN 'DEAD'
+                    WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) < 1000 THEN 'LOW_BALANCE'
+                    WHEN w2.last_trade_at IS NULL THEN 'NEW'
+                    ELSE 'STANDARD'
+                END AS new_tier
+            FROM wallets_v2 w2
+            JOIN wallet_metrics_v2 m ON m.address = w2.address
+            WHERE w2.tier NOT IN ('CURATED', 'UNCLASSIFIED')
+        ) sub
+        WHERE sub.address = w.address AND sub.new_tier != w.tier
+    """)
+
+    # Fetch active wallets to refresh
+    # We prioritize wallets that have never been computed, then stale ones.
     rows = await conn.fetch(
-        "SELECT address FROM tracked_wallets WHERE last_indexed < $1 ORDER BY last_indexed ASC LIMIT $2",
+        """
+        SELECT w.address 
+        FROM wallets_v2 w
+        LEFT JOIN wallet_metrics_v2 m ON w.address = m.address
+        WHERE w.is_dormant = FALSE
+          AND (m.computed_at IS NULL OR m.computed_at < $1)
+        ORDER BY m.computed_at ASC NULLS FIRST 
+        LIMIT $2
+        """,
         stale_cutoff, BATCH_SIZE,
     )
     if not rows:
-        logger.info("No stale tracked wallets to refresh.")
+        logger.info("No stale active wallets to refresh.")
         return
 
     wallets = [r["address"] for r in rows]
-    logger.info(f"Refreshing {len(wallets)} stale tracked wallets...")
+    logger.info(f"Refreshing {len(wallets)} stale active wallets...")
     refreshed = 0
 
     for address in wallets:
         try:
             deposits = await fetch_usdc_deposits(session, address)
             withdrawals = await fetch_usdc_withdrawals(session, address)
-
-            if deposits is None or withdrawals is None:
-                logger.warning(f"Skipping {address[:10]}... — could not fetch deposits/withdrawals")
-                continue
 
             positions = await fetch_positions(session, address)
             balance = await fetch_balance(session, address)
@@ -65,15 +110,40 @@ async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.Cli
                 if curr_val > 0:
                     position_value += curr_val
 
+            # Upsert into wallet_metrics_v2
             await conn.execute("""
-                UPDATE tracked_wallets SET
-                    balance          = $2,
-                    deposits         = $3,
-                    withdrawals      = $4,
-                    position_value   = $5,
-                    last_indexed     = NOW()
-                WHERE address = $1
+                INSERT INTO wallet_metrics_v2 (address, balance, deposits, withdrawals, position_value, computed_at)
+                VALUES ($1, $2, $3, $4, $5, NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    balance = EXCLUDED.balance,
+                    deposits = COALESCE(EXCLUDED.deposits, wallet_metrics_v2.deposits),
+                    withdrawals = COALESCE(EXCLUDED.withdrawals, wallet_metrics_v2.withdrawals),
+                    position_value = EXCLUDED.position_value,
+                    computed_at = NOW()
             """, address, balance, deposits, withdrawals, position_value)
+
+            # Reclassify on fresh numbers (canonical model: DEAD /
+            # LOW_BALANCE / NEW / STANDARD; CURATED never auto-demoted,
+            # UNCLASSIFIED stays queued for vetting)
+            await conn.execute("""
+                UPDATE wallets_v2
+                SET tier = CASE
+                        WHEN $2 <= 0 THEN 'DEAD'
+                        WHEN $2 < 1000 THEN 'LOW_BALANCE'
+                        WHEN last_trade_at IS NULL THEN 'NEW'
+                        ELSE 'STANDARD'
+                    END,
+                    tier_reason = 'stats_refresher reclassify',
+                    updated_at = NOW()
+                WHERE address = $1
+                  AND tier NOT IN ('CURATED', 'UNCLASSIFIED')
+                  AND tier != CASE
+                        WHEN $2 <= 0 THEN 'DEAD'
+                        WHEN $2 < 1000 THEN 'LOW_BALANCE'
+                        WHEN last_trade_at IS NULL THEN 'NEW'
+                        ELSE 'STANDARD'
+                    END
+            """, address, balance + position_value)
 
             refreshed += 1
             logger.info(f"Refreshed {address[:10]}... | pos_val={position_value:.0f} bal={balance:.0f}")

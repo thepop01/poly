@@ -17,22 +17,30 @@ import os
 import signal
 import logging
 from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from src.utils.alchemy_client import (
-    fetch_usdc_deposits,
-    fetch_usdc_withdrawals,
+    fetch_capital_metrics,
     alchemy_get_token_balances,
-    USDC_CONTRACT,
+    PUSD_CONTRACT,
 )
 from src.utils.category_classifier import classify_tags, flatten_subcategory
 from src.workers.window_stats import compute_category_window_stats, select_headline_pnl, _parse_end
+from src.workers.wallet_trade_history import fetch_all_trades
 
 logger = logging.getLogger(__name__)
 
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
 POLL_INTERVAL = 300
+BALANCE_THRESHOLD = 1000.0  # $1k minimum balance to qualify for global list
 CONCURRENCY = int(os.environ.get("STATS_WORKER_CONCURRENCY", "10"))
+WALLET_TIMEOUT = int(os.environ.get("STATS_WALLET_TIMEOUT", "600"))
 API_DELAY = 0.03  # 30ms between sequential API calls within a wallet
+SUPABASE_RATE_LIMIT = 30  # 30 calls per minute
+SUPABASE_DELAY = 60.0 / SUPABASE_RATE_LIMIT  # 2 seconds between calls
+_sb_semaphore = None  # Initialized in run_leaderboard_stats
 
 
 def _parse(val, default=0.0):
@@ -49,22 +57,157 @@ def _computed_volume(trades) -> float:
     return v
 
 
+# ── Closed-position persistence ───────────────────────────────────────────
+
+async def get_latest_end_date(conn: asyncpg.Connection, address: str) -> datetime | None:
+    """Get the most recent end_date among stored closed positions."""
+    row = await conn.fetchrow(
+        "SELECT MAX(end_date) as latest FROM wallet_closed_positions WHERE address = $1",
+        address,
+    )
+    return row["latest"] if row and row["latest"] else None
+
+
+async def upsert_closed_positions(conn: asyncpg.Connection, address: str, closed_list: list[dict]):
+    """Persist resolved positions, deduped by (address, condition_id)."""
+    if not closed_list:
+        return
+    rows = []
+    for cp in closed_list:
+        cid = cp.get("conditionId") or ""
+        if not cid:
+            continue
+        title = cp.get("title") or ""
+        rpnl = _parse(cp.get("realizedPnl"))
+        total_bought = _parse(cp.get("totalBought"))
+        avg_price = _parse(cp.get("avgPrice"))
+        avg_sell_price = _parse(cp.get("avgSellPrice"))
+        end_date = _parse_end(cp.get("endDate"))
+        cat, subcat = classify_tags([title]) if title else ("Other", "General")
+        flat_sub = flatten_subcategory(cat, subcat)
+        rows.append((address, cid, title, rpnl, total_bought, avg_price, avg_sell_price, end_date, cat, flat_sub))
+    if not rows:
+        return
+    await conn.executemany("""
+        INSERT INTO wallet_closed_positions
+            (address, condition_id, title, realized_pnl, total_bought, avg_price, avg_sell_price, end_date, category, subcategory)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        ON CONFLICT (address, condition_id) DO UPDATE SET
+            realized_pnl = EXCLUDED.realized_pnl,
+            total_bought = EXCLUDED.total_bought,
+            avg_price = EXCLUDED.avg_price,
+            avg_sell_price = EXCLUDED.avg_sell_price,
+            end_date = EXCLUDED.end_date,
+            title = EXCLUDED.title,
+            category = EXCLUDED.category,
+            subcategory = EXCLUDED.subcategory,
+            fetched_at = NOW()
+    """, rows)
+
+
+async def load_stored_closed_positions(conn: asyncpg.Connection, address: str) -> list[dict]:
+    """Load all stored closed positions for a wallet, formatted as dicts matching the API shape."""
+    rows = await conn.fetch(
+        """SELECT condition_id, title, realized_pnl, total_bought, avg_price, end_date
+           FROM wallet_closed_positions
+           WHERE address = $1
+           ORDER BY end_date DESC NULLS LAST""",
+        address,
+    )
+    return [
+        {
+            "conditionId": r["condition_id"],
+            "title": r["title"],
+            "realizedPnl": float(r["realized_pnl"]),
+            "totalBought": float(r["total_bought"]),
+            "avgPrice": float(r["avg_price"] or 0),
+            "endDate": r["end_date"].isoformat() if r["end_date"] else None,
+        }
+        for r in rows
+    ]
+
+
+async def fetch_incremental_closed_positions(
+    session: aiohttp.ClientSession, address: str, since: datetime
+) -> list[dict]:
+    """Fetch only positions that resolved after `since`. Concurrent batch fetching.
+
+    Assumes the Polymarket API returns positions in descending endDate order.
+    Stops early once a full page is older than `since`.
+    """
+    all_new: list[dict] = []
+    offset = 0
+    limit = 50  # API caps closed-positions at 50/page
+    batch_size = 10  # 10 concurrent pages per batch
+
+    while True:
+        urls = [
+            f"https://data-api.polymarket.com/closed-positions?user={address}&limit={limit}&offset={offset + i * limit}"
+            for i in range(batch_size)
+        ]
+
+        results = await asyncio.gather(
+            *[_get(session, url) for url in urls],
+            return_exceptions=True
+        )
+
+        consecutive_old = 0
+        hit_end = False
+        any_page_empty = False
+        for i, result in enumerate(results):
+            if isinstance(result, Exception) or not result or not isinstance(result, list):
+                continue
+
+            for cp in result:
+                end_date = _parse_end(cp.get("endDate"))
+                if end_date and end_date > since:
+                    all_new.append(cp)
+                    consecutive_old = 0
+                else:
+                    consecutive_old += 1
+
+            if len(result) < limit:
+                any_page_empty = True
+
+        # Full page of old items — we've caught up
+        if consecutive_old >= limit:
+            hit_end = True
+
+        if any_page_empty and not any(
+            isinstance(r, list) and len(r) == limit for r in results
+        ):
+            hit_end = True
+
+        if hit_end:
+            break
+
+        offset += batch_size * limit
+        await asyncio.sleep(API_DELAY)
+
+    return all_new
+
+
 # ── API Fetchers ──────────────────────────────────────────────────────────
 
 async def _get(session: aiohttp.ClientSession, url: str) -> list | dict | None:
-    """Single shared GET helper with retry."""
-    for attempt in range(2):
+    """Single shared GET helper with progressive tiered timeouts: 10s, 30s, 60s, 90s, 150s."""
+    timeouts = [10, 30, 60, 90, 150]
+    for i, t in enumerate(timeouts):
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=t)) as resp:
                 if resp.status == 429:
                     await asyncio.sleep(2)
                     continue
                 if resp.status != 200:
                     return None
                 return await resp.json()
-        except Exception:
-            if attempt == 0:
-                await asyncio.sleep(0.5)
+        except Exception as e:
+            if i < len(timeouts) - 1:
+                logger.debug(f"Timeout {t}s failed for {url}. Retrying with {timeouts[i+1]}s...")
+                await asyncio.sleep(1)
+                continue
+            logger.warning(f"All tiered timeouts failed for {url}: {e}")
+            return None
     return None
 
 
@@ -72,7 +215,8 @@ async def fetch_positions(session: aiohttp.ClientSession, address: str) -> list[
     all_positions = []
     offset = 0
     limit = 500
-    while True:
+    max_positions = 10000
+    while len(all_positions) < max_positions:
         data = await _get(session, f"https://data-api.polymarket.com/positions?user={address}&limit={limit}&offset={offset}")
         if not data or not isinstance(data, list):
             break
@@ -81,30 +225,61 @@ async def fetch_positions(session: aiohttp.ClientSession, address: str) -> list[
             break
         offset += limit
         await asyncio.sleep(API_DELAY)
-    return all_positions
+    return all_positions[:max_positions]
 
 
 async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -> list[dict]:
+    import time
     all_closed = []
     offset = 0
-    limit = 50
-    max_closed = 2500
-    while True:
-        data = await _get(session, f"https://data-api.polymarket.com/closed-positions?user={address}&limit={limit}&offset={offset}")
-        if not data or not isinstance(data, list):
+    limit = 50  # API caps closed-positions at 50/page
+    max_closed = 5000
+    batch_size = 20  # Fetch 20 pages concurrently per batch
+    deadline = time.monotonic() + 120  # 120s max for this function
+
+    while len(all_closed) < max_closed and time.monotonic() < deadline:
+        remaining = max_closed - len(all_closed)
+        pages_to_fetch = min(batch_size, remaining // limit + 1)
+
+        # Build URLs for concurrent fetches
+        urls = [
+            f"https://data-api.polymarket.com/closed-positions?user={address}&limit={limit}&offset={offset + i * limit}"
+            for i in range(pages_to_fetch)
+        ]
+
+        # Fetch all pages concurrently
+        results = await asyncio.gather(
+            *[_get(session, url) for url in urls],
+            return_exceptions=True
+        )
+
+        # Process results in order, skip failed pages
+        hit_end = False
+        any_page_empty = False
+        for i, result in enumerate(results):
+            if isinstance(result, Exception) or not result or not isinstance(result, list):
+                continue
+            all_closed.extend(result)
+            if len(result) < limit:
+                any_page_empty = True
+
+        if any_page_empty and not any(
+            isinstance(r, list) and len(r) == limit for r in results
+        ):
+            hit_end = True
+
+        if hit_end:
             break
-        all_closed.extend(data)
-        if len(data) < limit or len(all_closed) >= max_closed:
-            break
-        offset += limit
+
+        offset += pages_to_fetch * limit
         await asyncio.sleep(API_DELAY)
+
     return all_closed[:max_closed]
 
 
-async def fetch_trades_after(session: aiohttp.ClientSession, address: str, cutoff: datetime) -> list[dict]:
+async def fetch_trades_after(session: aiohttp.ClientSession, address: str, cutoff: datetime, max_trades: int = 2500) -> list[dict]:
     all_trades = []
     limit = 500
-    max_trades = 2500  # Cap to avoid slow wallets blocking the queue
     for role in ("maker", "taker"):
         offset = 0
         while len(all_trades) < max_trades:
@@ -159,7 +334,10 @@ async def fetch_category_pnl(session: aiohttp.ClientSession, address: str, categ
 
 async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
     try:
-        b = await alchemy_get_token_balances(session, address, [USDC_CONTRACT])
+        b = await asyncio.wait_for(
+            alchemy_get_token_balances(session, address, [PUSD_CONTRACT]),
+            timeout=10,
+        )
         if b and b.get("tokenBalances"):
             val = b["tokenBalances"][0].get("tokenBalance")
             if val and val != "0x":
@@ -169,85 +347,352 @@ async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
     return 0.0
 
 
+SUPABASE_URL = "https://gzydspfquuaudqeztorw.supabase.co/functions/v1/public-api"
+SUPABASE_KEY = "psk_d679feca8ad644ddb3ced58992421de0"
+
 PM_CATEGORIES = ["SPORTS", "POLITICS", "CRYPTO", "ESPORTS", "CULTURE", "TECH", "FINANCE", "ECONOMICS", "WEATHER"]
+
+
+async def fetch_supabase_wallet_profile(session: aiohttp.ClientSession, address: str) -> dict | None:
+    """Fetch win_rate, roi, resolved_count, last_trade_at from Supabase PolymarketScan wallet_profile.
+    Rate limited to 30 calls per minute."""
+    global _sb_semaphore
+    if _sb_semaphore is None:
+        _sb_semaphore = asyncio.Semaphore(1)  # Single permit = sequential calls
+    
+    async with _sb_semaphore:
+        try:
+            url = f"{SUPABASE_URL}?endpoint=wallet_profile&address={address}"
+            headers = {"x-api-key": SUPABASE_KEY}
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 429:
+                    logger.warning(f"Supabase rate limited for {address[:10]}..., waiting 60s")
+                    await asyncio.sleep(60)
+                    return None
+                if resp.status != 200:
+                    return None
+                body = await resp.json()
+                data = body.get("data", {})
+                if not data:
+                    return None
+                win_rate = data.get("win_rate")
+                roi = data.get("roi")
+                wins = data.get("wins")
+                losses = data.get("losses")
+                last_trade_at = data.get("last_trade_date")
+                # wallet_profile returns win_rate as 0-100 integer, normalize to 0-1
+                wr = _parse(win_rate) / 100.0 if win_rate is not None else None
+                # Use wins/losses for resolved_count (num_trades is capped at 100k)
+                resolved = int(_parse(wins)) + int(_parse(losses))
+                winning = int(_parse(wins))
+                # Parse last_trade_at if it's a string timestamp
+                last_trade_dt = None
+                if last_trade_at:
+                    try:
+                        if isinstance(last_trade_at, str):
+                            last_trade_dt = datetime.fromisoformat(last_trade_at.replace("Z", "+00:00"))
+                        elif isinstance(last_trade_at, (int, float)):
+                            last_trade_dt = datetime.fromtimestamp(last_trade_at, tz=timezone.utc)
+                    except Exception:
+                        pass
+                return {
+                    "win_rate": wr if wr is not None else None,
+                    "roi_pct": _parse(roi),
+                    "resolved_count": resolved,
+                    "winning_count": winning,
+                    "last_trade_at": last_trade_dt,
+                }
+        except Exception as e:
+            logger.debug(f"Supabase wallet_profile fetch failed for {address[:10]}...: {e}")
+            return None
+        finally:
+            await asyncio.sleep(SUPABASE_DELAY)
 
 
 # ── Compute Functions ─────────────────────────────────────────────────────
 
-def compute_stats(trades, positions, closed_positions, headline_pnl, headline_volume, total_pnl, realized_pnl, unrealized_pnl, start_stats_at):
+
+async def aggregate_and_upsert_positions(conn, address, trades, closed_positions, open_positions):
+    '''Aggregate positions and upsert to wallet_position_outcomes. Trades are ignored.'''
+    pos_map = {} # (conditionId, asset) -> data
+
+    # 1. Process closed positions first (they take precedence)
+    for cp in closed_positions:
+        cid = cp.get('conditionId')
+        asset = cp.get('asset', '')
+        if not cid: continue
+        
+        realized_pnl = _parse(cp.get('realizedPnl'))
+        pos_map[(cid, asset)] = {
+            'outcome': cp.get('outcome', ''),
+            'title': cp.get('title', ''),
+            'opened_at': None,
+            'closed_at': _parse_end(cp.get('endDate')),
+            'status': 'win' if realized_pnl > 0 else 'loss',
+            'avg_buy_price': _parse(cp.get('avgPrice')),
+            'avg_sell_price': _parse(cp.get('avgSellPrice')),
+            'total_bought': _parse(cp.get('totalBought')),
+            'total_sold': 0.0,
+            'realized_pnl': realized_pnl,
+            'n_buys': 0
+        }
+        
+    # 2. Process open positions (skip if already closed)
+    for p in open_positions:
+        cid = p.get('conditionId')
+        asset = p.get('asset', '')
+        if not cid: continue
+        key = (cid, asset)
+        
+        if key in pos_map:
+            # Already closed, skip heuristic
+            continue
+            
+        cur_price = _parse(p.get('curPrice'))
+        
+        # Near-worthless open position heuristic (curPrice < 0.03)
+        status = 'loss' if cur_price < 0.03 else 'open'
+        
+        pos_map[key] = {
+            'outcome': p.get('outcome', ''),
+            'title': p.get('title', ''),
+            'opened_at': None,
+            'closed_at': None,
+            'status': status,
+            'avg_buy_price': _parse(p.get('avgPrice')),
+            'avg_sell_price': 0.0,
+            'total_bought': _parse(p.get('totalBought')),
+            'total_sold': 0.0,
+            'realized_pnl': _parse(p.get('cashPnl')) if status == 'loss' else 0.0,
+            'n_buys': 0
+        }
+
+    # 3. Upsert
+    rows = []
+    for (cid, asset), data in pos_map.items():
+        rows.append((
+            address, cid, asset, data['outcome'], data['title'],
+            data['opened_at'], data['closed_at'], data['status'],
+            data['avg_buy_price'], data['total_bought'], data['total_sold'], 
+            data['realized_pnl'], data['n_buys'], data['avg_sell_price']
+        ))
+
+    if rows:
+        await conn.executemany('''
+            INSERT INTO wallet_position_outcomes
+            (address, condition_id, asset, outcome, title, opened_at, closed_at, status, avg_buy_price, total_bought, total_sold, realized_pnl, n_buy_trades, avg_sell_price)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (address, condition_id, asset) DO UPDATE SET
+                outcome=EXCLUDED.outcome, title=EXCLUDED.title,
+                opened_at=COALESCE(wallet_position_outcomes.opened_at, EXCLUDED.opened_at),
+                closed_at=EXCLUDED.closed_at, status=EXCLUDED.status,
+                avg_buy_price=EXCLUDED.avg_buy_price, total_bought=EXCLUDED.total_bought,
+                total_sold=EXCLUDED.total_sold, realized_pnl=EXCLUDED.realized_pnl,
+                n_buy_trades=EXCLUDED.n_buy_trades, avg_sell_price=EXCLUDED.avg_sell_price
+        ''', rows)
+
+async def compute_window_stats_from_db(conn, address):
+    '''Computes multi-window win rate and price brackets directly from DB.'''
+    stats = {}
+    windows = [100, 300, 800, 1500, 2500, None]
+    
+    # 1. Brackets (wins/losses per price range for all resolved positions)
+    brackets_row = await conn.fetchrow('''
+        SELECT 
+            SUM(CASE WHEN status='win' AND avg_buy_price < 0.10 THEN 1 ELSE 0 END) as w_10,
+            SUM(CASE WHEN status='loss' AND avg_buy_price < 0.10 THEN 1 ELSE 0 END) as l_10,
+            SUM(CASE WHEN status='win' AND avg_buy_price < 0.20 THEN 1 ELSE 0 END) as w_20,
+            SUM(CASE WHEN status='loss' AND avg_buy_price < 0.20 THEN 1 ELSE 0 END) as l_20,
+            SUM(CASE WHEN status='win' AND avg_buy_price < 0.30 THEN 1 ELSE 0 END) as w_30,
+            SUM(CASE WHEN status='loss' AND avg_buy_price < 0.30 THEN 1 ELSE 0 END) as l_30,
+            SUM(CASE WHEN status='win' AND avg_buy_price < 0.40 THEN 1 ELSE 0 END) as w_40,
+            SUM(CASE WHEN status='loss' AND avg_buy_price < 0.40 THEN 1 ELSE 0 END) as l_40,
+            SUM(CASE WHEN status='win' AND avg_buy_price > 0.70 THEN 1 ELSE 0 END) as w_70,
+            SUM(CASE WHEN status='loss' AND avg_buy_price > 0.70 THEN 1 ELSE 0 END) as l_70,
+            COUNT(*) FILTER(WHERE status='win') as total_wins,
+            COUNT(*) FILTER(WHERE status IN ('win', 'loss')) as total_resolved
+        FROM wallet_position_outcomes
+        WHERE address = $1 AND status != 'open'
+    ''', address)
+    
+    if brackets_row:
+        stats['wins_below_10c'] = brackets_row['w_10'] or 0
+        stats['losses_below_10c'] = brackets_row['l_10'] or 0
+        stats['wins_below_20c'] = brackets_row['w_20'] or 0
+        stats['losses_below_20c'] = brackets_row['l_20'] or 0
+        stats['wins_below_30c'] = brackets_row['w_30'] or 0
+        stats['losses_below_30c'] = brackets_row['l_30'] or 0
+        stats['wins_below_40c'] = brackets_row['w_40'] or 0
+        stats['losses_below_40c'] = brackets_row['l_40'] or 0
+        stats['wins_above_70c'] = brackets_row['w_70'] or 0
+        stats['losses_above_70c'] = brackets_row['l_70'] or 0
+        
+        tw = brackets_row['total_wins'] or 0
+        tr = brackets_row['total_resolved'] or 0
+        stats['win_rate_all'] = (tw / tr) if tr > 0 else 0.0
+        stats['winning_count'] = tw
+        stats['resolved_count'] = tr
+    else:
+        for k in ['wins_below_10c', 'losses_below_10c', 'wins_below_20c', 'losses_below_20c', 
+                  'wins_below_30c', 'losses_below_30c', 'wins_below_40c', 'losses_below_40c', 
+                  'wins_above_70c', 'losses_above_70c', 'winning_count', 'resolved_count']:
+            stats[k] = 0
+        stats['win_rate_all'] = 0.0
+
+    # Use closed_at (endDate) for windowed win rates
+    # "check position based on what it was opened not when it was closed" 
+    # ^ (Updated: Actually using closed_at per user agreement on Option A for Position-Based tracking)
+    for w in windows:
+        if w is None:
+            continue
+        
+        row = await conn.fetchrow(f'''
+            WITH cutoff AS (
+                SELECT closed_at 
+                FROM wallet_position_outcomes 
+                WHERE address = $1 AND closed_at IS NOT NULL AND status IN ('win','loss')
+                ORDER BY closed_at DESC 
+                OFFSET {w-1} LIMIT 1
+            )
+            SELECT 
+                COUNT(*) FILTER (WHERE status = 'win') AS wins,
+                COUNT(*) FILTER (WHERE status IN ('win','loss')) AS resolved
+            FROM wallet_position_outcomes
+            WHERE address = $1
+              AND closed_at >= COALESCE((SELECT closed_at FROM cutoff), '1970-01-01'::timestamptz)
+              AND closed_at IS NOT NULL
+              AND status != 'open'
+        ''', address)
+        
+        wr = 0.0
+        if row and row['resolved'] and row['resolved'] > 0:
+            wr = row['wins'] / row['resolved']
+        stats[f'win_rate_{w}'] = wr
+
+    return stats
+
+def compute_stats(positions, closed_positions, headline_pnl, headline_volume, start_stats_at, peak_capital):
     total_volume = 0.0
     max_trade_size = 0.0
-    trade_dates: set[str] = set()
-    for t in trades:
-        size = _parse(t.get("size"))
-        price = _parse(t.get("price"))
-        usdc_vol = size * price
-        total_volume += usdc_vol
-        if usdc_vol > max_trade_size:
-            max_trade_size = usdc_vol
-        ts = t.get("timestamp")
-        if ts:
-            try:
-                dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
-                trade_dates.add(dt.strftime("%Y-%m-%d"))
-            except Exception:
-                pass
+    buy_prices: list[float] = []
+    buys_below_10c = buys_below_20c = buys_below_30c = buys_below_40c = buys_above_70c = 0
+    active_days = 0 # No longer calculated per-trade
 
     resolved_count = 0
     winning_count = 0
     biggest_win = 0.0
     biggest_loss = 0.0
-    trades_2x = 0
-    trades_1_5x = 0
-    for cp in closed_positions:
-        rpnl = _parse(cp.get("realizedPnl"))
-        total_bought = _parse(cp.get("totalBought"))
+
+    wins_below_10c = wins_below_20c = wins_below_30c = wins_below_40c = wins_above_70c = 0
+    losses_below_10c = losses_below_20c = losses_below_30c = losses_below_40c = losses_above_70c = 0
+
+    # ── 1. Process Open Positions ──
+    for p in positions:
+        avg_p = _parse(p.get("avgPrice"))
+        total_bought = _parse(p.get("totalBought"))
+        cur_price = _parse(p.get("curPrice"))
+        
+        # Volume & Max Trade Size approximation
+        total_volume += total_bought
+        if total_bought > max_trade_size:
+            max_trade_size = total_bought
+            
+        # Buy price distribution
+        if avg_p > 0:
+            buy_prices.append(avg_p)
+            if avg_p < 0.10: buys_below_10c += 1
+            elif avg_p < 0.20: buys_below_20c += 1
+            elif avg_p < 0.30: buys_below_30c += 1
+            elif avg_p < 0.40: buys_below_40c += 1
+            elif avg_p > 0.70: buys_above_70c += 1
+
+        # Triangle Logic: Near-worthless open position -> Loss
+        if cur_price < 0.03:
+            resolved_count += 1
+            cash_pnl = _parse(p.get("cashPnl"))
+            if cash_pnl < biggest_loss:
+                biggest_loss = cash_pnl
+            
+            if avg_p > 0:
+                if avg_p < 0.10: losses_below_10c += 1
+                elif avg_p < 0.20: losses_below_20c += 1
+                elif avg_p < 0.30: losses_below_30c += 1
+                elif avg_p < 0.40: losses_below_40c += 1
+                elif avg_p > 0.70: losses_above_70c += 1
+
+    # ── 2. Process Closed Positions ──
+    for p in closed_positions:
+        realized_pnl = _parse(p.get("realizedPnl"))
+        avg_p = _parse(p.get("avgPrice"))
+        total_bought = _parse(p.get("totalBought"))
+        total_sold = _parse(p.get("totalSold"))
+        
+        # Volume & Max Trade Size approximation
+        total_volume += (total_bought + total_sold)
+        if total_bought > max_trade_size:
+            max_trade_size = total_bought
+            
+        # Resolved stats
         resolved_count += 1
-        if rpnl > 0:
+        won = realized_pnl > 0
+        if won:
             winning_count += 1
-        if total_bought > 0:
-            if rpnl >= total_bought:
-                trades_2x += 1
-            if rpnl >= total_bought * 0.5:
-                trades_1_5x += 1
-        if rpnl > biggest_win:
-            biggest_win = rpnl
-        if rpnl < biggest_loss:
-            biggest_loss = rpnl
+            if realized_pnl > biggest_win:
+                biggest_win = realized_pnl
+        else:
+            if realized_pnl < biggest_loss:
+                biggest_loss = realized_pnl
+                
+        if avg_p > 0:
+            buy_prices.append(avg_p)
+            if avg_p < 0.10:
+                if won: wins_below_10c += 1
+                else: losses_below_10c += 1
+            elif avg_p < 0.20:
+                if won: wins_below_20c += 1
+                else: losses_below_20c += 1
+            elif avg_p < 0.30:
+                if won: wins_below_30c += 1
+                else: losses_below_30c += 1
+            elif avg_p < 0.40:
+                if won: wins_below_40c += 1
+                else: losses_below_40c += 1
+            if avg_p > 0.70:
+                if won: wins_above_70c += 1
+                else: losses_above_70c += 1
 
-    # Fallback: when closed-positions returns empty but trades exist,
-    # use trade count so wallet doesn't show as "0 trades"
-    effective_volume = headline_volume
+    avg_buy_price = sum(buy_prices) / len(buy_prices) if buy_prices else 0.0
+
+    # Fallback to headline metrics
+    effective_volume = max(total_volume, headline_volume)
     effective_pnl = headline_pnl
-    if resolved_count == 0 and len(trades) > 0:
-        resolved_count = len(trades)
-        # Estimate wins from PnL direction
-        if effective_pnl > 0:
-            winning_count = max(1, resolved_count // 2)
 
-    active_days = max(len(trade_dates), 1)
     win_rate = (winning_count / resolved_count) if resolved_count > 0 else 0.0
-    roi_pct = (effective_pnl / effective_volume * 100) if effective_volume > 0 else 0.0
-    alpha_score = (win_rate * 50) + (trades_2x * 10) + (trades_1_5x * 5) + (effective_pnl / 1000)
-    if effective_volume >= 1_000_000:
-        tier = "Diamond"
-    elif effective_volume >= 500_000:
-        tier = "Platinum"
-    elif effective_volume >= 100_000:
-        tier = "Gold"
-    elif effective_volume >= 10_000:
-        tier = "Silver"
+    
+    # Calculate ROI using Peak Capital logic
+    if peak_capital is not None and peak_capital > 0:
+        roi_pct = (effective_pnl / peak_capital) * 100
     else:
-        tier = "Bronze"
+        # Fallback if peak_capital is somehow missing (e.g., Alchemy failure)
+        roi_pct = (effective_pnl / effective_volume * 100) if effective_volume > 0 else 0.0
+
     return {
         "total_volume": effective_volume, "total_pnl": effective_pnl,
-        "realized_pnl": realized_pnl, "unrealized_pnl": unrealized_pnl,
         "win_rate": win_rate, "roi_pct": roi_pct,
         "resolved_count": resolved_count, "winning_count": winning_count,
         "max_trade_size": max_trade_size,
         "biggest_win": biggest_win, "biggest_loss": biggest_loss,
-        "trades_2x": trades_2x, "trades_1_5x": trades_1_5x,
-        "alpha_score": alpha_score, "tier": tier, "active_days": active_days,
+        "active_days": active_days,
+        "avg_buy_price": avg_buy_price,
+        "buys_below_10c": buys_below_10c, "buys_below_20c": buys_below_20c,
+        "buys_below_30c": buys_below_30c, "buys_below_40c": buys_below_40c,
+        "buys_above_70c": buys_above_70c,
+        "wins_below_10c": wins_below_10c, "wins_below_20c": wins_below_20c,
+        "wins_below_30c": wins_below_30c, "wins_below_40c": wins_below_40c,
+        "wins_above_70c": wins_above_70c,
+        "losses_below_10c": losses_below_10c, "losses_below_20c": losses_below_20c,
+        "losses_below_30c": losses_below_30c, "losses_below_40c": losses_below_40c,
+        "losses_above_70c": losses_above_70c,
     }
 
 
@@ -282,30 +727,44 @@ def compute_wallet_tags(trades):
 
 def compute_category_stats(trades, closed_positions, pm_category_pnl=None):
     pm = pm_category_pnl or {}
-    trade_by_cid: dict[str, str] = {}
+    trade_by_cid: dict[str, tuple[str, str]] = {}  # cid -> (category, subcategory)
     category_volume: dict[str, float] = {}
     category_pnl: dict[str, float] = {}
     category_wins: dict[str, int] = {}
     category_resolved: dict[str, int] = {}
     category_last_active: dict[str, datetime] = {}
+    
+    # Subcategory tracking
+    subcategory_volume: dict[tuple[str, str], float] = {}
+    subcategory_pnl: dict[tuple[str, str], float] = {}
+    subcategory_wins: dict[tuple[str, str], int] = {}
+    subcategory_resolved: dict[tuple[str, str], int] = {}
+    subcategory_last_active: dict[tuple[str, str], datetime] = {}
 
     for t in trades:
         title = t.get("title") or ""
         cid = t.get("conditionId") or ""
         if not title or not cid:
             continue
-        cat, _ = classify_tags([title])
-        trade_by_cid[cid] = cat
+        cat, sub = classify_tags([title])
+        flat_sub = flatten_subcategory(cat, sub)
+        trade_by_cid[cid] = (cat, flat_sub)
         size = _parse(t.get("size"))
         price = _parse(t.get("price"))
-        category_volume[cat] = category_volume.get(cat, 0.0) + size * price
+        usdc = size * price
+        category_volume[cat] = category_volume.get(cat, 0.0) + usdc
+        subcategory_volume[(cat, flat_sub)] = subcategory_volume.get((cat, flat_sub), 0.0) + usdc
 
     for cp in closed_positions:
         cid = cp.get("conditionId") or ""
-        cat = trade_by_cid.get(cid)
-        if not cat:
+        cat_sub = trade_by_cid.get(cid)
+        if cat_sub:
+            cat, flat_sub = cat_sub
+        else:
             cp_title = cp.get("title") or ""
-            cat, _ = classify_tags([cp_title]) if cp_title else ("Other", "General")
+            cat, sub = classify_tags([cp_title]) if cp_title else ("Other", "General")
+            flat_sub = flatten_subcategory(cat, sub)
+        
         rpnl = _parse(cp.get("realizedPnl"))
         category_pnl[cat] = category_pnl.get(cat, 0.0) + rpnl
         category_resolved[cat] = category_resolved.get(cat, 0) + 1
@@ -314,9 +773,18 @@ def compute_category_stats(trades, closed_positions, pm_category_pnl=None):
         end = _parse_end(cp.get("endDate"))
         if end and (category_last_active.get(cat) is None or end > category_last_active[cat]):
             category_last_active[cat] = end
+        
+        sub_key = (cat, flat_sub)
+        subcategory_pnl[sub_key] = subcategory_pnl.get(sub_key, 0.0) + rpnl
+        subcategory_resolved[sub_key] = subcategory_resolved.get(sub_key, 0) + 1
+        if rpnl > 0:
+            subcategory_wins[sub_key] = subcategory_wins.get(sub_key, 0) + 1
+        if end and (subcategory_last_active.get(sub_key) is None or end > subcategory_last_active[sub_key]):
+            subcategory_last_active[sub_key] = end
 
+    # Build category results
     all_cats = set(category_volume.keys()) | set(category_pnl.keys()) | set(pm.keys())
-    result = []
+    category_result = []
     for cat in sorted(all_cats):
         if cat in pm and pm[cat].get("pnl") is not None:
             pnl, vol = pm[cat]["pnl"], pm[cat].get("volume", 0.0)
@@ -326,46 +794,61 @@ def compute_category_stats(trades, closed_positions, pm_category_pnl=None):
         wins = category_wins.get(cat, 0)
         win_rate = (wins / resolved) if resolved > 0 else 0.0
         roi = (pnl / vol * 100) if vol > 0 else 0.0
-        result.append({
+        category_result.append({
             "category": cat, "total_pnl": round(pnl, 2), "total_volume": round(vol, 2),
             "win_rate": round(win_rate, 4), "resolved_count": resolved,
             "winning_count": wins, "roi_pct": round(roi, 2),
             "last_active": category_last_active.get(cat),
         })
-    return result
+    
+    # Build subcategory results
+    all_subs = set(subcategory_volume.keys()) | set(subcategory_pnl.keys())
+    subcategory_result = []
+    for (cat, sub) in sorted(all_subs):
+        pnl = subcategory_pnl.get((cat, sub), 0.0)
+        vol = subcategory_volume.get((cat, sub), 0.0)
+        resolved = subcategory_resolved.get((cat, sub), 0)
+        wins = subcategory_wins.get((cat, sub), 0)
+        win_rate = (wins / resolved) if resolved > 0 else 0.0
+        roi = (pnl / vol * 100) if vol > 0 else 0.0
+        subcategory_result.append({
+            "category": cat, "subcategory": sub, "total_pnl": round(pnl, 2), "total_volume": round(vol, 2),
+            "win_rate": round(win_rate, 4), "resolved_count": resolved,
+            "winning_count": wins, "roi_pct": round(roi, 2),
+            "last_active": subcategory_last_active.get((cat, sub)),
+        })
+    
+    return category_result, subcategory_result
 
 
 # ── Core: fetch all data for one wallet concurrently ──────────────────────
 
 async def _fetch_wallet_data(session: aiohttp.ClientSession, address: str, start_stats_at: datetime) -> dict:
-    """Fire all API calls for a single wallet concurrently."""
-    trades_f, positions_f, closed_f, balance_f, website_f = await asyncio.gather(
-        fetch_trades_after(session, address, start_stats_at),
+    """Fire all API calls for a single wallet concurrently (except closed positions)."""
+    trades_f, positions_f, balance_f, website_f = await asyncio.gather(
+        fetch_all_trades(session, address),
         fetch_positions(session, address),
-        fetch_closed_positions(session, address),
         fetch_balance(session, address),
         fetch_website_pnl(session, address),
         return_exceptions=True,
     )
     trades = trades_f if isinstance(trades_f, list) else []
     positions = positions_f if isinstance(positions_f, list) else []
-    closed = closed_f if isinstance(closed_f, list) else []
     balance = balance_f if isinstance(balance_f, (int, float)) else 0.0
     website = website_f if isinstance(website_f, dict) else None
 
-    # Deposits/withdrawals (Alchemy) concurrently
-    deposits_f, withdrawals_f = await asyncio.gather(
-        fetch_usdc_deposits(session, address),
-        fetch_usdc_withdrawals(session, address),
-        return_exceptions=True,
-    )
-    deposits = deposits_f if isinstance(deposits_f, (int, float)) else None
-    withdrawals = withdrawals_f if isinstance(withdrawals_f, (int, float)) else None
+    # Deposits/withdrawals/peak capital (Alchemy)
+    capital_f = await fetch_capital_metrics(session, address)
+    if isinstance(capital_f, tuple) and len(capital_f) == 3:
+        deposits, withdrawals, peak_capital = capital_f
+    else:
+        deposits, withdrawals, peak_capital = None, None, None
 
     return {
-        "trades": trades, "positions": positions, "closed": closed,
+        "trades": trades, "positions": positions,
         "balance": balance, "website": website,
         "deposits": deposits, "withdrawals": withdrawals,
+        "peak_capital": peak_capital,
     }
 
 
@@ -392,95 +875,364 @@ async def _fetch_category_pnl_batch(session: aiohttp.ClientSession, address: str
 
 async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSession, address: str):
     row = await conn.fetchrow(
-        "SELECT added_at, start_stats_at, start_balance, start_deposits, start_withdrawals FROM tracked_wallets WHERE address = $1",
+        """
+        SELECT added_at, added_at as start_stats_at, tier = 'CURATED' as is_curated, last_trade_at as last_active,
+               EXISTS (SELECT 1 FROM wallet_sources_v2 s WHERE s.address = wallets_v2.address AND s.source = 'leaderboard') as is_leaderboard
+        FROM wallets_v2 WHERE address = $1
+        """,
         address
     )
     if not row:
         return
 
+    is_curated = row["is_curated"]
+    is_leaderboard = row["is_leaderboard"]
+
     start_stats_at = row["start_stats_at"]
     if not start_stats_at:
         start_stats_at = row["added_at"] or datetime.now(timezone.utc)
-        await conn.execute("UPDATE tracked_wallets SET start_stats_at = $1 WHERE address = $2", start_stats_at, address)
+        await conn.execute("UPDATE wallets_v2 SET start_stats_at = $1 WHERE address = $2", start_stats_at, address)
 
-    # Fetch all wallet data concurrently
-    data = await _fetch_wallet_data(session, address, start_stats_at)
-    trades = data["trades"]
-    positions = data["positions"]
-    closed = data["closed"]
-    balance = data["balance"]
-    website = data["website"]
-    deposits = data["deposits"]
-    withdrawals = data["withdrawals"]
+    # Fetch wallet data based on curated status
+    supabase = None
+    if is_curated:
+        # Curated wallets: full tracking with trades and positions
+        data = await _fetch_wallet_data(session, address, start_stats_at)
+        trades = data["trades"]
+        positions = data["positions"]
+        balance = data["balance"]
+        website = data["website"]
+        deposits = data["deposits"]
+        withdrawals = data["withdrawals"]
+    else:
+        # Non-curated wallets: balance, website, deposits, withdrawals + Supabase win_rate
+        balance_f, website_f, supabase_f, positions_f = await asyncio.gather(
+            fetch_balance(session, address),
+            fetch_website_pnl(session, address),
+            fetch_supabase_wallet_profile(session, address),
+            fetch_positions(session, address),
+            return_exceptions=True,
+        )
+        balance = balance_f if isinstance(balance_f, (int, float)) else 0.0
+        website = website_f if isinstance(website_f, dict) else None
+        supabase = supabase_f if isinstance(supabase_f, dict) else None
+        trades = []
+        positions = positions_f if isinstance(positions_f, list) else []
+        capital_f = await fetch_capital_metrics(session, address)
+        if isinstance(capital_f, tuple) and len(capital_f) == 3:
+            deposits, withdrawals, peak_capital = capital_f
+        else:
+            deposits, withdrawals, peak_capital = None, None, None
 
     if deposits is None or withdrawals is None:
-        logger.warning(f"Skipping {address[:10]}... this cycle — could not fetch deposits/withdrawals")
-        return
+        logger.warning(f"Alchemy unavailable for {address[:10]}... falling back to stored values")
+        deposits = deposits if deposits is not None else 0.0
+        withdrawals = withdrawals if withdrawals is not None else 0.0
+
+    # ══════════════════════════════════════════════════════════════════════
+    # NON-CURATED WALLET: Supabase + Polymarket API only. No trade scan.
+    # ══════════════════════════════════════════════════════════════════════
+    if not is_curated:
+        # ── Vetting gate: balance + last_trade_at ──
+        # Fetch last_trade_at BEFORE deciding whether to add to global list
+        # NOTE: must use `user=`, not `maker=`/`taker=` — those params do not filter
+        # by address on this endpoint and silently return an unrelated wallet's trade.
+        last_trade_dt = None
+        try:
+            url = f"https://data-api.polymarket.com/trades?user={address}&limit=1&offset=0"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if isinstance(data, list) and data:
+                        ts = data[0].get("timestamp")
+                        if ts:
+                            last_trade_dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+        except Exception:
+            pass
+
+        # Also check stored last_trade_at as fallback
+        stored_last = row["last_active"] or row.get("added_at")
+
+        effective_last_trade = last_trade_dt or stored_last
+        now = datetime.now(timezone.utc)
+
+        # Calculate position_value for vetting
+        position_value = 0.0
+        for pos in (positions or []):
+            curr_val = _parse(pos.get("currentValue", 0))
+            if curr_val > 0:
+                position_value += curr_val
+                
+        total_assets = balance + position_value
+        sb_resolved = supabase["resolved_count"] if supabase and supabase.get("resolved_count") is not None else None
+
+        # Rule 1 & 2: total_assets < 1k → below threshold, skip global list, move to "Low Balance" Might Cook
+        if total_assets < BALANCE_THRESHOLD:
+            await conn.execute(
+                "UPDATE wallets_v2 SET tier = 'LOW_BALANCE', last_indexed = NOW() WHERE address = $1",
+                address,
+            )
+            logger.debug(f"Below threshold (Low Balance): {address[:10]}... total_assets={total_assets:.0f}")
+            return
+
+        # Rule 2.5: balance > $1k but no trades → Might Cook "New Wallets"
+        has_trades = (sb_resolved and sb_resolved > 0) or last_trade_dt is not None
+        if not has_trades:
+            if last_trade_dt and (now - last_trade_dt) >= timedelta(days=30):
+                # Stale with no trades → hibernate
+                await conn.execute("""
+                    UPDATE wallets_v2 SET
+                        is_dormant = TRUE,
+                        last_indexed = NOW(),
+                        next_check_at = NULL
+                    WHERE address = $1
+                """, address)
+                logger.debug(f"Hibernating stale no-trade: {address[:10]}...")
+            else:
+                # New wallet with balance but no trades yet → Might Cook
+                await conn.execute(
+                    "UPDATE wallets_v2 SET last_indexed = NOW() WHERE address = $1",
+                    address,
+                )
+                logger.debug(f"New wallet no trades: {address[:10]}... balance={balance:.0f}")
+            return
+
+        # Rule 3: balance > $1k but stale → hibernate
+        is_stale = True
+        if effective_last_trade and (now - effective_last_trade) < timedelta(days=30):
+            is_stale = False
+
+        if is_stale:
+            await conn.execute("""
+                UPDATE wallets_v2 SET
+                    is_dormant = TRUE,
+                    last_indexed = NOW(),
+                    next_check_at = NULL
+                WHERE address = $1
+            """, address)
+            logger.debug(f"Hibernating: {address[:10]}... last_trade={effective_last_trade}")
+            return
+
+        # ── Passed vetting gate: balance > $1k + recent trade → add to global list ──
+        website_pnl = website["pnl"] if website else None
+        website_volume = website["volume"] if website else None
+        if website:
+            await conn.execute("""
+                UPDATE wallets_v2 SET username=$5 WHERE address=$1
+            """, address, website_pnl, website_volume, website["rank"], website["username"])
+            await conn.execute("""
+                UPDATE wallet_metrics_v2 SET pm_pnl=$2, pm_volume=$3, pm_rank=$4 WHERE address=$1
+            """, address, website_pnl, website_volume, website["rank"])
+
+        # Use Supabase data for win_rate/roi/resolved — NULL if not available
+        sb_wr = supabase["win_rate"] if supabase and supabase.get("win_rate") is not None else None
+        sb_roi = supabase["roi_pct"] if supabase and supabase.get("roi_pct") is not None else None
+        sb_resolved = supabase["resolved_count"] if supabase and supabase.get("resolved_count") is not None else None
+        sb_winning = supabase["winning_count"] if supabase and supabase.get("winning_count") is not None else None
+
+        # PnL from Polymarket leaderboard (website), NULL if not available
+        total_pnl = website_pnl
+        total_volume = website_volume
+
+        # ── We are completely bypassing the Triangle Logic for Curated wallets right now ──
+        # Use Supabase data as the display values (win_rate, roi_pct, etc.) for EVERY wallet.
+        await conn.execute("""
+            INSERT INTO wallet_metrics_v2 (address, win_rate, roi_pct, resolved_count, winning_count,
+                total_volume, total_pnl, unrealised_pnl, biggest_win, biggest_loss,
+                active_days,
+                avg_buy_price, buys_below_10c, buys_below_20c, buys_below_30c, buys_below_40c, buys_above_70c,
+                wins_below_10c, wins_below_20c, wins_below_30c, wins_below_40c, wins_above_70c,
+                losses_below_10c, losses_below_20c, losses_below_30c, losses_below_40c, losses_above_70c,
+                win_rate_100, win_rate_300, win_rate_800, win_rate_1500, win_rate_2500,
+                sb_win_rate, sb_roi_pct, sb_resolved_count, sb_winning_count,
+                tl_win_rate, tl_roi_pct, tl_resolved_count, tl_winning_count,
+                last_updated)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,$8,$9,$10,$11,NULL,NULL,NULL,NULL,NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                win_rate=EXCLUDED.win_rate, roi_pct=EXCLUDED.roi_pct, resolved_count=EXCLUDED.resolved_count,
+                winning_count=EXCLUDED.winning_count, total_volume=EXCLUDED.total_volume, total_pnl=EXCLUDED.total_pnl,
+                sb_win_rate=EXCLUDED.sb_win_rate, sb_roi_pct=EXCLUDED.sb_roi_pct,
+                sb_resolved_count=EXCLUDED.sb_resolved_count, sb_winning_count=EXCLUDED.sb_winning_count,
+                tl_win_rate=NULL, tl_roi_pct=NULL, tl_resolved_count=NULL, tl_winning_count=NULL,
+                last_updated=EXCLUDED.last_updated
+        """, address, sb_wr, sb_roi, sb_resolved, sb_winning, total_volume, total_pnl,
+            sb_wr, sb_roi, sb_resolved, sb_winning)
+
+        await conn.execute("""
+            UPDATE wallets_v2 SET
+                total_pnl=$2, total_volume=$3, balance=$4,
+                deposits=$5, withdrawals=$6,
+                last_indexed=NOW(),
+                last_trade_at = GREATEST(COALESCE(last_trade_at, $7), $7),
+                last_active = GREATEST(COALESCE(last_active, added_at), $7),
+                is_dormant = FALSE,
+                next_check_at = NOW() + INTERVAL '7 days'
+            WHERE address=$1
+        """, address, total_pnl, total_volume,
+            balance, deposits, withdrawals, last_trade_dt)
+
+        return  # ← Skip all deep fetch / trade scanning / tags / categories
+
+    # ══════════════════════════════════════════════════════════════════════
+    # CURATED WALLET: Full trade scan + Triangle Logic
+    # ══════════════════════════════════════════════════════════════════════
+    # Also fetch Supabase data for sb_ columns (comparison)
+    if not supabase:
+        supabase_f = await fetch_supabase_wallet_profile(session, address)
+        supabase = supabase_f if isinstance(supabase_f, dict) else None
+
+    # ── Closed positions: synthetic on-chain build (Bypassing 5,000 API limit) ──
+    from src.utils.etherscan_client import fetch_historical_redemptions_polygonscan, build_synthetic_closed_positions
+    proxies = set(t.get("proxyWallet") for t in trades if t.get("proxyWallet") and isinstance(t.get("proxyWallet"), str))
+    addresses_to_query = [address] + list(proxies)
+    
+    redemptions = await fetch_historical_redemptions_polygonscan(session, addresses_to_query)
+    synthetic_closed = build_synthetic_closed_positions(trades, redemptions)
+    
+    # We still upsert them to the DB so other parts of the UI/API can use them,
+    # but we use `synthetic_closed` directly for compute_stats.
+    await upsert_closed_positions(conn, address, synthetic_closed)
+    closed = synthetic_closed
 
     website_pnl = website["pnl"] if website else 0.0
     website_volume = website["volume"] if website else 0.0
 
     if website:
         await conn.execute("""
-            UPDATE tracked_wallets SET website_pnl=$2, website_volume=$3, website_rank=$4, username=$5, website_pnl_updated_at=NOW()
-            WHERE address=$1
+            UPDATE wallets_v2 SET username=$5 WHERE address=$1
         """, address, website_pnl, website_volume, website["rank"], website["username"])
-
-    start_balance = float(row["start_balance"] or 0)
-    start_deposits = float(row["start_deposits"] or 0)
-    start_withdrawals = float(row["start_withdrawals"] or 0)
-    if start_balance == 0 and start_deposits == 0 and start_withdrawals == 0:
-        start_balance = balance
-        start_deposits = deposits
-        start_withdrawals = withdrawals
-        await conn.execute(
-            "UPDATE tracked_wallets SET start_balance=$1, start_deposits=$2, start_withdrawals=$3 WHERE address=$4",
-            start_balance, start_deposits, start_withdrawals, address
-        )
+        await conn.execute("""
+            UPDATE wallet_metrics_v2 SET pm_pnl=$2, pm_volume=$3, pm_rank=$4 WHERE address=$1
+        """, address, website_pnl, website_volume, website["rank"])
 
     position_value = 0.0
-    unrealized_pnl = 0.0
     for pos in (positions or []):
         curr_val = _parse(pos.get("currentValue"))
         if curr_val > 0:
             position_value += curr_val
-            unrealized_pnl += _parse(pos.get("cashPnl"))
 
-    realized_pnl = (balance - start_balance) + (withdrawals - start_withdrawals) - (deposits - start_deposits)
-    total_pnl = realized_pnl + unrealized_pnl
-    headline = select_headline_pnl(website, total_pnl, _computed_volume(trades))
-    await conn.execute("UPDATE tracked_wallets SET pnl_source=$2 WHERE address=$1", address, headline["pnl_source"])
-    stats = compute_stats(trades, positions, closed, headline["pnl"], headline["volume"], total_pnl, realized_pnl, unrealized_pnl, start_stats_at)
+    headline = select_headline_pnl(website, 0.0, _computed_volume(trades))
+    await conn.execute("UPDATE wallets_v2 SET pnl_source=$2 WHERE address=$1", address, headline["pnl_source"])
+
+    # --- DEEP FETCH / DATABASE STATS ---
+    db_stats = {}
+    if is_curated:
+        # 1. Store all outcomes using the full history (from Etherscan deep fetch)
+        await aggregate_and_upsert_positions(conn, address, trades, closed, positions)
+        
+        # 2. Compute accurate win rates and brackets strictly from the DB outcomes
+        db_stats = await compute_window_stats_from_db(conn, address)
+
+    # Calculate remaining in-memory stats (roi_pct, biggest_win)
+    stats = compute_stats(positions, closed, headline["pnl"], headline["volume"], start_stats_at, peak_capital)
+
+    # NOTE: win_rate, roi_pct, resolved_count, winning_count ALWAYS come from Supabase (for global page).
+    # Curated page reads Triangle Logic data from tl_ columns.
+    # Do NOT overwrite stats with computed/db values for these fields.
+
+    # Store Triangle Logic data in tl_ columns for curated page
+    tl_wr = db_stats.get("win_rate_all") if db_stats else None
+    tl_resolved = db_stats.get("resolved_count") if db_stats else None
+    tl_winning = db_stats.get("winning_count") if db_stats else None
+    tl_roi = stats.get("roi_pct")  # Computed from trades (effective_pnl / effective_volume)
+
+    # Override stats with Supabase values for DB write (global page always shows these)
+    if supabase:
+        if supabase.get("win_rate") is not None:
+            stats["win_rate"] = supabase["win_rate"]
+        if supabase.get("roi_pct") is not None:
+            stats["roi_pct"] = supabase["roi_pct"]
+        if supabase.get("resolved_count") is not None:
+            stats["resolved_count"] = supabase["resolved_count"]
+        if supabase.get("winning_count") is not None:
+            stats["winning_count"] = supabase["winning_count"]
 
     # ── Batch DB writes ──
+    sb_wr = supabase["win_rate"] if supabase and supabase.get("win_rate") is not None else None
+    sb_roi = supabase["roi_pct"] if supabase and supabase.get("roi_pct") is not None else None
+    sb_resolved = supabase["resolved_count"] if supabase and supabase.get("resolved_count") is not None else None
+    sb_winning = supabase["winning_count"] if supabase and supabase.get("winning_count") is not None else None
+
+    latest_trade_ts = max(
+        (t.get("timestamp", 0) for t in trades if t.get("timestamp")),
+        default=0,
+    )
+    last_trade_dt = datetime.fromtimestamp(latest_trade_ts, tz=timezone.utc) if latest_trade_ts > 0 else None
+
+    # ── Update wallet_metrics_v2 for Curated Wallet ──
     await conn.execute("""
-        INSERT INTO wallet_stats (address, win_rate, roi_pct, resolved_count, winning_count,
-            total_volume, total_pnl, unrealised_pnl, biggest_win, biggest_loss, tier,
-            active_days, alpha_score, trades_2x, trades_1_5x, last_updated)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
-        ON CONFLICT (address) DO UPDATE SET
-            win_rate=EXCLUDED.win_rate, roi_pct=EXCLUDED.roi_pct, resolved_count=EXCLUDED.resolved_count,
-            winning_count=EXCLUDED.winning_count, total_volume=EXCLUDED.total_volume, total_pnl=EXCLUDED.total_pnl,
-            unrealised_pnl=EXCLUDED.unrealised_pnl, biggest_win=EXCLUDED.biggest_win, biggest_loss=EXCLUDED.biggest_loss,
-            tier=EXCLUDED.tier, active_days=EXCLUDED.active_days, alpha_score=EXCLUDED.alpha_score,
-            trades_2x=EXCLUDED.trades_2x, trades_1_5x=EXCLUDED.trades_1_5x, last_updated=EXCLUDED.last_updated
-    """, address, stats["win_rate"], stats["roi_pct"], stats["resolved_count"], stats["winning_count"],
-        stats["total_volume"], stats["total_pnl"], stats["unrealized_pnl"],
-        stats["biggest_win"], stats["biggest_loss"], stats["tier"],
-        stats["active_days"], stats["alpha_score"], stats["trades_2x"], stats["trades_1_5x"])
+        INSERT INTO wallet_metrics_v2 (
+            address, total_volume, total_pnl,
+            win_rate, roi_pct, resolved_count, winning_count,
+            biggest_win, biggest_loss, active_days,
+            avg_buy_price, buys_below_10c, buys_below_20c, buys_below_30c, buys_below_40c, buys_above_70c,
+            wins_below_10c, wins_below_20c, wins_below_30c, wins_below_40c, wins_above_70c,
+            losses_below_10c, losses_below_20c, losses_below_30c, losses_below_40c, losses_above_70c,
+            win_rate_100, win_rate_300, win_rate_800, win_rate_1500, win_rate_2500,
+            sb_win_rate, sb_roi_pct, sb_resolved_count, sb_winning_count,
+            tl_win_rate, tl_roi_pct, tl_resolved_count, tl_winning_count,
+            last_updated
+        ) VALUES (
+            $1, $2, $3,
+            $4, $5, $6, $7,
+            $8, $9, $10,
+            $11, $12, $13, $14, $15, $16,
+            $17, $18, $19, $20, $21,
+            $22, $23, $24, $25, $26,
+            $27, $28, $29, $30, $31,
+            $32, $33, $34, $35,
+            $36, $37, $38, $39,
+            NOW()
+        ) ON CONFLICT (address) DO UPDATE SET
+            total_volume=EXCLUDED.total_volume, total_pnl=EXCLUDED.total_pnl,
+            win_rate=EXCLUDED.win_rate, roi_pct=EXCLUDED.roi_pct,
+            resolved_count=EXCLUDED.resolved_count, winning_count=EXCLUDED.winning_count,
+            biggest_win=EXCLUDED.biggest_win, biggest_loss=EXCLUDED.biggest_loss,
+            active_days=EXCLUDED.active_days,
+            avg_buy_price=EXCLUDED.avg_buy_price,
+            buys_below_10c=EXCLUDED.buys_below_10c, buys_below_20c=EXCLUDED.buys_below_20c,
+            buys_below_30c=EXCLUDED.buys_below_30c, buys_below_40c=EXCLUDED.buys_below_40c,
+            buys_above_70c=EXCLUDED.buys_above_70c,
+            wins_below_10c=EXCLUDED.wins_below_10c, wins_below_20c=EXCLUDED.wins_below_20c,
+            wins_below_30c=EXCLUDED.wins_below_30c, wins_below_40c=EXCLUDED.wins_below_40c,
+            wins_above_70c=EXCLUDED.wins_above_70c,
+            losses_below_10c=EXCLUDED.losses_below_10c, losses_below_20c=EXCLUDED.losses_below_20c,
+            losses_below_30c=EXCLUDED.losses_below_30c, losses_below_40c=EXCLUDED.losses_below_40c,
+            losses_above_70c=EXCLUDED.losses_above_70c,
+            win_rate_100=EXCLUDED.win_rate_100, win_rate_300=EXCLUDED.win_rate_300,
+            win_rate_800=EXCLUDED.win_rate_800, win_rate_1500=EXCLUDED.win_rate_1500,
+            win_rate_2500=EXCLUDED.win_rate_2500,
+            sb_win_rate=EXCLUDED.sb_win_rate, sb_roi_pct=EXCLUDED.sb_roi_pct,
+            sb_resolved_count=EXCLUDED.sb_resolved_count, sb_winning_count=EXCLUDED.sb_winning_count,
+            tl_win_rate=EXCLUDED.tl_win_rate, tl_roi_pct=EXCLUDED.tl_roi_pct,
+            tl_resolved_count=EXCLUDED.tl_resolved_count, tl_winning_count=EXCLUDED.tl_winning_count,
+            last_updated=EXCLUDED.last_updated
+    """,
+        address, stats["total_volume"], stats["total_pnl"],
+        stats["win_rate"], stats["roi_pct"], stats["resolved_count"], stats["winning_count"],
+        stats["biggest_win"], stats["biggest_loss"], stats["active_days"],
+        stats["avg_buy_price"],
+        stats["buys_below_10c"], stats["buys_below_20c"], stats["buys_below_30c"], stats["buys_below_40c"], stats["buys_above_70c"],
+        stats["wins_below_10c"], stats["wins_below_20c"], stats["wins_below_30c"], stats["wins_below_40c"], stats["wins_above_70c"],
+        stats["losses_below_10c"], stats["losses_below_20c"], stats["losses_below_30c"], stats["losses_below_40c"], stats["losses_above_70c"],
+        db_stats.get("win_rate_100"), db_stats.get("win_rate_300"), db_stats.get("win_rate_800"),
+        db_stats.get("win_rate_1500"), db_stats.get("win_rate_2500"),
+        sb_wr, sb_roi, sb_resolved, sb_winning,
+        tl_wr, tl_roi, tl_resolved, tl_winning
+    )
 
     await conn.execute("""
-        UPDATE tracked_wallets SET
-            total_pnl=$2, realized_pnl=$3, unrealized_pnl=$4, total_volume=$5,
-            win_rate=$6, roi_pct=$7, resolved_count=$8, winning_count=$9,
-            max_trade_size=$10, tier=$11, alpha_score=$12, balance=$13,
-            deposits=$14, withdrawals=$15, position_value=$16, last_indexed=NOW()
+        UPDATE wallets_v2 SET
+            total_pnl=$2, total_volume=$3, max_trade_size=$4,
+            balance=$5, deposits=$6, withdrawals=$7, position_value=$8,
+            last_indexed=NOW(),
+            last_trade_at = GREATEST(COALESCE(last_trade_at, $9), $9),
+            last_active = GREATEST(COALESCE(last_active, added_at), $9),
+            is_dormant = FALSE
         WHERE address=$1
-    """, address, stats["total_pnl"], stats["realized_pnl"], stats["unrealized_pnl"],
-        stats["total_volume"], stats["win_rate"], stats["roi_pct"],
-        stats["resolved_count"], stats["winning_count"],
-        stats["max_trade_size"], stats["tier"], stats["alpha_score"],
-        balance, deposits, withdrawals, position_value)
+    """, address, stats["total_pnl"], stats["total_volume"], stats["max_trade_size"],
+        balance, deposits, withdrawals, position_value,
+        last_trade_dt)
 
     # ── Tags + category stats ──
     tags = compute_wallet_tags(trades)
@@ -502,10 +1254,10 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
 
     pm_category_pnl = await _fetch_category_pnl_batch(session, address, trade_categories)
 
-    cat_stats = compute_category_stats(trades, closed, pm_category_pnl)
+    cat_stats, sub_stats = compute_category_stats(trades, closed, pm_category_pnl)
     for cs in cat_stats:
         await conn.execute("""
-            INSERT INTO wallet_category_stats (address, category, total_pnl, total_volume, win_rate, resolved_count, winning_count, roi_pct, last_active, computed_at)
+            INSERT INTO category_stats_v2 (address, category, total_pnl, total_volume, win_rate, resolved_count, winning_count, roi_pct, last_active, computed_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
             ON CONFLICT (address, category) DO UPDATE SET
                 total_pnl=EXCLUDED.total_pnl, total_volume=EXCLUDED.total_volume,
@@ -514,6 +1266,18 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
                 last_active=EXCLUDED.last_active, computed_at=NOW()
         """, address, cs["category"], cs["total_pnl"], cs["total_volume"],
             cs["win_rate"], cs["resolved_count"], cs["winning_count"], cs["roi_pct"], cs["last_active"])
+
+    for ss in sub_stats:
+        await conn.execute("""
+            INSERT INTO wallet_subcategory_stats (address, category, subcategory, total_pnl, total_volume, win_rate, resolved_count, winning_count, roi_pct, last_active, computed_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+            ON CONFLICT (address, category, subcategory) DO UPDATE SET
+                total_pnl=EXCLUDED.total_pnl, total_volume=EXCLUDED.total_volume,
+                win_rate=EXCLUDED.win_rate, resolved_count=EXCLUDED.resolved_count,
+                winning_count=EXCLUDED.winning_count, roi_pct=EXCLUDED.roi_pct,
+                last_active=EXCLUDED.last_active, computed_at=NOW()
+        """, address, ss["category"], ss["subcategory"], ss["total_pnl"], ss["total_volume"],
+            ss["win_rate"], ss["resolved_count"], ss["winning_count"], ss["roi_pct"], ss["last_active"])
 
     # ── Per-category windowed stats (last N closed positions per category) ──
     TRADE_WINDOWS = [100, 300, 800, 1500, 2500]
@@ -547,43 +1311,190 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
         if latest_ts:
             latest_dt = datetime.fromtimestamp(latest_ts, tz=timezone.utc)
             await conn.execute(
-                "UPDATE tracked_wallets SET last_trade_at = GREATEST(last_trade_at, $2) WHERE address = $1",
+                "UPDATE wallets_v2 SET last_trade_at = GREATEST(last_trade_at, $2) WHERE address = $1",
                 address, latest_dt,
             )
 
     # ── Dormancy check: inactive > 30 days → is_dormant = true ──
     dormancy_row = await conn.fetchrow(
-        "SELECT last_trade_at FROM tracked_wallets WHERE address = $1", address
+        "SELECT last_trade_at FROM wallets_v2 WHERE address = $1", address
     )
     if dormancy_row and dormancy_row["last_trade_at"]:
         days_inactive = (datetime.now(timezone.utc) - dormancy_row["last_trade_at"]).days
         is_dormant = days_inactive > 30
         await conn.execute(
-            "UPDATE tracked_wallets SET is_dormant = $2 WHERE address = $1",
+            "UPDATE wallets_v2 SET is_dormant = $2 WHERE address = $1",
             address, is_dormant,
         )
     else:
         is_dormant = False
 
-    # ── Curated promotion: PnL > $10k AND (ROI > 30% OR win_rate > 60% OR resolved > 5) ──
+    # ── Curated promotion: ROI > 30% OR balance > $5k OR PnL > $10k ──
     qualifies = (
         not is_dormant
-        and stats["total_pnl"] > 10_000
         and (
             stats["roi_pct"] > 30
-            or stats["win_rate"] > 0.60
-            or stats["resolved_count"] > 5
+            or balance > 5_000
+            or stats["total_pnl"] > 10_000
         )
     )
+    
+    was_curated = row["is_curated"]
+    newly_curated = qualifies and not was_curated
+    
     await conn.execute("""
-        UPDATE tracked_wallets SET
-            is_curated = $2,
-            curated_at = CASE WHEN $2 = TRUE AND is_curated = FALSE THEN NOW()
+        UPDATE wallets_v2 SET
+            tier = CASE WHEN $2 THEN 'CURATED' ELSE tier END,
+            is_dormant = FALSE,
+            curated_at = CASE WHEN $2 = TRUE AND tier != 'CURATED' THEN NOW()
                               WHEN $2 = FALSE THEN NULL
                               ELSE curated_at END,
             last_checked_for_curated = NOW()
         WHERE address = $1
     """, address, qualifies)
+
+    # ── Newly curated: fetch trades/positions and compute category/subcategory ──
+    if newly_curated:
+        logger.info(f"Wallet {address[:10]}... newly promoted to curated - fetching trades/positions")
+        data = await _fetch_wallet_data(session, address, start_stats_at)
+        trades = data["trades"]
+        positions = data["positions"]
+        
+        # Recompute stats with trades/positions
+        position_value = 0.0
+        for pos in (positions or []):
+            curr_val = _parse(pos.get("currentValue"))
+            if curr_val > 0:
+                position_value += curr_val
+
+        stats = compute_stats(positions, closed, headline["pnl"], headline["volume"], start_stats_at)
+
+    if is_curated or newly_curated:
+        await aggregate_and_upsert_positions(conn, address, trades, closed, positions)
+        db_stats = await compute_window_stats_from_db(conn, address)
+        for k, v in db_stats.items():
+            stats[k] = v
+        # Override the main win rate with the DB-computed all-time win rate
+        if 'win_rate_all' in stats:
+            stats['win_rate'] = stats['win_rate_all']
+        # Persist triangle logic window stats
+        await conn.execute("""
+            INSERT INTO wallet_metrics_v2 (address, win_rate, roi_pct, resolved_count, winning_count,
+                total_volume, total_pnl, biggest_win, biggest_loss,
+                active_days,
+                avg_buy_price, buys_below_10c, buys_below_20c, buys_below_30c, buys_below_40c, buys_above_70c,
+                wins_below_10c, wins_below_20c, wins_below_30c, wins_below_40c, wins_above_70c,
+                losses_below_10c, losses_below_20c, losses_below_30c, losses_below_40c, losses_above_70c,
+                win_rate_100, win_rate_300, win_rate_800, win_rate_1500, win_rate_2500,
+                last_updated)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                win_rate=EXCLUDED.win_rate, roi_pct=EXCLUDED.roi_pct, resolved_count=EXCLUDED.resolved_count,
+                winning_count=EXCLUDED.winning_count, total_volume=EXCLUDED.total_volume, total_pnl=EXCLUDED.total_pnl,
+                active_days=EXCLUDED.active_days,
+                avg_buy_price=EXCLUDED.avg_buy_price, buys_below_10c=EXCLUDED.buys_below_10c, buys_below_20c=EXCLUDED.buys_below_20c,
+                buys_below_30c=EXCLUDED.buys_below_30c, buys_below_40c=EXCLUDED.buys_below_40c, buys_above_70c=EXCLUDED.buys_above_70c,
+                wins_below_10c=EXCLUDED.wins_below_10c, wins_below_20c=EXCLUDED.wins_below_20c,
+                wins_below_30c=EXCLUDED.wins_below_30c, wins_below_40c=EXCLUDED.wins_below_40c, wins_above_70c=EXCLUDED.wins_above_70c,
+                losses_below_10c=EXCLUDED.losses_below_10c, losses_below_20c=EXCLUDED.losses_below_20c,
+                losses_below_30c=EXCLUDED.losses_below_30c, losses_below_40c=EXCLUDED.losses_below_40c, losses_above_70c=EXCLUDED.losses_above_70c,
+                win_rate_100=EXCLUDED.win_rate_100, win_rate_300=EXCLUDED.win_rate_300, win_rate_800=EXCLUDED.win_rate_800,
+                win_rate_1500=EXCLUDED.win_rate_1500, win_rate_2500=EXCLUDED.win_rate_2500,
+                last_updated=EXCLUDED.last_updated
+        """, address, stats["win_rate"], stats["roi_pct"], stats["resolved_count"], stats["winning_count"],
+            stats["total_volume"], stats["total_pnl"],
+            stats["biggest_win"], stats["biggest_loss"],
+            stats["active_days"],
+            stats["avg_buy_price"], stats["buys_below_10c"], stats["buys_below_20c"],
+            stats["buys_below_30c"], stats["buys_below_40c"], stats["buys_above_70c"],
+            stats["wins_below_10c"], stats["wins_below_20c"],
+            stats["wins_below_30c"], stats["wins_below_40c"], stats["wins_above_70c"],
+            stats["losses_below_10c"], stats["losses_below_20c"],
+            stats["losses_below_30c"], stats["losses_below_40c"], stats["losses_above_70c"],
+            stats.get("win_rate_100", 0.0), stats.get("win_rate_300", 0.0), stats.get("win_rate_800", 0.0),
+            stats.get("win_rate_1500", 0.0), stats.get("win_rate_2500", 0.0))
+        # Update wallets_v2
+        await conn.execute("""
+            UPDATE wallets_v2 SET
+                total_pnl=$2, total_volume=$3,
+                win_rate=$4, roi_pct=$5, resolved_count=$6, winning_count=$7,
+                max_trade_size=$8, balance=$9,
+                deposits=$10, withdrawals=$11, position_value=$12, last_indexed=NOW()
+            WHERE address=$1
+        """, address, stats["total_pnl"],
+            stats["total_volume"], stats["win_rate"], stats["roi_pct"],
+            stats["resolved_count"], stats["winning_count"],
+            stats["max_trade_size"],
+            balance, deposits, withdrawals, position_value)
+    else:
+        # Give default 0s for non-curated
+        for k in ['win_rate_100', 'win_rate_300', 'win_rate_800', 'win_rate_1500', 'win_rate_2500']:
+            stats[k] = 0.0
+        
+        # Update wallet_metrics_v2 with full trade data
+        await conn.execute("""
+            INSERT INTO wallet_metrics_v2 (address, win_rate, roi_pct, resolved_count, winning_count,
+                total_volume, total_pnl, biggest_win, biggest_loss,
+                active_days,
+                avg_buy_price, buys_below_10c, buys_below_20c, buys_below_30c, buys_below_40c, buys_above_70c,
+                wins_below_10c, wins_below_20c, wins_below_30c, wins_below_40c, wins_above_70c,
+                losses_below_10c, losses_below_20c, losses_below_30c, losses_below_40c, losses_above_70c,
+                last_updated)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,NOW())
+            ON CONFLICT (address) DO UPDATE SET
+                win_rate=EXCLUDED.win_rate, roi_pct=EXCLUDED.roi_pct, resolved_count=EXCLUDED.resolved_count,
+                winning_count=EXCLUDED.winning_count, total_volume=EXCLUDED.total_volume, total_pnl=EXCLUDED.total_pnl,
+                biggest_win=EXCLUDED.biggest_win, biggest_loss=EXCLUDED.biggest_loss,
+                active_days=EXCLUDED.active_days,
+                avg_buy_price=EXCLUDED.avg_buy_price, buys_below_10c=EXCLUDED.buys_below_10c, buys_below_20c=EXCLUDED.buys_below_20c,
+                buys_below_30c=EXCLUDED.buys_below_30c, buys_below_40c=EXCLUDED.buys_below_40c, buys_above_70c=EXCLUDED.buys_above_70c,
+                wins_below_10c=EXCLUDED.wins_below_10c, wins_below_20c=EXCLUDED.wins_below_20c,
+                wins_below_30c=EXCLUDED.wins_below_30c, wins_below_40c=EXCLUDED.wins_below_40c, wins_above_70c=EXCLUDED.wins_above_70c,
+                losses_below_10c=EXCLUDED.losses_below_10c, losses_below_20c=EXCLUDED.losses_below_20c,
+                losses_below_30c=EXCLUDED.losses_below_30c, losses_below_40c=EXCLUDED.losses_below_40c, losses_above_70c=EXCLUDED.losses_above_70c,
+                last_updated=EXCLUDED.last_updated
+        """, address, stats["win_rate"], stats["roi_pct"], stats["resolved_count"], stats["winning_count"],
+            stats["total_volume"], stats["total_pnl"],
+            stats["biggest_win"], stats["biggest_loss"],
+            stats["active_days"],
+            stats["avg_buy_price"], stats["buys_below_10c"], stats["buys_below_20c"],
+            stats["buys_below_30c"], stats["buys_below_40c"], stats["buys_above_70c"],
+            stats["wins_below_10c"], stats["wins_below_20c"],
+            stats["wins_below_30c"], stats["wins_below_40c"], stats["wins_above_70c"],
+            stats["losses_below_10c"], stats["losses_below_20c"],
+            stats["losses_below_30c"], stats["losses_below_40c"], stats["losses_above_70c"])
+
+        # Find latest trade timestamp from the fetched trades
+        latest_trade_ts = 0
+        for t in trades:
+            ts = t.get("timestamp", 0)
+            if ts and int(ts) > latest_trade_ts:
+                latest_trade_ts = int(ts)
+        last_trade_dt = datetime.fromtimestamp(latest_trade_ts, tz=timezone.utc) if latest_trade_ts > 0 else None
+
+        # Update wallets_v2 with full data
+        await conn.execute("""
+            UPDATE wallets_v2 SET
+                total_pnl=$2, total_volume=$3,
+                win_rate=$4, roi_pct=$5, resolved_count=$6, winning_count=$7,
+                max_trade_size=$8, balance=$9,
+                deposits=$10, withdrawals=$11, position_value=$12, last_indexed=NOW(),
+                last_trade_at = GREATEST(COALESCE(last_trade_at, $13), $13),
+                last_active = GREATEST(COALESCE(last_active, added_at), $13),
+                is_dormant = CASE
+                    WHEN NOW() - GREATEST(COALESCE(last_active, added_at), COALESCE($13, '1970-01-01'::TIMESTAMPTZ)) > INTERVAL '30 days' THEN TRUE
+                    ELSE FALSE
+                END,
+                next_check_at = CASE
+                    WHEN NOW() - GREATEST(COALESCE(last_active, added_at), COALESCE($13, '1970-01-01'::TIMESTAMPTZ)) > INTERVAL '30 days' THEN NULL
+                    ELSE NOW() + INTERVAL '7 days'
+                END
+            WHERE address=$1
+        """, address, stats["total_pnl"],
+            stats["total_volume"], stats["win_rate"], stats["roi_pct"],
+            stats["resolved_count"], stats["winning_count"],
+            stats["max_trade_size"],
+            balance, deposits, withdrawals, position_value, last_trade_dt)
 
     # ── Store ALL trades for curated wallets ──
     if qualifies:
@@ -604,7 +1515,7 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
             if tx_hash:
                 try:
                     await conn.execute("""
-                        INSERT INTO curated_wallet_trades
+                        INSERT INTO global_wallet_trades
                         (wallet_address, tx_hash, condition_id, market_name, side, price,
                          size, amount_usdc, traded_at, category, subcategory, detailed_subcategory)
                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -618,7 +1529,9 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
 # ── Parallel runner ──────────────────────────────────────────────────────
 
 async def run_leaderboard_stats(db_url: str = DB_URL):
-    logger.info("Starting Leaderboard Stats worker (concurrency=%d, interval=%ds)...", CONCURRENCY, POLL_INTERVAL)
+    logger.info("Starting Leaderboard Stats worker (concurrency=%d, interval=%ds, supabase_rate=%d/min)...", CONCURRENCY, POLL_INTERVAL, SUPABASE_RATE_LIMIT)
+    global _sb_semaphore
+    _sb_semaphore = asyncio.Semaphore(1)  # Sequential Supabase calls
     try:
         pool = await asyncpg.create_pool(db_url, min_size=2, max_size=15)
     except Exception as e:
@@ -633,10 +1546,7 @@ async def run_leaderboard_stats(db_url: str = DB_URL):
                 # 2. Wallets not checked for curated in 5 days
                 # 3. Oldest indexed wallets
                 rows = await conn.fetch("""
-                    SELECT address FROM tracked_wallets 
-                    ORDER BY 
-                        last_indexed ASC NULLS FIRST,
-                        last_checked_for_curated ASC NULLS FIRST
+                    SELECT w.address FROM wallets_v2 w LEFT JOIN wallet_metrics_v2 m ON w.address = m.address WHERE w.is_dormant = FALSE ORDER BY m.computed_at ASC NULLS FIRST
                 """)
                 wallets = [r["address"] for r in rows]
                 total = len(wallets)
@@ -652,8 +1562,11 @@ async def run_leaderboard_stats(db_url: str = DB_URL):
                     try:
                         async with pool.acquire() as conn:
                             async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-                                await process_wallet(conn, session, addr)
+                                await asyncio.wait_for(process_wallet(conn, session, addr), timeout=WALLET_TIMEOUT)
                         done += 1
+                    except asyncio.TimeoutError:
+                        errors += 1
+                        logger.warning(f"Timeout {addr[:10]}... ({WALLET_TIMEOUT}s)")
                     except Exception as e:
                         errors += 1
                         logger.warning(f"Error {addr[:10]}...: {e}")
