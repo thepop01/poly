@@ -1,4 +1,4 @@
-﻿"""FastAPI initialization and lifespan management."""
+"""FastAPI initialization and lifespan management."""
 
 import logging
 from contextlib import asynccontextmanager
@@ -9,6 +9,7 @@ load_dotenv()
 
 from src.db import get_pool, close_pool, init_db
 from src.api.routers import trades, ws, leaderboard, wallets, watchlist, alpha_calls, tracker, discord, auth, tracked_wallets
+from src.api.routers import leaderboard_v2, wallets_v2, alpha_calls_v2, tracked_wallets_v2, trades_v2, custom_wallets
 import asyncio
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
@@ -87,7 +88,7 @@ async def postgres_error_handler(request: Request, exc: asyncpg.exceptions.Postg
     # In production, never leak exact SQL errors. 
     return JSONResponse(
         status_code=500,
-        content={"error": {"code": "DATABASE_ERROR", "message": "A database operation failed.", "details": None}}
+        content={"error": {"code": "DATABASE_ERROR", "message": "A database operation failed.", "details": str(exc)}}
     )
 
 @app.exception_handler(Exception)
@@ -95,7 +96,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled Exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"error": {"code": "INTERNAL_SERVER_ERROR", "message": "An unexpected error occurred.", "details": None}}
+        content={"error": {"code": "INTERNAL_SERVER_ERROR", "message": "An unexpected error occurred.", "details": str(exc)}}
     )
 
 app.include_router(auth.router, prefix="/api")
@@ -108,6 +109,14 @@ app.include_router(alpha_calls.router, prefix="/api")
 app.include_router(tracker.router, prefix="/api")
 app.include_router(discord.router, prefix="/api")
 app.include_router(tracked_wallets.router, prefix="/api")
+
+# Mount V2 routers
+app.include_router(leaderboard_v2.router, prefix="/api")
+app.include_router(wallets_v2.router, prefix="/api")
+app.include_router(alpha_calls_v2.router, prefix="/api")
+app.include_router(tracked_wallets_v2.router, prefix="/api")
+app.include_router(trades_v2.router, prefix="/api")
+app.include_router(custom_wallets.router, prefix="/api")
 
 @app.get("/health")
 async def health_check():
