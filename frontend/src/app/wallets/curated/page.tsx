@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { getCuratedWalletList, toggleWatchlist, getSubcategories } from "@/utils/api";
-import { formatCurrency } from "@/utils/format";
+import { getCuratedWalletList, getSubcategories } from "@/utils/api";
+import { formatCurrency, formatAddress } from "@/utils/format";
+import { useCopyAddress } from "@/hooks/useCopyAddress";
+import { useWatchlistAdd } from "@/hooks/useWatchlistAdd";
+import { Pagination } from "@/components/wallets/Pagination";
 import Link from "next/link";
 import { Star, Search, Copy, PlusCircle, Check, Info, ChevronDown, ChevronUp, X, SlidersHorizontal } from "lucide-react";
 
@@ -23,11 +26,26 @@ interface CuratedWallet {
   winning_count: number;
   website_pnl: number;
   position_value: number;
-  category: string | null;
-  subcategory: string | null;
+  categories: string[];
+  subcategories: string[];
   active_category: string | null;
-  tier: string | null;
   last_active: string | null;
+  avg_buy_price: number;
+  buys_below_10c: number;
+  buys_below_20c: number;
+  buys_below_30c: number;
+  buys_below_40c: number;
+  buys_above_70c: number;
+  wins_below_10c: number;
+  wins_below_20c: number;
+  wins_below_30c: number;
+  wins_below_40c: number;
+  wins_above_70c: number;
+  losses_below_10c: number;
+  losses_below_20c: number;
+  losses_below_30c: number;
+  losses_below_40c: number;
+  losses_above_70c: number;
 }
 
 const CATEGORIES = [
@@ -46,6 +64,8 @@ const CATEGORY_TABS = [
   { key: "CULTURE", label: "Culture" },
   { key: "ESPORTS", label: "Esports" },
   { key: "WEATHER", label: "Weather" },
+  { key: "MENTIONS", label: "Mentions" },
+  { key: "OTHER", label: "Others" },
 ];
 
 const CATEGORY_TAB_COLORS: Record<string, string> = {
@@ -59,6 +79,8 @@ const CATEGORY_TAB_COLORS: Record<string, string> = {
   CULTURE: "bg-pink-500/15 text-pink-400 border border-pink-500/20",
   ESPORTS: "bg-red-500/15 text-red-400 border border-red-500/20",
   WEATHER: "bg-teal-500/15 text-teal-400 border border-teal-500/20",
+  MENTIONS: "bg-indigo-500/15 text-indigo-400 border border-indigo-500/20",
+  OTHER: "bg-gray-500/15 text-gray-400 border border-gray-500/20",
 };
 
 const SORT_OPTIONS = [
@@ -66,7 +88,7 @@ const SORT_OPTIONS = [
   { value: "win_rate", label: "Win Rate" },
   { value: "roi_pct", label: "ROI" },
   { value: "total_volume", label: "Volume" },
-  { value: "resolved_count", label: "Trades" },
+  { value: "resolved_count", label: "Resolved" },
   { value: "winning_count", label: "Wins" },
   { value: "pnl_100", label: "PnL 100" },
   { value: "pnl_300", label: "PnL 300" },
@@ -84,12 +106,6 @@ const PNL_WINDOW_OPTIONS = [
   { value: "pnl_2500", label: "Last 2500" },
 ];
 
-function formatAddress(addr: string) {
-  if (!addr) return "Unknown";
-  if (addr.length < 10) return addr;
-  return `${addr.slice(0, 5)}...${addr.slice(-4)}`;
-}
-
 export default function CuratedListPage() {
   const [wallets, setWallets] = useState<CuratedWallet[]>([]);
   const [total, setTotal] = useState(0);
@@ -98,8 +114,41 @@ export default function CuratedListPage() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState("total_pnl");
-  const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
-  const [watchlistStatus, setWatchlistStatus] = useState<Record<string, "idle" | "loading" | "success">>({});
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [tradeSortKey, setTradeSortKey] = useState<string | null>(null);
+  const [tradeSortDir, setTradeSortDir] = useState<"desc" | "asc">("desc");
+
+  const TRADE_SORT_CYCLE: Record<string, [string, "desc" | "asc"][]> = {
+    buys_below_10c: [["buys_below_10c", "desc"], ["wins_below_10c", "desc"], ["wins_below_10c", "asc"], ["buys_below_10c", "asc"]],
+    buys_below_20c: [["buys_below_20c", "desc"], ["wins_below_20c", "desc"], ["wins_below_20c", "asc"], ["buys_below_20c", "asc"]],
+    buys_below_30c: [["buys_below_30c", "desc"], ["wins_below_30c", "desc"], ["wins_below_30c", "asc"], ["buys_below_30c", "asc"]],
+    buys_below_40c: [["buys_below_40c", "desc"], ["wins_below_40c", "desc"], ["wins_below_40c", "asc"], ["buys_below_40c", "asc"]],
+    buys_above_70c: [["buys_above_70c", "desc"], ["wins_above_70c", "desc"], ["wins_above_70c", "asc"], ["buys_above_70c", "asc"]],
+  };
+
+  const handleTradeSort = (key: string) => {
+    const cycle = TRADE_SORT_CYCLE[key];
+    if (!cycle) return;
+    const currentIdx = cycle.findIndex(([k, d]) => k === tradeSortKey && d === tradeSortDir);
+    const nextIdx = (currentIdx + 1) % cycle.length;
+    const [nextKey, nextDir] = cycle[nextIdx];
+    setTradeSortKey(nextKey);
+    setTradeSortDir(nextDir);
+    setPage(1);
+  };
+
+  const handleSort = (field: string) => {
+    setTradeSortKey(null);
+    if (sortBy === field) {
+      setSortOrder(sortOrder === "desc" ? "asc" : "desc");
+    } else {
+      setSortBy(field);
+      setSortOrder("desc");
+    }
+    setPage(1);
+  };
+  const { copiedAddress, handleCopy } = useCopyAddress();
+  const { watchlistStatus, handleAddToWatchlist } = useWatchlistAdd();
   const [showFilters, setShowFilters] = useState(false);
   const pageSize = 50;
 
@@ -160,7 +209,7 @@ export default function CuratedListPage() {
       const offset = (page - 1) * pageSize;
       const windowNum = pnlWindow ? Number(pnlWindow.replace("pnl_", "")) : undefined;
 
-      const data = await getCuratedWalletList(sortBy, pageSize, offset, search, category, {
+      const data = await getCuratedWalletList(sortBy, sortOrder, pageSize, offset, search, category, {
         filterSubcategory: filterSubcategory || undefined,
         minRoi: minRoi ? Number(minRoi) : undefined,
         maxRoi: maxRoi ? Number(maxRoi) : undefined,
@@ -176,28 +225,17 @@ export default function CuratedListPage() {
       console.error(e);
     }
     setLoading(false);
-  }, [sortBy, page, search, category, filterSubcategory, minRoi, maxRoi, minPnl, maxPnl, minWinRate, maxWinRate, pnlWindow]);
+  }, [sortBy, sortOrder, page, search, category, filterSubcategory, minRoi, maxRoi, minPnl, maxPnl, minWinRate, maxWinRate, pnlWindow]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const handleCopy = (e: React.MouseEvent, address: string) => {
-    e.preventDefault();
-    navigator.clipboard.writeText(address);
-    setCopiedAddress(address);
-    setTimeout(() => setCopiedAddress(null), 2000);
-  };
-
-  const handleAddToWatchlist = async (e: React.MouseEvent, address: string) => {
-    e.preventDefault();
-    try {
-      setWatchlistStatus((prev) => ({ ...prev, [address]: "loading" }));
-      await toggleWatchlist(address, "add");
-      setWatchlistStatus((prev) => ({ ...prev, [address]: "success" }));
-      setTimeout(() => setWatchlistStatus((prev) => ({ ...prev, [address]: "idle" })), 3000);
-    } catch {
-      setWatchlistStatus((prev) => ({ ...prev, [address]: "idle" }));
-    }
-  };
+  const displayWallets = tradeSortKey
+    ? [...wallets].sort((a, b) => {
+        const fieldA = Number((a as unknown as Record<string, number>)[tradeSortKey] || 0);
+        const fieldB = Number((b as unknown as Record<string, number>)[tradeSortKey] || 0);
+        return tradeSortDir === "desc" ? fieldB - fieldA : fieldA - fieldB;
+      })
+    : wallets;
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -215,7 +253,7 @@ export default function CuratedListPage() {
           <p className="text-xs text-muted-fg mt-0.5">
             {isCategoryView
               ? `${CATEGORY_TABS.find(c => c.key === category)?.label} wallets - category-specific PnL`
-              : "ROI > 30% OR Win Rate > 60% OR PnL > $10k - active in last 30 days"
+              : "ROI > 30% OR Win Rate > 70% OR PnL > $10k - active in last 30 days"
             }
           </p>
         </div>
@@ -226,57 +264,89 @@ export default function CuratedListPage() {
       </div>
 
       {/* Category tabs */}
-      <div className="flex items-center gap-4 flex-shrink-0 flex-wrap border-b border-border w-full pb-0">
-        {CATEGORY_TABS.map((cat) => (
-          <button
-            key={cat.key}
-            onClick={() => { setCategory(cat.key); setPage(1); setSortBy("total_pnl"); }}
-            className={`px-1 py-2 text-[14px] font-medium transition-colors border-b-2 -mb-[1px] ${
-              category === cat.key
-                ? "text-blue-500 border-blue-500"
-                : "text-muted-fg border-transparent hover:text-foreground"
-            }`}
-          >
-            {cat.label}
-          </button>
-        ))}
+      <div className="flex flex-col gap-3 flex-shrink-0 border-b border-border w-full pb-3">
+        <div className="flex items-center gap-4 flex-wrap">
+          {CATEGORY_TABS.map((cat) => (
+            <button
+              key={cat.key}
+              onClick={() => { setCategory(cat.key); setPage(1); setSortBy("total_pnl"); }}
+              className={`px-1 py-1 text-[14px] font-medium transition-colors border-b-2 -mb-[1px] ${
+                category === cat.key
+                  ? "text-blue-500 border-blue-500"
+                  : "text-muted-fg border-transparent hover:text-foreground"
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {PNL_WINDOW_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => { 
+                setPnlWindow(opt.value);
+                setPendingFilters(prev => ({...prev, pnlWindow: opt.value}));
+                setPage(1); 
+              }}
+              className={`px-3 py-1 text-[11px] font-semibold transition-colors rounded-full uppercase tracking-wider ${
+                pnlWindow === opt.value
+                  ? "bg-blue-500/10 text-blue-500 border border-blue-500/20"
+                  : "text-muted-fg bg-surface-2 hover:bg-surface-3 border border-transparent"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Search + Sort + Filter toggle */}
-      <div className="flex items-center justify-between flex-shrink-0 py-1">
-        <div className="relative w-72">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-fg" />
-          <input
-            type="text"
-            placeholder="Filter wallets..."
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            className="w-full pl-9 pr-3 py-2 rounded-lg bg-surface border border-border text-sm focus:border-primary focus:outline-none"
-          />
-        </div>
-        <div className="flex items-center gap-3">
+      {/* Search + Subcategory Pills + Filter toggle */}
+      <div className="flex items-center justify-between flex-shrink-0 py-1 gap-4">
+        
+        <div className="flex items-center gap-4 flex-1 overflow-hidden min-w-0">
+          <div className="relative w-72 flex-shrink-0">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-fg" />
+            <input
+              type="text"
+              placeholder="Filter wallets..."
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              className="w-full pl-9 pr-3 py-2 rounded-lg bg-surface border border-border text-sm focus:border-primary focus:outline-none"
+            />
+          </div>
 
+          {/* Subcategory Pills */}
           {subcategoryOptions.length > 0 && (
-            <select
-              value={filterSubcategory}
-              onChange={(e) => { setFilterSubcategory(e.target.value); setPage(1); }}
-              className="px-3 py-2 rounded-lg bg-surface border border-border text-xs font-semibold text-muted-fg hover:text-foreground cursor-pointer transition-colors tracking-wider"
-            >
-              <option value="">All Subcategories</option>
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 flex-1 min-w-0 scrollbar-hide">
+              <button
+                onClick={() => { setFilterSubcategory(""); setPage(1); }}
+                className={`px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap transition-colors border ${
+                  filterSubcategory === ""
+                    ? "bg-foreground text-background border-foreground"
+                    : "bg-surface-2 text-muted-fg border-transparent hover:text-foreground hover:bg-surface-3"
+                }`}
+              >
+                All
+              </button>
               {subcategoryOptions.map((sub) => (
-                <option key={sub} value={sub}>{sub}</option>
+                <button
+                  key={sub}
+                  onClick={() => { setFilterSubcategory(sub); setPage(1); }}
+                  className={`px-3 py-1 text-xs font-semibold rounded-full whitespace-nowrap transition-colors border ${
+                    filterSubcategory === sub
+                      ? "bg-foreground text-background border-foreground"
+                      : "bg-surface-2 text-muted-fg border-transparent hover:text-foreground hover:bg-surface-3"
+                  }`}
+                >
+                  {sub}
+                </button>
               ))}
-            </select>
+            </div>
           )}
-          <select
-            value={sortBy}
-            onChange={(e) => { setSortBy(e.target.value); setPage(1); }}
-            className="px-3 py-2 rounded-lg bg-surface border border-border text-xs font-semibold text-muted-fg hover:text-foreground cursor-pointer transition-colors uppercase tracking-wider"
-          >
-            {SORT_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>Sort: {opt.label}</option>
-            ))}
-          </select>
+        </div>
+
+        <div className="flex items-center gap-3 flex-shrink-0">
           <button
             onClick={() => {
               setPendingFilters({
@@ -454,30 +524,7 @@ export default function CuratedListPage() {
               </div>
 
 
-              {/* Accordion Item: PnL Window */}
-              <div className="border border-border rounded-lg overflow-hidden">
-                <button 
-                  onClick={() => setExpandedAccordion(expandedAccordion === 'pnlWindow' ? null : 'pnlWindow')}
-                  className="w-full flex items-center justify-between px-4 py-3 bg-surface hover:bg-surface-2 transition-colors"
-                >
-                  <span className="text-sm font-semibold">PnL Window</span>
-                  <div className="flex items-center gap-2">
-                    {pendingFilters.pnlWindow && <span className="px-2 py-0.5 text-[10px] font-bold bg-blue-500/10 text-blue-500 rounded">{PNL_WINDOW_OPTIONS.find(o => o.value === pendingFilters.pnlWindow)?.label || ''}</span>}
-                    {expandedAccordion === 'pnlWindow' ? <ChevronUp size={16} className="text-muted-fg" /> : <ChevronDown size={16} className="text-muted-fg" />}
-                  </div>
-                </button>
-                {expandedAccordion === 'pnlWindow' && (
-                  <div className="px-4 pb-3 bg-surface border-t border-border/50">
-                    <select
-                      value={pendingFilters.pnlWindow}
-                      onChange={(e) => setPendingFilters({...pendingFilters, pnlWindow: e.target.value})}
-                      className="w-full mt-3 px-3 py-2 rounded-lg bg-surface-2 border border-border text-sm focus:border-primary outline-none"
-                    >
-                      {PNL_WINDOW_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                    </select>
-                  </div>
-                )}
-              </div>
+
 
             </div>
 
@@ -510,7 +557,7 @@ export default function CuratedListPage() {
         </div>
       )}
 
-      {/* Table */}      {/* Table */}
+      {/* Table */}
       <div className="flex-1 overflow-auto bg-surface rounded-xl border border-border">
         {loading ? (
           <div className="flex items-center justify-center h-full text-muted-fg text-sm">Loading...</div>
@@ -519,26 +566,102 @@ export default function CuratedListPage() {
             {isCategoryView ? `No ${category} wallets found` : "No curated wallets found"}
           </div>
         ) : (
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[1100px]">
             <thead className="sticky top-0 z-10">
               <tr className="border-b border-border bg-surface text-muted-fg font-mono uppercase tracking-wider text-xs">
                 <th className="py-2.5 px-4 font-semibold w-12 text-center">#</th>
                 <th className="py-2.5 px-4 font-semibold">Wallet</th>
                 {!isCategoryView && <th className="py-2.5 px-4 font-semibold">Category</th>}
-                <th className="py-2.5 px-4 font-semibold text-right">Win%</th>
-                <th className="py-2.5 px-4 font-semibold text-right">Wins</th>
-                <th className="py-2.5 px-4 font-semibold text-right">
-                  {pnlWindow ? pnlWindowLabel : "PnL"}
+                <th className="py-2.5 px-4 font-semibold text-right cursor-pointer hover:text-foreground select-none" onClick={() => handleSort("win_rate")}>
+                  <div className="flex items-center justify-end gap-1">Win% {sortBy === "win_rate" && (sortOrder === "desc" ? "↓" : "↑")}</div>
                 </th>
-                <th className="py-2.5 px-4 font-semibold text-right">ROI</th>
-                <th className="py-2.5 px-4 font-semibold text-right">Volume</th>
-                <th className="py-2.5 px-4 font-semibold text-right">Trades</th>
+                <th className="py-2.5 px-4 font-semibold text-right cursor-pointer hover:text-foreground select-none" onClick={() => handleSort("winning_count")}>
+                  <div className="flex items-center justify-end gap-1">Wins {sortBy === "winning_count" && (sortOrder === "desc" ? "↓" : "↑")}</div>
+                </th>
+                <th className="py-2.5 px-4 font-semibold text-right cursor-pointer hover:text-foreground select-none" onClick={() => handleSort("total_pnl")}>
+                  <div className="flex items-center justify-end gap-1">{pnlWindow ? pnlWindowLabel : "PnL"} {sortBy === "total_pnl" && (sortOrder === "desc" ? "↓" : "↑")}</div>
+                </th>
+                <th className="py-2.5 px-4 font-semibold text-right cursor-pointer hover:text-foreground select-none" onClick={() => handleSort("roi_pct")}>
+                  <div className="flex items-center justify-end gap-1">ROI {sortBy === "roi_pct" && (sortOrder === "desc" ? "↓" : "↑")}</div>
+                </th>
+                <th className="py-2.5 px-4 font-semibold text-right cursor-pointer hover:text-foreground select-none" onClick={() => handleSort("total_volume")}>
+                  <div className="flex items-center justify-end gap-1">Volume {sortBy === "total_volume" && (sortOrder === "desc" ? "↓" : "↑")}</div>
+                </th>
+                <th className="py-2.5 px-4 font-semibold text-right cursor-pointer hover:text-foreground select-none" onClick={() => handleSort("resolved_count")}>
+                  <div className="flex items-center justify-end gap-1">Resolved {sortBy === "resolved_count" && (sortOrder === "desc" ? "↓" : "↑")}</div>
+                </th>
+                <th className="py-2.5 px-4 font-semibold text-right">Avg Buy</th>
+                <th
+                  className="py-2.5 px-3 font-semibold text-center cursor-pointer hover:text-foreground select-none"
+                  onClick={() => handleTradeSort("buys_below_10c")}
+                >
+                  <div className="flex flex-col items-center leading-tight">
+                    <span className={`text-[10px] ${tradeSortKey === "buys_below_10c" ? "text-green-300" : "text-green-400"}`}>
+                      &lt;0.10 {tradeSortKey === "buys_below_10c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                    <span className={`text-[10px] ${tradeSortKey === "wins_below_10c" ? "text-foreground" : "text-muted-fg"}`}>
+                      W {tradeSortKey === "wins_below_10c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                  </div>
+                </th>
+                <th
+                  className="py-2.5 px-3 font-semibold text-center cursor-pointer hover:text-foreground select-none"
+                  onClick={() => handleTradeSort("buys_below_20c")}
+                >
+                  <div className="flex flex-col items-center leading-tight">
+                    <span className={`text-[10px] ${tradeSortKey === "buys_below_20c" ? "text-green-300" : "text-green-400"}`}>
+                      &lt;0.20 {tradeSortKey === "buys_below_20c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                    <span className={`text-[10px] ${tradeSortKey === "wins_below_20c" ? "text-foreground" : "text-muted-fg"}`}>
+                      W {tradeSortKey === "wins_below_20c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                  </div>
+                </th>
+                <th
+                  className="py-2.5 px-3 font-semibold text-center cursor-pointer hover:text-foreground select-none"
+                  onClick={() => handleTradeSort("buys_below_30c")}
+                >
+                  <div className="flex flex-col items-center leading-tight">
+                    <span className={`text-[10px] ${tradeSortKey === "buys_below_30c" ? "text-yellow-300" : "text-yellow-400"}`}>
+                      &lt;0.30 {tradeSortKey === "buys_below_30c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                    <span className={`text-[10px] ${tradeSortKey === "wins_below_30c" ? "text-foreground" : "text-muted-fg"}`}>
+                      W {tradeSortKey === "wins_below_30c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                  </div>
+                </th>
+                <th
+                  className="py-2.5 px-3 font-semibold text-center cursor-pointer hover:text-foreground select-none"
+                  onClick={() => handleTradeSort("buys_below_40c")}
+                >
+                  <div className="flex flex-col items-center leading-tight">
+                    <span className={`text-[10px] ${tradeSortKey === "buys_below_40c" ? "text-orange-300" : "text-orange-400"}`}>
+                      &lt;0.40 {tradeSortKey === "buys_below_40c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                    <span className={`text-[10px] ${tradeSortKey === "wins_below_40c" ? "text-foreground" : "text-muted-fg"}`}>
+                      W {tradeSortKey === "wins_below_40c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                  </div>
+                </th>
+                <th
+                  className="py-2.5 px-3 font-semibold text-center cursor-pointer hover:text-foreground select-none"
+                  onClick={() => handleTradeSort("buys_above_70c")}
+                >
+                  <div className="flex flex-col items-center leading-tight">
+                    <span className={`text-[10px] ${tradeSortKey === "buys_above_70c" ? "text-red-300" : "text-red-400"}`}>
+                      &gt;0.70 {tradeSortKey === "buys_above_70c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                    <span className={`text-[10px] ${tradeSortKey === "wins_above_70c" ? "text-foreground" : "text-muted-fg"}`}>
+                      W {tradeSortKey === "wins_above_70c" ? (tradeSortDir === "desc" ? "↓" : "↑") : ""}
+                    </span>
+                  </div>
+                </th>
                 <th className="py-2.5 px-4 font-semibold text-right">Last Active</th>
-                <th className="py-2.5 px-4 font-semibold">Curated</th>
               </tr>
             </thead>
             <tbody>
-              {wallets.map((w, i) => {
+              {displayWallets.map((w, i) => {
                 const pnl = Number(w.total_pnl || 0);
                 const roi = Number(w.roi_pct || 0);
                 return (
@@ -574,8 +697,15 @@ export default function CuratedListPage() {
                     </td>
                     {!isCategoryView && (
                       <td className="py-2.5 px-4 text-xs">
-                        {w.category || "\u2014"}
-                        {w.subcategory && <div className="text-muted-fg text-[10px]">{w.subcategory}</div>}
+                        {w.categories?.length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {w.categories.map(cat => (
+                              <span key={cat} className="px-1.5 py-0.5 text-[10px] rounded bg-surface-2 text-muted-fg border border-border">
+                                {cat}
+                              </span>
+                            ))}
+                          </div>
+                        ) : "—"}
                       </td>
                     )}
                     <td className="py-2.5 px-4 text-right font-mono">{(Number(w.win_rate || 0) * 100).toFixed(0)}%</td>
@@ -590,28 +720,46 @@ export default function CuratedListPage() {
                     </td>
                     <td className="py-2.5 px-4 text-right font-mono text-muted-fg">{formatCurrency(Number(w.total_volume || 0))}</td>
                     <td className="py-2.5 px-4 text-right font-mono">{w.resolved_count || 0}</td>
-                    <td className="py-2.5 px-4 text-right font-mono text-muted-fg text-xs">{w.last_active ? new Date(w.last_active).toLocaleDateString() : "—"}</td>
-                    <td className="py-2.5 px-4 text-xs text-muted-fg">
-                      {w.curated_at ? new Date(w.curated_at).toLocaleDateString() : "\u2014"}
+                    <td className="py-2.5 px-4 text-right font-mono text-xs">
+                      {w.avg_buy_price > 0 ? `${(Number(w.avg_buy_price) * 100).toFixed(0)}¢` : "—"}
                     </td>
+                    <td className="py-2.5 px-3 text-center font-mono text-[11px]">
+                      <span className="text-green-400">{Number(w.buys_below_10c || 0)}</span>
+                      <span className="text-muted-fg">/</span>
+                      <span className="text-foreground">{Number(w.wins_below_10c || 0)}</span>
+                    </td>
+                    <td className="py-2.5 px-3 text-center font-mono text-[11px]">
+                      <span className="text-green-400">{Number(w.buys_below_20c || 0)}</span>
+                      <span className="text-muted-fg">/</span>
+                      <span className="text-foreground">{Number(w.wins_below_20c || 0)}</span>
+                    </td>
+                    <td className="py-2.5 px-3 text-center font-mono text-[11px]">
+                      <span className="text-yellow-400">{Number(w.buys_below_30c || 0)}</span>
+                      <span className="text-muted-fg">/</span>
+                      <span className="text-foreground">{Number(w.wins_below_30c || 0)}</span>
+                    </td>
+                    <td className="py-2.5 px-3 text-center font-mono text-[11px]">
+                      <span className="text-orange-400">{Number(w.buys_below_40c || 0)}</span>
+                      <span className="text-muted-fg">/</span>
+                      <span className="text-foreground">{Number(w.wins_below_40c || 0)}</span>
+                    </td>
+                    <td className="py-2.5 px-3 text-center font-mono text-[11px]">
+                      <span className="text-red-400">{Number(w.buys_above_70c || 0)}</span>
+                      <span className="text-muted-fg">/</span>
+                      <span className="text-foreground">{Number(w.wins_above_70c || 0)}</span>
+                    </td>
+                    <td className="py-2.5 px-4 text-right font-mono text-muted-fg text-xs">{(w.last_active || w.last_trade_at) ? new Date((w.last_active || w.last_trade_at) as string).toLocaleDateString() : "—"}</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
       {/* Pagination */}
-      <div className="flex justify-end items-center py-2 px-2 flex-shrink-0">
-        <div className="flex items-center space-x-1">
-          <button onClick={() => setPage(1)} disabled={page === 1} className="px-2 py-0.5 bg-surface-2 hover:bg-surface-3 transition-colors rounded text-xs text-foreground disabled:opacity-50">First</button>
-          <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} className="px-2 py-0.5 bg-surface-2 hover:bg-surface-3 transition-colors rounded text-xs text-foreground disabled:opacity-50">&lt;</button>
-          <span className="text-xs text-muted-fg mx-1">Page {page} / {totalPages}</span>
-          <button onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages} className="px-2 py-0.5 bg-surface-2 hover:bg-surface-3 transition-colors rounded text-xs text-foreground disabled:opacity-50">&gt;</button>
-          <button onClick={() => setPage(totalPages)} disabled={page >= totalPages} className="px-2 py-0.5 bg-surface-2 hover:bg-surface-3 transition-colors rounded text-xs text-foreground disabled:opacity-50">Last</button>
-        </div>
-      </div>
+      <Pagination page={page} totalPages={totalPages} totalCount={total} onPageChange={setPage} />
     </div>
   );
 }

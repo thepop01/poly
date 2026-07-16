@@ -7,17 +7,21 @@ import { useRouter } from "next/navigation";
 import { Bell } from "lucide-react";
 import {
   Zap,
-  Trophy,
   Anchor,
+  Globe,
+  Star,
+  UserPlus,
 } from "lucide-react";
 import { wsClient } from "@/utils/websocket";
 import { useAuth } from "./AuthProvider";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 
 const navItems = [
-  { name: "Alpha Trades", path: "/alpha-calls", icon: Zap },
-  { name: "Leaderboard", path: "/leaderboard", icon: Trophy },
-  { name: "Wallet Tracker", path: "/tools/wallet-tracker", icon: Anchor },
+  { name: "Activity", path: "/alpha-calls", icon: Zap },
+  { name: "Wallets", path: "/wallets", icon: Globe, exact: true },
+  { name: "Curated", path: "/wallets/curated", icon: Star },
+  { name: "Custom Wallets", path: "/wallets/custom", icon: UserPlus },
+  { name: "My Tracker", path: "/tracker", icon: Anchor },
 ];
 
 export default function Sidebar() {
@@ -88,8 +92,10 @@ export default function Sidebar() {
       <nav className="flex-1 px-2 py-4 space-y-0.5">
         {navItems.map((item) => {
           const Icon = item.icon;
-          const isActive =
-            item.path === "/"
+          // "Wallets" must not light up for /wallets/curated or /wallets/custom
+          const isActive = item.exact
+            ? pathname === item.path
+            : item.path === "/"
               ? pathname === "/"
               : pathname.startsWith(item.path);
 

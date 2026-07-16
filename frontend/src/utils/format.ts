@@ -7,6 +7,26 @@ export function formatCurrency(value?: number) {
   return `${sign}$${abs.toFixed(0)}`;
 }
 
+export function formatAddress(addr: string) {
+  if (!addr) return "Unknown";
+  if (addr.length < 10) return addr;
+  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+}
+
+export function timeAgo(value?: string | null): { relative: string; absolute: string } | null {
+  if (!value) return null;
+  const d = new Date(value);
+  const diffMs = Date.now() - d.getTime();
+  const diffHrs = Math.floor(diffMs / (1000 * 60 * 60));
+  const diffDays = Math.floor(diffHrs / 24);
+  let relative = "";
+  if (diffHrs < 1) relative = "Just now";
+  else if (diffHrs < 24) relative = `${diffHrs}h ago`;
+  else if (diffDays < 30) relative = `${diffDays}d ago`;
+  else relative = d.toLocaleDateString();
+  return { relative, absolute: d.toLocaleString() };
+}
+
 export function parseMarketMatch(question: string) {
   const clean = question.replace(/^will\s+/i, "").replace(/\?$/, "");
   const parts = clean.split(/\s+(?:vs\.?|v\.?|versus|beat|defeat)\s+/i);

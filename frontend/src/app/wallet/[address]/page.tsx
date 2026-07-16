@@ -42,7 +42,7 @@ export default function WalletPage() {
 
   useEffect(() => {
     if (activeTab === "closed" && address) {
-      fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"}/api/wallets/${address}/closed-positions?limit=100`)
+      fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"}/api/v2/wallets/${address}/closed-positions?limit=100`)
         .then(r => r.json())
         .then(d => setClosedPositions(Array.isArray(d) ? d : []))
         .catch(() => {});
@@ -54,7 +54,7 @@ export default function WalletPage() {
   return (
     <div className="w-full h-full flex flex-col bg-background">
       <div className="flex items-center gap-4 mb-4 flex-shrink-0">
-        <Link href="/leaderboard" className="text-muted-fg hover:text-foreground transition-colors">
+        <Link href="/wallets" className="text-muted-fg hover:text-foreground transition-colors">
           <ArrowLeft size={18} />
         </Link>
         <h1 className="text-lg font-bold text-foreground flex items-center gap-2">
