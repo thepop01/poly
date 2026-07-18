@@ -85,7 +85,7 @@ async def get_wallets_tabbed(
                w.last_trade_at, w.added_at,
                COALESCE(m.pm_pnl, m.total_pnl) AS pnl,
                COALESCE(m.pm_volume, m.total_volume) AS volume,
-               m.roi_pct, m.win_rate, m.balance, m.position_value, m.deposits,
+               m.roi_pct, m.win_rate, m.balance, m.position_value, m.deposits, m.withdrawals,
                (SELECT array_agg(s.source ORDER BY s.spotted_at)
                   FROM wallet_sources_v2 s WHERE s.address = w.address) AS sources,
                COUNT(*) OVER() AS total_count

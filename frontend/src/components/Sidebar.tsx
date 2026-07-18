@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Bell } from "lucide-react";
+import { Bell, Bot } from "lucide-react";
 import {
   Zap,
   Anchor,
@@ -22,6 +22,7 @@ const navItems = [
   { name: "Curated", path: "/wallets/curated", icon: Star },
   { name: "Custom Wallets", path: "/wallets/custom", icon: UserPlus },
   { name: "My Tracker", path: "/tracker", icon: Anchor },
+  { name: "Agents", path: "/agents", icon: Bot },
 ];
 
 export default function Sidebar() {

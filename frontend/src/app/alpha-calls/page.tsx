@@ -47,7 +47,7 @@ export default function AlphaFeedPage() {
     if (amount >= 100000) return "Tier 4";
     if (amount >= 50000) return "Tier 3";
     if (amount >= 20000) return "Tier 2";
-    if (amount >= 10000) return "Tier 1";
+    if (amount >= 5000) return "Tier 1";
     return "Unranked";
   };
 
@@ -107,6 +107,29 @@ export default function AlphaFeedPage() {
         <span className="text-xs text-muted-fg mx-1">Page {page} of {totalPages}</span>
         <button onClick={() => setPage(p => p + 1)} disabled={page >= totalPages} className="px-2 py-0.5 bg-surface-2 hover:bg-surface-3 transition-colors rounded text-xs text-foreground disabled:opacity-50">&gt;</button>
         <button onClick={() => setPage(totalPages)} disabled={page >= totalPages} className="px-2 py-0.5 bg-surface-2 hover:bg-surface-3 transition-colors rounded text-xs text-foreground disabled:opacity-50">Last</button>
+        
+        <div className="flex items-center space-x-1 ml-4 border-l border-border pl-4">
+          <span className="text-xs text-muted-fg">Jump to:</span>
+          <input
+            type="number"
+            min={1}
+            max={totalPages}
+            defaultValue={page}
+            key={`jump-${page}`}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const val = Number(e.currentTarget.value);
+                if (val >= 1 && val <= totalPages) setPage(val);
+              }
+            }}
+            onBlur={(e) => {
+              const val = Number(e.currentTarget.value);
+              if (val >= 1 && val <= totalPages) setPage(val);
+              else e.currentTarget.value = String(page);
+            }}
+            className="w-12 bg-surface-2 border border-border rounded px-1.5 py-0.5 text-xs outline-none focus:border-primary text-foreground text-center"
+          />
+        </div>
       </div>
     );
   };
@@ -117,7 +140,7 @@ export default function AlphaFeedPage() {
       <div className="flex items-center gap-2 mb-4 flex-shrink-0 w-full">
         <Zap className="text-primary w-5 h-5" />
         <h1 className="text-xl font-bold tracking-tight text-foreground">
-          Alpha Feed
+          Activity
         </h1>
         
         <div className="flex bg-surface-2 p-1 rounded-lg ml-6">
@@ -181,7 +204,7 @@ export default function AlphaFeedPage() {
                 <option value="Tier 4">Tier 4 (100k+)</option>
                 <option value="Tier 3">Tier 3 (50k+)</option>
                 <option value="Tier 2">Tier 2 (20k+)</option>
-                <option value="Tier 1">Tier 1 (10k+)</option>
+                <option value="Tier 1">Tier 1 (5k+)</option>
               </select>
             </>
           )}
@@ -249,7 +272,7 @@ export default function AlphaFeedPage() {
                   )}
                   <th className="py-3 px-4 font-medium w-32">Size (USDC)</th>
                   <th className="py-3 px-4 font-medium w-32">Balance</th>
-                  <th className="py-3 px-4 font-medium w-32">Positions</th>
+                  <th className="py-3 px-4 font-medium w-32">Open Position</th>
                   <th className="py-3 px-4 font-medium">Wallet & Links</th>
                 </tr>
               </thead>
@@ -308,7 +331,7 @@ export default function AlphaFeedPage() {
                     const rowNum = (page - 1) * limit + index + 1;
 
                     return (
-                      <tr key={item.id} className="hover:bg-surface-2/20 transition-colors group cursor-default">
+                      <tr key={`${item.id}-${index}`} className="hover:bg-surface-2/20 transition-colors group cursor-default">
                         <td className="py-2.5 px-4 text-xs font-mono text-muted-fg">{rowNum}</td>
                         <td className="py-2.5 px-4 text-xs font-mono text-subtle">{time}</td>
                         {activeTab === "deposits" && (
@@ -336,10 +359,10 @@ export default function AlphaFeedPage() {
                           {formatCurrency(item.data.amount_usdc)}
                         </td>
                         <td className="py-2.5 px-4 font-mono text-muted-fg">
-                          {item.data.wallet_stats?.balance !== undefined ? formatCurrency(item.data.wallet_stats.balance) : "N/A"}
+                          {item.data.wallet_stats?.balance ? formatCurrency(item.data.wallet_stats.balance) : "—"}
                         </td>
                         <td className="py-2.5 px-4 font-mono text-muted-fg">
-                          {item.data.wallet_stats?.position_value !== undefined ? formatCurrency(item.data.wallet_stats.position_value) : "N/A"}
+                          {item.data.wallet_stats?.position_value ? formatCurrency(item.data.wallet_stats.position_value) : "—"}
                         </td>
                         <td className="py-2.5 px-4 truncate max-w-md w-full">
                           <div className="flex items-center gap-3">

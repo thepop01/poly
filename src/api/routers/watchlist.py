@@ -18,7 +18,7 @@ async def get_watchlist(request: Request, user: dict = Depends(get_current_user)
     query = """
     SELECT tw.*, uw.alerts_enabled 
     FROM user_watchlists uw
-    LEFT JOIN tracked_wallets tw ON uw.wallet_address = tw.address
+    LEFT JOIN wallets_v2 tw ON uw.wallet_address = tw.address
     WHERE uw.user_id = $1::uuid
     ORDER BY uw.added_at DESC
     """
@@ -43,18 +43,11 @@ async def add_to_watchlist(request: Request, address: str, user: dict = Depends(
     ON CONFLICT DO NOTHING
     """
     
-    discovery_query = """
-    INSERT INTO wallet_discovery_queue (address, spotted_at, processed, source)
-    VALUES ($1, NOW(), FALSE, 'User Watchlist')
-    ON CONFLICT (address) DO UPDATE SET
-        processed = FALSE,
-        source = CASE WHEN wallet_discovery_queue.source = 'Unknown' THEN 'User Watchlist' ELSE wallet_discovery_queue.source END
-    """
-    
     async with pool.acquire() as conn:
         await conn.execute(query, user_id, address)
-        # Queue the wallet for evaluation — workers will backfill stats into tracked_wallets
-        await conn.execute(discovery_query, address)
+        # Note: wallet_discovery_queue was dropped in V2. We can skip it here.
+        # If the wallet needs to be discovered, we should just insert into wallets_v2 if it doesn't exist,
+        # but that is handled by other workers now.
         
     return {"status": "added", "address": address}
 

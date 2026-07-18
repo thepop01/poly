@@ -61,9 +61,11 @@ async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.Cli
         FROM (
             SELECT w2.address,
                 CASE
-                    WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) <= 0 THEN 'DEAD'
-                    WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) < 1000 THEN 'LOW_BALANCE'
+                    WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) <= 0 THEN
+                        CASE WHEN w2.last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
                     WHEN w2.last_trade_at IS NULL THEN 'NEW'
+                    WHEN w2.added_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
+                    WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) < 1000 THEN 'LOW_BALANCE'
                     ELSE 'STANDARD'
                 END AS new_tier
             FROM wallets_v2 w2
@@ -128,9 +130,11 @@ async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.Cli
             await conn.execute("""
                 UPDATE wallets_v2
                 SET tier = CASE
-                        WHEN $2 <= 0 THEN 'DEAD'
-                        WHEN $2 < 1000 THEN 'LOW_BALANCE'
+                        WHEN $2 <= 0 THEN
+                            CASE WHEN last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
                         WHEN last_trade_at IS NULL THEN 'NEW'
+                        WHEN added_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
+                        WHEN $2 < 1000 THEN 'LOW_BALANCE'
                         ELSE 'STANDARD'
                     END,
                     tier_reason = 'stats_refresher reclassify',
@@ -138,9 +142,11 @@ async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.Cli
                 WHERE address = $1
                   AND tier NOT IN ('CURATED', 'UNCLASSIFIED')
                   AND tier != CASE
-                        WHEN $2 <= 0 THEN 'DEAD'
-                        WHEN $2 < 1000 THEN 'LOW_BALANCE'
+                        WHEN $2 <= 0 THEN
+                            CASE WHEN last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
                         WHEN last_trade_at IS NULL THEN 'NEW'
+                        WHEN added_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
+                        WHEN $2 < 1000 THEN 'LOW_BALANCE'
                         ELSE 'STANDARD'
                     END
             """, address, balance + position_value)

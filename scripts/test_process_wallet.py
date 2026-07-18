@@ -1,17 +1,30 @@
-import asyncio, asyncpg, aiohttp, logging
-from src.workers.leaderboard_stats import process_wallet
+import asyncio
+import asyncpg
+import aiohttp
+import logging
+from dotenv import load_dotenv
+import os
+import sys
 
+from src.workers.leaderboard_stats_v2 import process_wallet_v2
+
+load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 async def main():
-    pool = await asyncpg.create_pool("postgresql://poly_user:poly_password@localhost:5432/poly_db", min_size=1, max_size=2)
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT address FROM tracked_wallets ORDER BY random() LIMIT 1")
-        addr = row["address"]
-        print(f"Testing process_wallet for {addr}")
-        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-            await process_wallet(conn, session, addr)
-        print("process_wallet completed without error")
-    await pool.close()
+    if len(sys.argv) < 2:
+        print("Usage: uv run python scripts/test_process_wallet.py <address>")
+        return
+    address = sys.argv[1]
+    
+    db_url = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
+    
+    print(f"Connecting to DB and processing {address}...")
+    conn = await asyncpg.connect(db_url)
+    async with aiohttp.ClientSession() as session:
+        await process_wallet_v2(conn, session, address)
+    await conn.close()
+    print("Done!")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -120,6 +120,59 @@ clean_db.py
 seed_sports.py
 test_api.py
 
+# Auto-added based on untracked files
+/test_*.py
+/test_*.json
+/test.*
+/check_*.py
+/migrate_*.py
+/migration.py
+/build_*.py
+/make_*.py
+/inspect_*.py
+/get_*.py
+/run_worker_once.py
+/update_*.py
+/verify_*.py
+/scratch_*.py
+/scratch_*.md
+/*.tmp
+/analysis_output.txt
+/diff_*.txt
+/trades_*.json
+/.deposit_last_block
+/extract/
+/image/
+/2026-*
+scripts/_tmp*.py
+scripts/test_*.py
+scripts/check_*.py
+scripts/migrate_*.py
+scripts/fix_*.py
+scripts/rebuild_*.py
+scripts/refresh_*.py
+scripts/verify_*.py
+scripts/patch_*.py
+scripts/sync_*.py
+scripts/add_*.py
+scripts/mark_*.py
+scripts/fetch_*.py
+scripts/mock_*.py
+scripts/revert_*.py
+scripts/rewrite_*.py
+scripts/update_*.py
+scripts/clean_*.py
+scripts/count_*.py
+scripts/drop_*.py
+scripts/print_*.py
+scripts/vet_*.py
+scripts/reset_*.py
+scripts/backfill_*.py
+src/scripts/backfill_*.py
+src/scripts/fetch_*.py
+src/scripts/retry_*.py
+src/scripts/seed_*.py
+
 # ==========================================
 # Logs & Temp Output
 # ==========================================

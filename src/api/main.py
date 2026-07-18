@@ -9,7 +9,7 @@ load_dotenv()
 
 from src.db import get_pool, close_pool, init_db
 from src.api.routers import trades, ws, leaderboard, wallets, watchlist, alpha_calls, tracker, discord, auth, tracked_wallets
-from src.api.routers import leaderboard_v2, wallets_v2, alpha_calls_v2, tracked_wallets_v2, trades_v2, custom_wallets
+from src.api.routers import leaderboard_v2, wallets_v2, alpha_calls_v2, tracked_wallets_v2, trades_v2, custom_wallets, agents, notifications
 import asyncio
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
@@ -117,6 +117,8 @@ app.include_router(alpha_calls_v2.router, prefix="/api")
 app.include_router(tracked_wallets_v2.router, prefix="/api")
 app.include_router(trades_v2.router, prefix="/api")
 app.include_router(custom_wallets.router, prefix="/api")
+app.include_router(agents.router, prefix="/api")
+app.include_router(notifications.router, prefix="/api")
 
 @app.get("/health")
 async def health_check():

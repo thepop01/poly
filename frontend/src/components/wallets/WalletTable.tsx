@@ -16,6 +16,7 @@ export interface WalletRow {
   balance?: string | number | null;
   position_value?: string | number | null;
   deposits?: string | number | null;
+  withdrawals?: string | number | null;
   last_trade_at?: string | null;
   added_at?: string | null;
 }

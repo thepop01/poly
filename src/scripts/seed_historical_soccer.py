@@ -30,7 +30,7 @@ async def seed_statsbomb_data(pool):
         logger.info(f"Fetched {len(matches)} World Cup matches from StatsBomb")
         
         async with pool.acquire() as conn:
-            for _, match in matches.iterrows():
+            for _, match in matches.iterrows():  # type: ignore
                 fixture_id = f"statsbomb_{match['match_id']}"
                 home_team = match['home_team']
                 away_team = match['away_team']

@@ -26,7 +26,7 @@ async def _pm_fetch(session: aiohttp.ClientSession, endpoint: str, params: dict)
     all_results: list[dict] = []
     offset = 0
     limit = 500
-    max_offset = 10000
+    max_offset = 15000
 
     while offset < max_offset:
         p = dict(params)
@@ -184,10 +184,10 @@ async def get_curated_whales(request: Request, limit: int = 50) -> list[dict[str
         raise HTTPException(status_code=500, detail="Database pool not initialized")
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT address, win_rate, roi_pct, resolved_count, total_volume, tier, alpha_score
+            SELECT address, win_rate, roi_pct, resolved_count, total_volume
             FROM wallet_stats
-            WHERE win_rate > 0.70 AND resolved_count >= 20 AND total_volume >= 10000
-            ORDER BY alpha_score DESC NULLS LAST LIMIT $1
+            WHERE win_rate > 0.70 AND resolved_count >= 20 AND total_volume >= 5000
+            ORDER BY COALESCE(total_pnl, 0) DESC NULLS LAST LIMIT $1
         """, limit)
     return [dict(r) for r in rows]
 
@@ -214,7 +214,7 @@ async def get_deposit_alerts(request: Request, limit: int = 50) -> list[dict[str
         raise HTTPException(status_code=500, detail="Database pool not initialized")
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT wd.*, tw.total_pnl, tw.total_volume, tw.win_rate, tw.roi_pct
+            SELECT wd.*, tw.total_pnl, tw.total_volume
             FROM wallet_deposits wd
             LEFT JOIN tracked_wallets tw ON wd.wallet_address = tw.address
             WHERE wd.flagged_single = TRUE OR wd.flagged_cumulative = TRUE
@@ -232,7 +232,7 @@ async def get_smart_money_trades(request: Request, limit: int = 50) -> list[dict
         rows = await conn.fetch("""
             SELECT st.id as trade_id, st.wallet_address, st.tx_hash, st.market_name,
                    st.side, st.amount_usdc, st.traded_at as timestamp,
-                   tw.total_pnl, tw.total_volume, tw.win_rate, tw.roi_pct, tw.tier
+                   tw.total_pnl, tw.total_volume
             FROM smart_money_trades st
             LEFT JOIN tracked_wallets tw ON st.wallet_address = tw.address
             ORDER BY st.traded_at DESC LIMIT $1

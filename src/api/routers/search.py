@@ -18,7 +18,7 @@ async def global_search(request: Request, q: str) -> dict[str, Any]:
     search_term = f"%{q}%"
     
     wallets_query = """
-    SELECT address, tier, win_rate, total_volume
+    SELECT address, win_rate, total_volume
     FROM wallet_stats
     WHERE address ILIKE $1
     ORDER BY total_volume DESC NULLS LAST

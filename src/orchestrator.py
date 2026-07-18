@@ -17,6 +17,7 @@ from src.workers.leaderboard_stats_v2 import run_leaderboard_stats_v2 as leaderb
 from src.workers.deposit_tracker import run_deposit_tracker as deposit_tracker_main
 from src.workers.stats_refresher import main as stats_refresher_main
 from src.workers.poly_leaderboard_sync import main as poly_leaderboard_sync_main
+from src.workers.agent_evaluator import main as agent_evaluator_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,6 +123,7 @@ async def main():
         (deposit_tracker_main, "deposit_tracker"),
         (stats_refresher_main, "stats_refresher"),
         (poly_leaderboard_sync_main, "poly_leaderboard_sync"),
+        (agent_evaluator_main, "agent_evaluator"),
     ]
 
     external_bots = [

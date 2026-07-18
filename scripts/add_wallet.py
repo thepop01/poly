@@ -89,11 +89,10 @@ async def add_wallet(address: str):
         await conn.execute("""
             INSERT INTO tracked_wallets (
                 address, discovery_source, total_pnl, realized_pnl, unrealized_pnl, total_volume,
-                pnl_weekly, pnl_monthly, volume_weekly, volume_monthly,
-                win_rate, roi_pct, resolved_count, winning_count, tier, alpha_score,
+                pnl_weekly, pnl_monthly, volume_weekly, volume_monthly, alpha_score,
                 last_indexed, max_trade_size, balance, deposits, withdrawals, position_value,
                 start_balance, start_deposits, start_withdrawals, start_stats_at
-            ) VALUES ($1, $2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 'Silver', 0, NOW(), 0, $3, 0, 0, $4,
+            ) VALUES ($1, $2, 0, 0, 0, 0, 0, 0, 0, 0, 0, NOW(), 0, $3, 0, 0, $4,
                      $3, 0, 0, NOW())
             ON CONFLICT (address) DO UPDATE SET
                 balance = EXCLUDED.balance,
@@ -108,9 +107,9 @@ async def add_wallet(address: str):
                 resolved_count, winning_count, active_days,
                 avg_position_size, avg_hold_time_hours,
                 biggest_win, biggest_loss, unrealised_pnl,
-                tier, alpha_score, last_updated,
+                alpha_score, last_updated,
                 trades_2x, trades_1_5x, strategy, added_reason
-            ) VALUES ($1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 'Silver', 0, NOW(), 0, 0, 'Unknown', 'Manual')
+            ) VALUES ($1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, NOW(), 0, 0, 'Unknown', 'Manual')
             ON CONFLICT (address) DO NOTHING
         """, address)
 

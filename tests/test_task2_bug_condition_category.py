@@ -12,7 +12,7 @@ item.data.category || "N/A" → "N/A".
 
 Expected counterexamples (on unfixed code):
 - _fetch_market_meta(token_id) where Gamma API returns category=null → result["category"] is None
-- whale_watcher stores category=None in DB → API reads NULL → frontend shows "N/A"
+- trade_tracker stores category=None in DB → API reads NULL → frontend shows "N/A"
 - query_trade_alert(trade_id) → category field is "N/A" (expected a non-null value like "Unknown")
 
 Root cause: etherscan_client._fetch_market_meta() does not provide a default fallback
@@ -232,7 +232,7 @@ def test_none_category_causes_frontend_to_display_na():
         "Counterexample: "
         "  1. etherscan_client._fetch_market_meta() returns category=None "
         "     (Gamma API returned null or key absent). "
-        "  2. whale_watcher inserts category=None → NULL stored in smart_money_alerts. "
+        "  2. trade_tracker inserts category=None → NULL stored in smart_money_alerts. "
         "  3. Alpha Feed API reads NULL → returns {category: null} in JSON. "
         "  4. Frontend: null || 'N/A' = 'N/A' displayed to user. "
         "Fix: _fetch_market_meta() should default category to 'Unknown' when null/absent."

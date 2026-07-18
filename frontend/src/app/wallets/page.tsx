@@ -17,7 +17,7 @@ const TABS = [
   { key: "all", label: "All", description: "Every tracked wallet that isn't dead" },
   { key: "standard", label: "Standard", description: "Balance ≥ $1k with trading history — active whales" },
   { key: "low_balance", label: "Low Balance", description: "Under $1k — active retail" },
-  { key: "new", label: "New", description: "Balance ≥ $1k, never traded — unproven whales" },
+  { key: "new", label: "New", description: "First trade within the last 30 days" },
   { key: "hibernated", label: "Hibernated", description: "No trades in 30+ days" },
 ] as const;
 
@@ -185,19 +185,17 @@ function WalletsPageInner() {
       render: (w) => relativeDate(w.last_trade_at),
     };
 
+    const withdrawals: ColumnDef = { key: "withdrawals", label: "Withdrawals", sortable: true, render: (w) => plainCurrency(w.withdrawals) };
+
     if (tab === "new") {
       return [
         wallet,
         source,
-        {
-          key: "might_cook",
-          label: "Signal",
-          render: (w) => (w.might_cook_type ? <MightCookBadge mightCookType={w.might_cook_type} /> : <>—</>),
-        },
-        { key: "deposits", label: "Deposits", sortable: true, render: (w) => plainCurrency(w.deposits) },
         balance,
+        { key: "deposits", label: "Deposits", sortable: true, render: (w) => plainCurrency(w.deposits) },
+        withdrawals,
         position,
-        { key: "added_at", label: "Added", sortable: true, render: (w) => relativeDate(w.added_at) },
+        { key: "last_trade_at", label: "First Trade", sortable: true, render: (w) => relativeDate(w.added_at) },
       ];
     }
     if (tab === "low_balance") {

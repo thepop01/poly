@@ -98,7 +98,7 @@ async def start_db_poll_broadcaster(pool):
                 trades = await conn.fetch(
                     """
                     SELECT t.trade_id, t.wallet_address, t.market_id, m.title as market_title, t.side, t.price, t.size,
-                           ws.tier, ws.strategy, t.timestamp
+                           ws.strategy, t.timestamp
                     FROM trades t
                     JOIN markets m ON t.market_id = m.market_id
                     LEFT JOIN wallet_stats ws ON t.wallet_address = ws.address
@@ -111,8 +111,10 @@ async def start_db_poll_broadcaster(pool):
                 # 3. Fetch new markets
                 new_markets = await conn.fetch(
                     """
-                    SELECT market_id, title, category, created_at 
-                    FROM markets WHERE created_at > $1
+                    SELECT m.market_id, m.title, e.category, m.created_at
+                    FROM markets m
+                    JOIN events e ON m.event_id = e.event_id
+                    WHERE m.created_at > $1
                     """, last_polled_time
                 )
                 
@@ -169,13 +171,13 @@ async def start_db_poll_broadcaster(pool):
                                 "side": t["side"],
                                 "price": float(t["price"]),
                                 "size": float(t["size"]),
-                                "tier": t["tier"],
+                                
                                 "strategy": t["strategy"],
                                 "timestamp": t["timestamp"].isoformat()
                             }
                             
                             # Global Whale Alert
-                            if t["size"] >= 10000 or t["tier"] == "whale" or t["tier"] == "smart_money":
+                            if t["size"] >= 5000:
                                 whale_msg = trade_msg.copy()
                                 whale_msg["type"] = "whale_alert"
                                 await manager.broadcast_to_all(whale_msg)

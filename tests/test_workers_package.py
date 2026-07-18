@@ -46,21 +46,15 @@ def test_workers_package_init_file_exists():
     )
 
 
-def test_import_whale_watcher():
-    """Test that whale_watcher module can be imported."""
-    from src.workers.whale_watcher import _standalone
+def test_import_trade_tracker():
+    """Test that trade_tracker module can be imported."""
+    from src.workers.trade_tracker import _standalone
     assert callable(_standalone)
 
 
-def test_import_deposit_watcher():
-    """Test that deposit_watcher module can be imported."""
-    from src.workers.deposit_watcher import run_deposit_watcher
-    assert callable(run_deposit_watcher)
-
-
-def test_import_wallet_discovery():
-    """Test that wallet_discovery module can be imported."""
-    from src.workers.wallet_discovery import main
+def test_import_wallet_trade_history():
+    """Test that wallet_trade_history module can be imported."""
+    from src.workers.wallet_trade_history import main
     assert callable(main)
 
 
@@ -70,10 +64,10 @@ def test_import_leaderboard_stats():
     assert callable(main)
 
 
-def test_import_global_discovery():
-    """Test that global_discovery module can be imported."""
-    from src.workers.global_discovery import run_global_discovery
-    assert callable(run_global_discovery)
+def test_import_deposit_tracker():
+    """Test that deposit_tracker module can be imported."""
+    from src.workers.deposit_tracker import run_deposit_tracker
+    assert callable(run_deposit_tracker)
 
 
 def test_import_stats_refresher():
@@ -84,26 +78,24 @@ def test_import_stats_refresher():
 
 def test_import_all_orchestrator_workers():
     """
-    Test that all six worker modules can be imported exactly as the
+    Test that all five worker modules can be imported exactly as the
     orchestrator attempts to import them.
     
     This simulates the orchestrator's import statements and verifies
     that the package structure supports them.
     """
     # These imports mirror exactly what orchestrator.py does
-    from src.workers.whale_watcher import _standalone as whale_watcher_main
-    from src.workers.deposit_watcher import run_deposit_watcher as deposit_watcher_main
-    from src.workers.wallet_discovery import main as discovery_queue_processor_main
+    from src.workers.trade_tracker import _standalone as trade_tracker_main
+    from src.workers.wallet_trade_history import main as wallet_trade_history_main
     from src.workers.leaderboard_stats import main as leaderboard_stats_main
-    from src.workers.global_discovery import run_global_discovery as global_discovery_main
+    from src.workers.deposit_tracker import run_deposit_tracker as deposit_tracker_main
     from src.workers.stats_refresher import main as stats_refresher_main
     
     # Verify all imports succeeded by checking they're callable
-    assert callable(whale_watcher_main)
-    assert callable(deposit_watcher_main)
-    assert callable(discovery_queue_processor_main)
+    assert callable(trade_tracker_main)
+    assert callable(wallet_trade_history_main)
     assert callable(leaderboard_stats_main)
-    assert callable(global_discovery_main)
+    assert callable(deposit_tracker_main)
     assert callable(stats_refresher_main)
 
 
@@ -411,17 +403,16 @@ class TestWorkerTaskConfigurationPreservation:
         """
         expected_workers = [
             "leaderboard_stats",
-            "whale_watcher",
-            "deposit_watcher",
-            "discovery_queue_processor",
-            "global_discovery",
+            "trade_tracker",
+            "wallet_trade_history",
+            "deposit_tracker",
             "stats_refresher",
         ]
         
-        assert len(expected_workers) == 6, "Should have exactly 6 workers"
+        assert len(expected_workers) == 5, "Should have exactly 5 workers"
         
         # Verify each worker name is unique
-        assert len(set(expected_workers)) == 6, "All worker names should be unique"
+        assert len(set(expected_workers)) == 5, "All worker names should be unique"
 
     def test_worker_names_match_design(self):
         """
@@ -431,10 +422,9 @@ class TestWorkerTaskConfigurationPreservation:
         """
         orchestrator_workers = [
             ("leaderboard_stats_main", "leaderboard_stats"),
-            ("whale_watcher_main", "whale_watcher"),
-            ("deposit_watcher_main", "deposit_watcher"),
-            ("discovery_queue_processor_main", "discovery_queue_processor"),
-            ("global_discovery_main", "global_discovery"),
+            ("trade_tracker_main", "trade_tracker"),
+            ("wallet_trade_history_main", "wallet_trade_history"),
+            ("deposit_tracker_main", "deposit_tracker"),
             ("stats_refresher_main", "stats_refresher"),
         ]
         
@@ -466,7 +456,7 @@ class TestWorkerTaskConfigurationPreservation:
         
         # Verify the supervision model is correct
         total_supervised = worker_count + external_bot_count
-        assert total_supervised == 6, f"Total supervised should be 6, got {total_supervised}"
+        assert total_supervised == 5, f"Total supervised should be 5, got {total_supervised}"
 
     @pytest.mark.asyncio
     async def test_worker_module_imports_match_orchestrator(self):
@@ -477,11 +467,10 @@ class TestWorkerTaskConfigurationPreservation:
         This verifies the import-to-function mapping is preserved.
         """
         import_specs = [
-            ("src.workers.whale_watcher", "_standalone"),
-            ("src.workers.deposit_watcher", "run_deposit_watcher"),
-            ("src.workers.wallet_discovery", "main"),
+            ("src.workers.trade_tracker", "_standalone"),
+            ("src.workers.wallet_trade_history", "main"),
             ("src.workers.leaderboard_stats", "main"),
-            ("src.workers.global_discovery", "run_global_discovery"),
+            ("src.workers.deposit_tracker", "run_deposit_tracker"),
             ("src.workers.stats_refresher", "main"),
         ]
         

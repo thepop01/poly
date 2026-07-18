@@ -248,4 +248,25 @@ export async function toggleWalletAlert(address: string, enabled: boolean) {
   });
 }
 
+export async function listAgents() {
+  return fetchAuthData(`/api/v2/agents`);
+}
 
+export async function createAgent(body: {
+  name: string; description?: string; rule_tree: any;
+  actions: { action_type: string; params: any }[]; cooldown_seconds?: number;
+}) {
+  return fetchAuthData(`/api/v2/agents`, { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function toggleAgentActive(agentId: number, is_active: boolean) {
+  return fetchAuthData(`/api/v2/agents/${agentId}`, { method: "PATCH", body: JSON.stringify({ is_active }) });
+}
+
+export async function deleteAgent(agentId: number) {
+  return fetchAuthData(`/api/v2/agents/${agentId}`, { method: "DELETE" });
+}
+
+export async function listNotifications() {
+  return fetchAuthData(`/api/v2/notifications`);
+}
