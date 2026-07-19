@@ -88,14 +88,14 @@ export function WalletTable({
             </tr>
           ) : (
             rows.map((row, i) => (
-              <tr key={row.address} className="border-b border-border hover:bg-background/50 transition-colors">
-                <td className="py-2.5 px-4 text-center font-medium text-muted-fg text-xs">
+              <tr key={row.address} className="border-b border-border hover:bg-surface-2/40 transition-colors">
+                <td className="py-3.5 px-4 text-center font-medium text-muted-fg text-xs">
                   {rowOffset + i + 1}
                 </td>
                 {columns.map((col) => (
                   <td
                     key={col.key}
-                    className={`py-2.5 px-4 font-mono text-xs ${col.align === "left" ? "text-left" : "text-right"}`}
+                    className={`py-3.5 px-4 font-mono text-xs ${col.align === "left" ? "text-left" : "text-right"}`}
                   >
                     {col.render(row, i)}
                   </td>

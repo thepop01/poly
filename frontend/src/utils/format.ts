@@ -13,6 +13,21 @@ export function formatAddress(addr: string) {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
+/** Signed currency string, e.g. "+$1.91M" / "-$4.2k". */
+export function formatSignedCurrency(value?: number | string | null): string {
+  const n = typeof value === "string" ? parseFloat(value) : value;
+  if (n == null || Number.isNaN(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${formatCurrency(n)}`;
+}
+
+/** Coerce a possibly-stringified numeric into a number or null. */
+export function toNum(v: string | number | null | undefined): number | null {
+  if (v == null) return null;
+  const n = typeof v === "number" ? v : parseFloat(v);
+  return Number.isNaN(n) ? null : n;
+}
+
 export function timeAgo(value?: string | null): { relative: string; absolute: string } | null {
   if (!value) return null;
   const d = new Date(value);

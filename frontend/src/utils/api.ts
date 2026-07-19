@@ -82,6 +82,10 @@ export async function getSmartMoneyAlerts(limit = 50, offset = 0, type?: 'LARGE_
   return fetchAuthData(url);
 }
 
+export async function getAlphaCallsSummary() {
+  return fetchAuthData(`/api/v2/alpha-calls/summary`);
+}
+
 export async function getWhales(limit = 50) {
   return fetchAuthData(`/api/tracker/whales?limit=${limit}`);
 }

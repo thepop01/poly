@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Globe, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { getWalletCounts } from "@/utils/api";
 import { formatCurrency, timeAgo } from "@/utils/format";
 import { useWalletList } from "@/hooks/useWalletList";
@@ -12,12 +12,15 @@ import { WalletTable, WalletRow, ColumnDef } from "@/components/wallets/WalletTa
 import { WalletCell } from "@/components/wallets/WalletCell";
 import { SourceBadges, MightCookBadge } from "@/components/wallets/SourceBadges";
 import { Pagination } from "@/components/wallets/Pagination";
+import { StatCard, StatCardRow } from "@/components/ui/StatCard";
+import { PillTabs } from "@/components/ui/PillTabs";
+import { Globe as GlobeIcon, Activity, Moon, Sparkles } from "lucide-react";
 
 const TABS = [
   { key: "all", label: "All", description: "Every tracked wallet that isn't dead" },
-  { key: "standard", label: "Standard", description: "Balance ≥ $1k with trading history — active whales" },
-  { key: "low_balance", label: "Low Balance", description: "Under $1k — active retail" },
-  { key: "new", label: "New", description: "First trade within the last 30 days" },
+  { key: "standard", label: "Standard", description: "Balance + positions ≥ $1k with trading history — active whales" },
+  { key: "low_balance", label: "Low Balance", description: "Balance + positions under $1k" },
+  { key: "new", label: "New", description: "Funded with $1k+ but hasn't made a trade yet" },
   { key: "hibernated", label: "Hibernated", description: "No trades in 30+ days" },
 ] as const;
 
@@ -241,53 +244,44 @@ function WalletsPageInner() {
 
   return (
     <div className="w-full h-full flex flex-col bg-background">
-      {/* Header */}
-      <div className="flex items-center justify-between flex-shrink-0 mb-4">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-foreground flex items-center gap-2 mb-1">
-            <Globe size={20} className="text-primary" />
-            Wallets
-          </h1>
-          <p className="text-xs text-muted-fg">
-            All wallets discovered from trades, deposits, the Polymarket leaderboard, and custom uploads
-          </p>
-        </div>
-        <div className="flex items-center gap-4 text-right">
-          {activeCount != null && (
-            <div>
-              <div className="text-xl font-bold text-green-500">{activeCount.toLocaleString()}</div>
-              <div className="text-[10px] text-muted-fg uppercase tracking-wider">Active</div>
-            </div>
-          )}
-          {inactiveCount != null && (
-            <div>
-              <div className="text-xl font-bold text-muted-fg">{inactiveCount.toLocaleString()}</div>
-              <div className="text-[10px] text-muted-fg uppercase tracking-wider">Inactive</div>
-            </div>
-          )}
-        </div>
-      </div>
+      {/* Stat cards */}
+      <StatCardRow>
+        <StatCard
+          label="Total wallets"
+          icon={<GlobeIcon size={16} />}
+          value={counts ? counts.all.toLocaleString() : "—"}
+          subtitle="Discovered across all sources"
+        />
+        <StatCard
+          label="Active"
+          icon={<Activity size={16} />}
+          value={activeCount != null ? activeCount.toLocaleString() : "—"}
+          valueClassName="text-primary"
+          subtitle="Traded in the last 30 days"
+        />
+        <StatCard
+          label="New"
+          icon={<Sparkles size={16} />}
+          value={counts ? counts.new.toLocaleString() : "—"}
+          subtitle="Funded $1k+, no trades yet"
+        />
+        <StatCard
+          label="Hibernated"
+          icon={<Moon size={16} />}
+          value={inactiveCount != null ? inactiveCount.toLocaleString() : "—"}
+          subtitle="No trades in 30+ days"
+        />
+      </StatCardRow>
 
       {/* Tab bar */}
-      <div className="flex items-center gap-1 flex-shrink-0 mb-1 border-b border-border">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => switchTab(t.key)}
-            className={`px-4 py-2 text-xs font-semibold uppercase tracking-wider border-b-2 -mb-px transition-colors ${
-              tab === t.key
-                ? "border-primary text-primary"
-                : "border-transparent text-muted-fg hover:text-foreground"
-            }`}
-          >
-            {t.label}
-            {tabCount(t.key) != null && (
-              <span className="ml-1.5 text-[10px] font-mono opacity-70">{tabCount(t.key)!.toLocaleString()}</span>
-            )}
-          </button>
-        ))}
+      <div className="mb-3">
+        <PillTabs
+          tabs={TABS.map((t) => ({ key: t.key, label: t.label, count: tabCount(t.key) }))}
+          active={tab}
+          onChange={(k) => switchTab(k as TabKey)}
+        />
       </div>
-      <p className="text-[11px] text-muted-fg flex-shrink-0 mb-3 mt-1.5">{activeTab.description}</p>
+      <p className="text-xs text-subtle flex-shrink-0 mb-3">{activeTab.description}</p>
 
       {/* Source filter pills + search */}
       <div className="flex items-center gap-2 flex-shrink-0 mb-3 flex-wrap">
@@ -300,16 +294,8 @@ function WalletsPageInner() {
             }}
             className={`px-3 py-1 text-[11px] font-semibold rounded-full uppercase tracking-wider transition-colors border ${
               sourceFilter === opt.value
-                ? opt.value === "deposit"
-                  ? "bg-blue-500/10 text-blue-400 border-blue-500/20"
-                  : opt.value === "trade"
-                    ? "bg-orange-500/10 text-orange-400 border-orange-500/20"
-                    : opt.value === "leaderboard"
-                      ? "bg-purple-500/10 text-purple-400 border-purple-500/20"
-                      : opt.value === "custom"
-                        ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                        : "bg-foreground text-background border-transparent"
-                : "text-muted-fg bg-surface-2 border-transparent hover:text-foreground"
+                ? "bg-primary/15 text-primary border-primary/30"
+                : "text-subtle bg-surface border-border hover:text-foreground"
             }`}
           >
             {opt.label}
@@ -317,7 +303,7 @@ function WalletsPageInner() {
         ))}
 
         <div className="relative ml-auto">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-fg" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-subtle" />
           <input
             type="text"
             placeholder="Search address or username..."
@@ -326,7 +312,7 @@ function WalletsPageInner() {
               setSearchQuery(e.target.value);
               setPage(1);
             }}
-            className="bg-surface border border-border rounded-lg pl-9 pr-3 py-1.5 text-xs outline-none focus:border-primary text-foreground placeholder-muted-fg w-56 font-mono"
+            className="bg-surface border border-border rounded-lg pl-9 pr-3 py-1.5 text-xs outline-none focus:border-primary text-foreground placeholder-subtle w-56 font-mono"
           />
         </div>
       </div>

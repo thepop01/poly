@@ -1,36 +1,36 @@
-@import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;500;600;700&family=Orbitron:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
 /* ============================================================
    POLYTRACKER — DATA-DENSE DASHBOARD
-   UI/UX Pro Max: OLED Dark | Fira Sans + Fira Code
+   Near-black dark theme | Green signal accent | Fira Sans + Fira Code
    ============================================================ */
 
 @layer base {
   :root {
     /* Color Palette */
-    --color-background:  #0F172A;  /* Slate 900 */
-    --color-surface:     #1E293B;  /* Slate 800 */
-    --color-surface-2:   #334155;  /* Slate 700 */
-    --color-surface-3:   #475569;  /* Slate 600 */
-    --color-border:      #334155;
-    --color-border-2:    #475569;
+    --color-background:  #0B0F14;  /* near-black page */
+    --color-surface:     #11161C;  /* cards */
+    --color-surface-2:   #1A222C;  /* raised / hover */
+    --color-surface-3:   #253039;
+    --color-border:      #1E2732;
+    --color-border-2:    #2C3844;
 
-    --color-primary:     #F59E0B;   /* Amber — alpha/signal */
-    --color-primary-dim: rgba(245, 158, 11, 0.12);
-    --color-secondary:   #FBBF24;
+    --color-primary:     #34D399;   /* Mint green — brand + signal */
+    --color-primary-dim: rgba(52, 211, 153, 0.12);
+    --color-secondary:   #6EE7B7;
     --color-accent:      #8B5CF6;   /* Violet — CTA */
     --color-accent-dim:  rgba(139, 92, 246, 0.12);
+    --color-signal:      #F59E0B;   /* Amber — reserved for standout signals */
     --color-success:     #22C55E;
     --color-success-dim: rgba(34, 197, 94, 0.12);
     --color-danger:      #EF4444;
     --color-danger-dim:  rgba(239, 68, 68, 0.12);
     --color-warning:     #F59E0B;
-    --color-muted:       #94A3B8;
+    --color-muted:       #8494A6;
 
-    --color-text:        #F8FAFC;
-    --color-text-2:      #CBD5E1;
-    --color-text-3:      #94A3B8;
+    --color-text:        #F1F5F9;
+    --color-text-2:      #B9C6D3;
+    --color-text-3:      #7E8FA0;
 
     /* Typography */
     --font-sans:  var(--font-fira-sans), system-ui, sans-serif;
@@ -57,23 +57,27 @@
    TAILWIND TOKEN OVERRIDES
    ============================================================ */
 @theme {
-  --color-background: #0F172A;
-  --color-surface:    #1E293B;
-  --color-surface-2:  #334155;
-  --color-surface-3:  #475569;
-  --color-border:     #334155;
-  --color-border-2:   #475569;
+  --color-background: #0B0F14;
+  --color-surface:    #11161C;
+  --color-surface-2:  #1A222C;
+  --color-surface-3:  #253039;
+  --color-border:     #1E2732;
+  --color-border-2:   #2C3844;
 
-  --color-primary:    #F59E0B;
-  --color-secondary:  #FBBF24;
+  --color-primary:    #34D399;
+  --color-secondary:  #6EE7B7;
   --color-accent:     #8B5CF6;
-  --color-success:    #22C55E;
-  --color-danger:     #EF4444;
-  --color-muted:      #94A3B8;
+    --color-signal:     #F59E0B;
+    --color-success:    #22C55E;
+    --color-danger:     #EF4444;
+    --color-muted:      #8494A6;
 
-  --color-foreground: #F8FAFC;
-  --color-muted-fg:   #CBD5E1;
-  --color-subtle:     #94A3B8;
+    --color-tier-curated: #34D399;
+    --color-tier-global:  #7E8FA0;
+
+    --color-foreground: #F1F5F9;
+    --color-muted-fg:   #B9C6D3;
+    --color-subtle:     #7E8FA0;
 
   --font-family-sans: var(--font-fira-sans), system-ui, sans-serif;
   --font-family-heading: var(--font-fira-sans), sans-serif;
@@ -115,7 +119,7 @@
   /* Custom scrollbar - Modern approach */
   * {
     scrollbar-width: thin;
-    scrollbar-color: #334155 transparent;
+    scrollbar-color: #253039 transparent;
   }
   ::-webkit-scrollbar {
     width: 6px;
@@ -125,11 +129,11 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: #334155;
+    background: #253039;
     border-radius: 4px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #475569;
+    background: #2C3844;
   }
 
   /* Focus ring */
@@ -161,12 +165,13 @@
   .text-primary    { color: var(--color-primary); }
   .text-secondary  { color: var(--color-secondary); }
   .text-accent     { color: var(--color-accent); }
+  .text-signal     { color: var(--color-signal); }
   .text-success    { color: var(--color-success); }
   .text-danger     { color: var(--color-danger); }
 
   /* Glow effects */
   .text-glow {
-    text-shadow: 0 0 12px rgba(245, 158, 11, 0.5), 0 0 24px rgba(245, 158, 11, 0.2);
+    text-shadow: 0 0 12px rgba(52, 211, 153, 0.5), 0 0 24px rgba(52, 211, 153, 0.2);
   }
   .text-glow-accent {
     text-shadow: 0 0 12px rgba(139, 92, 246, 0.5), 0 0 24px rgba(139, 92, 246, 0.2);
@@ -177,7 +182,7 @@
 
   /* Border glow */
   .border-glow-primary {
-    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.3), 0 0 12px rgba(245, 158, 11, 0.15);
+    box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.3), 0 0 12px rgba(52, 211, 153, 0.15);
   }
   .border-glow-accent {
     box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.3), 0 0 12px rgba(139, 92, 246, 0.15);
@@ -195,13 +200,12 @@
   }
   .card:hover {
     border-color: var(--color-border-2);
-    background-color: var(--color-surface-2);
   }
   .card-interactive {
     cursor: pointer;
   }
   .card-interactive:hover {
-    border-color: rgba(245, 158, 11, 0.3);
+    border-color: rgba(52, 211, 153, 0.3);
     background-color: var(--color-surface-2);
   }
 
@@ -218,9 +222,9 @@
     font-family: var(--font-mono);
   }
   .badge-primary {
-    background: rgba(245, 158, 11, 0.15);
+    background: rgba(52, 211, 153, 0.15);
     color: var(--color-primary);
-    border: 1px solid rgba(245, 158, 11, 0.3);
+    border: 1px solid rgba(52, 211, 153, 0.3);
   }
   .badge-accent {
     background: rgba(139, 92, 246, 0.15);
@@ -241,6 +245,33 @@
     background: rgba(107, 114, 128, 0.12);
     color: var(--color-text-2);
     border: 1px solid rgba(107, 114, 128, 0.25);
+  }
+
+  /* Badge outline variants (no fill, border only) */
+  .badge-outline {
+    background: transparent;
+    border: 1px solid var(--color-border-2);
+    color: var(--color-text-2);
+  }
+  .badge-outline-trade {
+    background: transparent;
+    border: 1px solid rgba(52, 211, 153, 0.4);
+    color: var(--color-primary);
+  }
+  .badge-outline-deposit {
+    background: transparent;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    color: #38BDF8;
+  }
+  .badge-outline-buy {
+    background: transparent;
+    border: 1px solid rgba(34, 197, 94, 0.4);
+    color: var(--color-success);
+  }
+  .badge-outline-sell {
+    background: transparent;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: var(--color-danger);
   }
 
   /* Live indicator */
@@ -271,7 +302,7 @@
   }
 
   /* Gradient avatars */
-  .avatar-gradient-1 { background: linear-gradient(135deg, #F59E0B, #8B5CF6); }
+  .avatar-gradient-1 { background: linear-gradient(135deg, #34D399, #8B5CF6); }
   .avatar-gradient-2 { background: linear-gradient(135deg, #22C55E, #0EA5E9); }
   .avatar-gradient-3 { background: linear-gradient(135deg, #EF4444, #F59E0B); }
   .avatar-gradient-4 { background: linear-gradient(135deg, #8B5CF6, #EC4899); }
@@ -366,7 +397,7 @@
   background-color: var(--color-surface-2);
 }
 .data-table tbody td {
-  padding: 14px 16px;
+  padding: 16px;
   vertical-align: middle;
 }
 

@@ -1,22 +1,39 @@
 "use client";
 
 import { useEffect, useState, createContext, useContext } from "react";
-import { useSearchParams, useRouter, usePathname } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
+
+export interface AuthUser {
+  id?: string;
+  username?: string;
+}
 
 interface AuthContextType {
   token: string | null;
+  user: AuthUser | null;
   logout: () => void;
 }
 
-const AuthContext = createContext<AuthContextType>({ token: null, logout: () => {} });
+const AuthContext = createContext<AuthContextType>({ token: null, user: null, logout: () => {} });
 
 export const useAuth = () => useContext(AuthContext);
+
+function decodeUser(token: string): AuthUser | null {
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return {
+      id: payload.sub,
+      username: payload.username || payload.name || payload.preferred_username,
+    };
+  } catch {
+    return null;
+  }
+}
 
 export default function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const searchParams = useSearchParams();
   const router = useRouter();
-  const pathname = usePathname();
 
   useEffect(() => {
     // Try to get token from URL first
@@ -24,7 +41,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
     if (urlToken) {
       setToken(urlToken);
       localStorage.setItem("poly_auth_token", urlToken);
-      
+
       // Clean up URL without triggering navigation
       const newUrl = window.location.pathname;
       window.history.replaceState({}, document.title, newUrl);
@@ -44,7 +61,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   };
 
   return (
-    <AuthContext.Provider value={{ token, logout }}>
+    <AuthContext.Provider value={{ token, user: token ? decodeUser(token) : null, logout }}>
       {children}
     </AuthContext.Provider>
   );
