@@ -39,7 +39,7 @@ async def _seed(conn, address, tier, roi, pnl, resolved, dormant, custom=False, 
 @pytest.mark.asyncio
 async def test_promotes_qualifying_standard_wallet(conn):
     addr = "0x" + "a1" * 20
-    await _seed(conn, addr, "STANDARD", roi=45.0, pnl=60_000.0, resolved=25, dormant=False)
+    await _seed(conn, addr, "STANDARD", roi=45.0, pnl=15_000.0, resolved=25, dormant=False)
     await sweep_curated_tiers(conn)
     tier = await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr)
     assert tier == "CURATED"
@@ -47,7 +47,7 @@ async def test_promotes_qualifying_standard_wallet(conn):
 @pytest.mark.asyncio
 async def test_promotes_on_pnl_alone(conn):
     addr = "0x" + "a2" * 20
-    await _seed(conn, addr, "STANDARD", roi=5.0, pnl=60_000.0, resolved=25, dormant=False)
+    await _seed(conn, addr, "STANDARD", roi=5.0, pnl=15_000.0, resolved=25, dormant=False)
     await sweep_curated_tiers(conn)
     assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "CURATED"
 
@@ -132,6 +132,6 @@ async def test_custom_wallet_never_demoted(conn):
 async def test_dormancy_alone_does_not_demote(conn):
     addr = "0x" + "a7" * 20
     # still qualifies on stats, but dormant → stays CURATED (list query hides it)
-    await _seed(conn, addr, "CURATED", roi=45.0, pnl=60_000.0, resolved=25, dormant=True)
+    await _seed(conn, addr, "CURATED", roi=45.0, pnl=15_000.0, resolved=25, dormant=True)
     await sweep_curated_tiers(conn)
     assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "CURATED"

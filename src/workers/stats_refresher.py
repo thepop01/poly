@@ -22,7 +22,7 @@ BATCH_SIZE = 100
 POLL_INTERVAL = 600  # run every 10 minutes
 
 CURATED_MIN_ROI = 30.0
-CURATED_MIN_PNL = 50_000.0
+CURATED_MIN_PNL = 10_000.0
 CURATED_MIN_VOLUME = 10_000.0
 
 async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
