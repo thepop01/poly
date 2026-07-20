@@ -22,7 +22,8 @@ BATCH_SIZE = 100
 POLL_INTERVAL = 600  # run every 10 minutes
 
 CURATED_MIN_ROI = 30.0
-CURATED_MIN_PNL = 10_000.0
+CURATED_MIN_PNL = 50_000.0
+CURATED_MIN_VOLUME = 10_000.0
 
 async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
     try:
@@ -55,9 +56,9 @@ async def sweep_curated_tiers(conn: asyncpg.Connection):
         WHERE m.address = w.address
           AND w.tier = 'STANDARD'
           AND w.is_dormant = FALSE
-          AND (COALESCE(m.roi_pct, 0) > $1 OR COALESCE(m.total_pnl, 0) > $2)
+          AND ((COALESCE(m.roi_pct, 0) > $1 AND COALESCE(m.total_volume, 0) >= $3) OR COALESCE(m.total_pnl, 0) > $2)
         """,
-        CURATED_MIN_ROI, CURATED_MIN_PNL,
+        CURATED_MIN_ROI, CURATED_MIN_PNL, CURATED_MIN_VOLUME,
     )
 
     # DEMOTE: curated, non-custom wallets that fail the rule → canonical tier.
@@ -80,9 +81,9 @@ async def sweep_curated_tiers(conn: asyncpg.Connection):
               SELECT 1 FROM wallet_sources_v2 s
               WHERE s.address = w.address AND s.source = 'custom'
           )
-          AND COALESCE(m.roi_pct, 0) <= $1 AND COALESCE(m.total_pnl, 0) <= $2
+          AND (COALESCE(m.roi_pct, 0) <= $1 OR COALESCE(m.total_volume, 0) < $3) AND COALESCE(m.total_pnl, 0) <= $2
         """,
-        CURATED_MIN_ROI, CURATED_MIN_PNL,
+        CURATED_MIN_ROI, CURATED_MIN_PNL, CURATED_MIN_VOLUME,
     )
 
 async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.ClientSession):

@@ -19,15 +19,15 @@ async def conn():
     await c.close()
 
 
-async def _seed(conn, address, tier, roi, pnl, resolved, dormant, custom=False):
+async def _seed(conn, address, tier, roi, pnl, resolved, dormant, custom=False, volume=0.0):
     await conn.execute(
         "INSERT INTO wallets_v2 (address, tier, is_dormant) VALUES ($1,$2,$3)",
         address, tier, dormant,
     )
     await conn.execute(
-        "INSERT INTO wallet_metrics_v2 (address, roi_pct, total_pnl, resolved_count, computed_at) "
-        "VALUES ($1,$2,$3,$4, NOW())",
-        address, roi, pnl, resolved,
+        "INSERT INTO wallet_metrics_v2 (address, roi_pct, total_pnl, resolved_count, total_volume, computed_at) "
+        "VALUES ($1,$2,$3,$4,$5, NOW())",
+        address, roi, pnl, resolved, volume,
     )
     if custom:
         await conn.execute(
@@ -39,7 +39,7 @@ async def _seed(conn, address, tier, roi, pnl, resolved, dormant, custom=False):
 @pytest.mark.asyncio
 async def test_promotes_qualifying_standard_wallet(conn):
     addr = "0x" + "a1" * 20
-    await _seed(conn, addr, "STANDARD", roi=45.0, pnl=500.0, resolved=25, dormant=False)
+    await _seed(conn, addr, "STANDARD", roi=45.0, pnl=60_000.0, resolved=25, dormant=False)
     await sweep_curated_tiers(conn)
     tier = await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr)
     assert tier == "CURATED"
@@ -47,7 +47,16 @@ async def test_promotes_qualifying_standard_wallet(conn):
 @pytest.mark.asyncio
 async def test_promotes_on_pnl_alone(conn):
     addr = "0x" + "a2" * 20
-    await _seed(conn, addr, "STANDARD", roi=5.0, pnl=15_000.0, resolved=25, dormant=False)
+    await _seed(conn, addr, "STANDARD", roi=5.0, pnl=60_000.0, resolved=25, dormant=False)
+    await sweep_curated_tiers(conn)
+    assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "CURATED"
+
+
+@pytest.mark.asyncio
+async def test_promotes_on_roi_and_volume(conn):
+    addr = "0x" + "a1" * 20
+    # Meets ROI (35 > 30) and VOLUME (15_000 >= 10_000), PnL is low (5k)
+    await _seed(conn, addr, "STANDARD", roi=35.0, pnl=5_000.0, volume=15_000.0, resolved=25, dormant=False)
     await sweep_curated_tiers(conn)
     assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "CURATED"
 
@@ -55,9 +64,9 @@ async def test_promotes_on_pnl_alone(conn):
 @pytest.mark.asyncio
 async def test_promotes_regardless_of_resolved_count(conn):
     # Resolved-count gate was removed (Supabase retired). A qualifying wallet
-    # promotes on ROI/PnL alone, even with a tiny resolved_count.
+    # promotes on ROI/PnL alone.
     addr = "0x" + "a3" * 20
-    await _seed(conn, addr, "STANDARD", roi=99.0, pnl=99_000.0, resolved=3, dormant=False)
+    await _seed(conn, addr, "STANDARD", roi=99.0, pnl=99_000.0, volume=20_000.0, resolved=3, dormant=False)
     await sweep_curated_tiers(conn)
     assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "CURATED"
 
@@ -66,7 +75,15 @@ async def test_promotes_regardless_of_resolved_count(conn):
 async def test_does_not_promote_below_thresholds(conn):
     # Low ROI and low PnL → stays STANDARD.
     addr = "0x" + "a8" * 20
-    await _seed(conn, addr, "STANDARD", roi=5.0, pnl=500.0, resolved=99, dormant=False)
+    await _seed(conn, addr, "STANDARD", roi=5.0, pnl=500.0, volume=100.0, resolved=99, dormant=False)
+    await sweep_curated_tiers(conn)
+    assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "STANDARD"
+
+@pytest.mark.asyncio
+async def test_does_not_promote_on_high_roi_low_volume(conn):
+    # Meets ROI but fails volume floor (and fails PnL) → stays STANDARD.
+    addr = "0x" + "a9" * 20
+    await _seed(conn, addr, "STANDARD", roi=99.0, pnl=500.0, resolved=25, dormant=False, volume=100.0)
     await sweep_curated_tiers(conn)
     assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "STANDARD"
 
@@ -115,6 +132,6 @@ async def test_custom_wallet_never_demoted(conn):
 async def test_dormancy_alone_does_not_demote(conn):
     addr = "0x" + "a7" * 20
     # still qualifies on stats, but dormant → stays CURATED (list query hides it)
-    await _seed(conn, addr, "CURATED", roi=45.0, pnl=500.0, resolved=25, dormant=True)
+    await _seed(conn, addr, "CURATED", roi=45.0, pnl=60_000.0, resolved=25, dormant=True)
     await sweep_curated_tiers(conn)
     assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "CURATED"
