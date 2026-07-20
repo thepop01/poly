@@ -36,7 +36,12 @@ def trade_to_row(t: dict, log_index: int) -> dict:
 async def sync_wallet_trades(conn: asyncpg.Connection, session: aiohttp.ClientSession, address: str):
     """Fetch new fills for one curated wallet since its cursor, upsert, advance."""
     address = address.lower()
-    trades = await fetch_historical_trades_polygonscan(session, [address])
+    cursor = await conn.fetchval(
+        "SELECT last_synced_block FROM curated_trade_sync WHERE wallet_address = $1",
+        address,
+    )
+    start_block = (cursor + 1) if cursor else 0
+    trades = await fetch_historical_trades_polygonscan(session, [address], start_block=start_block)
     if not trades:
         return 0
     max_block = 0

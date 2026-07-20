@@ -301,10 +301,13 @@ async def _parse_etherscan_logs(session: aiohttp.ClientSession, logs: list[dict]
     return trades
 
 
-async def fetch_historical_trades_polygonscan(session: aiohttp.ClientSession, addresses: list[str]) -> list[dict]:
+async def fetch_historical_trades_polygonscan(session: aiohttp.ClientSession, addresses: list[str], start_block: int = 0) -> list[dict]:
     """
     Fetch all OrderFilled logs for the given wallet(s) directly from the CTF Exchanges.
     Bypasses the 3000-record limit of the Polymarket REST API's /trades endpoint.
+
+    start_block: only scan logs at or after this block. Pass a wallet's
+    last_synced_block+1 for incremental syncs; defaults to 0 (full history).
     """
     all_logs = []
 
@@ -318,7 +321,7 @@ async def fetch_historical_trades_polygonscan(session: aiohttp.ClientSession, ad
             # with topic0: topic0_2_opr for topic0<->topic2, topic0_3_opr for topic0<->topic3.
             for role_topic in ["topic2", "topic3"]:
                 topic_opr = "topic0_2_opr" if role_topic == "topic2" else "topic0_3_opr"
-                from_block = 0
+                from_block = start_block
                 to_block = 999999999
 
                 while True:

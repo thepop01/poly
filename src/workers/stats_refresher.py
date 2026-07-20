@@ -23,7 +23,6 @@ POLL_INTERVAL = 600  # run every 10 minutes
 
 CURATED_MIN_ROI = 30.0
 CURATED_MIN_PNL = 10_000.0
-CURATED_MIN_RESOLVED = 10
 
 async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
     try:
@@ -39,7 +38,11 @@ async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
 async def sweep_curated_tiers(conn: asyncpg.Connection):
     """Promote qualifying active STANDARD wallets to CURATED; demote curated
     wallets (except source='custom') that no longer qualify. Dormancy does NOT
-    demote — the curated list query already filters is_dormant=FALSE."""
+    demote — the curated list query already filters is_dormant=FALSE.
+
+    Qualification is ROI/PnL only: (roi_pct > MIN_ROI OR total_pnl > MIN_PNL).
+    The resolved_count sample-size gate was removed because it depended on
+    Supabase, which is no longer fetched."""
     # PROMOTE: active STANDARD wallets meeting the threshold rule.
     await conn.execute(
         """
@@ -52,10 +55,9 @@ async def sweep_curated_tiers(conn: asyncpg.Connection):
         WHERE m.address = w.address
           AND w.tier = 'STANDARD'
           AND w.is_dormant = FALSE
-          AND COALESCE(m.resolved_count, 0) >= $3
           AND (COALESCE(m.roi_pct, 0) > $1 OR COALESCE(m.total_pnl, 0) > $2)
         """,
-        CURATED_MIN_ROI, CURATED_MIN_PNL, CURATED_MIN_RESOLVED,
+        CURATED_MIN_ROI, CURATED_MIN_PNL,
     )
 
     # DEMOTE: curated, non-custom wallets that fail the rule → canonical tier.
@@ -78,12 +80,9 @@ async def sweep_curated_tiers(conn: asyncpg.Connection):
               SELECT 1 FROM wallet_sources_v2 s
               WHERE s.address = w.address AND s.source = 'custom'
           )
-          AND (
-              COALESCE(m.resolved_count, 0) < $3
-              OR (COALESCE(m.roi_pct, 0) <= $1 AND COALESCE(m.total_pnl, 0) <= $2)
-          )
+          AND COALESCE(m.roi_pct, 0) <= $1 AND COALESCE(m.total_pnl, 0) <= $2
         """,
-        CURATED_MIN_ROI, CURATED_MIN_PNL, CURATED_MIN_RESOLVED,
+        CURATED_MIN_ROI, CURATED_MIN_PNL,
     )
 
 async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.ClientSession):

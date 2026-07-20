@@ -5,69 +5,122 @@ import logging
 import aiohttp
 import asyncpg
 
-from src.utils.market_resolution import fetch_market_resolution
-from src.workers.leaderboard_stats import fetch_positions, _parse
+from src.workers.leaderboard_stats import fetch_positions, fetch_closed_positions, _parse
+from src.workers.window_stats import _parse_end
 
 logger = logging.getLogger(__name__)
 
 POSITION_CAP = 5000
 
 
-def classify_position(pos: dict, resolution: dict) -> dict:
-    """Pure: given a merged position and its market resolution, return the
-    classified row fields."""
-    total_bought = _parse(pos.get("total_bought"))
-    total_sold = _parse(pos.get("total_sold"))
-    net_tokens = _parse(pos.get("net_tokens"))
-    resolved = bool(resolution.get("resolved"))
-    won = resolved and resolution.get("winning_outcome") == pos.get("outcome")
-    payout = net_tokens * 1.0 if won else 0.0
-    realized_pnl = payout + total_sold - total_bought
+def classify_position(pos: dict, is_closed_endpoint: bool = False) -> dict | None:
+    """Classify a raw Polymarket position into curated_positions row fields.
+
+    Win/loss is the SIGN of realized PnL, taken straight from the API — NOT
+    which outcome the wallet held. A wallet that held a losing outcome but sold
+    before resolution at a profit is a WIN (its realizedPnl is positive); the
+    old outcome-matching logic scored those as losses.
+
+    - Closed-positions endpoint: the wallet fully exited → always resolved;
+      pnl = realizedPnl.
+    - Open-positions endpoint: resolved only if `redeemable` (market settled);
+      pnl = realizedPnl + cashPnl (booked + still-held legs).
+
+    Returns None for an open, unresolved position (excluded from win rate)."""
+    realized = _parse(pos.get("realizedPnl"))
+    total_bought = _parse(pos.get("totalBought"))
+    if is_closed_endpoint:
+        resolved = True
+        pnl = realized
+    else:
+        resolved = bool(pos.get("redeemable"))
+        pnl = realized + _parse(pos.get("cashPnl"))
+    if not resolved:
+        return None
     return {
         "total_bought": total_bought,
-        "total_sold": total_sold,
-        "net_tokens": net_tokens,
-        "market_resolved": resolved,
-        "won": won,
-        "payout": payout,
-        "realized_pnl": realized_pnl,
-        "is_resolved": resolved,
-        "is_win": resolved and realized_pnl > 0,
+        "total_sold": 0.0,
+        "net_tokens": _parse(pos.get("size")),
+        "market_resolved": True,
+        "won": pnl > 0,
+        "payout": _parse(pos.get("currentValue")),
+        "realized_pnl": pnl,
+        "is_resolved": True,
+        "is_win": pnl > 0,
     }
 
 
+async def _upsert(conn: asyncpg.Connection, address: str, pos: dict, fields: dict):
+    await conn.execute(
+        """
+        INSERT INTO curated_positions
+            (address, condition_id, outcome, total_bought, total_sold, net_tokens,
+             market_resolved, won, payout, realized_pnl, is_resolved, is_win,
+             category, subcategory, resolved_at, computed_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
+        ON CONFLICT (address, condition_id, outcome) DO UPDATE SET
+            total_bought=EXCLUDED.total_bought, total_sold=EXCLUDED.total_sold,
+            net_tokens=EXCLUDED.net_tokens, market_resolved=EXCLUDED.market_resolved,
+            won=EXCLUDED.won, payout=EXCLUDED.payout, realized_pnl=EXCLUDED.realized_pnl,
+            is_resolved=EXCLUDED.is_resolved, is_win=EXCLUDED.is_win,
+            resolved_at=EXCLUDED.resolved_at, computed_at=NOW()
+        """,
+        address, pos.get("conditionId"), pos.get("outcome") or "",
+        fields["total_bought"], fields["total_sold"], fields["net_tokens"],
+        fields["market_resolved"], fields["won"], fields["payout"],
+        fields["realized_pnl"], fields["is_resolved"], fields["is_win"],
+        pos.get("category"), pos.get("subcategory"), _parse_end(pos.get("endDate")),
+    )
+
+
 async def build_wallet_positions(conn: asyncpg.Connection, session: aiohttp.ClientSession, address: str):
-    """Fetch a curated wallet's open positions, classify against market
-    resolution, and upsert into curated_positions (capped)."""
-    raw = await fetch_positions(session, address)
-    positions = (raw or [])[:POSITION_CAP]
-    for p in positions:
+    """Rebuild a curated wallet's resolved positions from BOTH the open and
+    closed Polymarket endpoints, then upsert into curated_positions (capped).
+
+    Open endpoint contributes markets the wallet still holds a token in
+    (resolved only when `redeemable`); closed endpoint contributes fully-exited
+    markets. Together they form the complete resolved-position set the win rate
+    is computed over. Win/loss = sign of realized PnL (see classify_position)."""
+    seen: set[tuple[str, str]] = set()
+    count = 0
+
+    # Closed positions first — these are the realized wins/losses the wallet
+    # already exited, which the open endpoint omits.
+    try:
+        closed = await fetch_closed_positions(session, address)
+    except Exception as e:
+        logger.warning(f"closed-positions fetch failed for {address[:10]}: {e}")
+        closed = []
+    for p in (closed or []):
         cid = p.get("conditionId")
-        if not cid:
+        if not cid or count >= POSITION_CAP:
             continue
-        merged = {
-            "outcome": p.get("outcome") or "",
-            "total_bought": _parse(p.get("totalBought")),
-            "total_sold": 0.0,  # open-position endpoint gives no sold leg
-            "net_tokens": _parse(p.get("size")),
-        }
-        resolution = await fetch_market_resolution(session, cid)
-        fields = classify_position(merged, resolution)
-        await conn.execute(
-            """
-            INSERT INTO curated_positions
-                (address, condition_id, outcome, total_bought, total_sold, net_tokens,
-                 market_resolved, won, payout, realized_pnl, is_resolved, is_win,
-                 category, subcategory, computed_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
-            ON CONFLICT (address, condition_id, outcome) DO UPDATE SET
-                total_bought=EXCLUDED.total_bought, total_sold=EXCLUDED.total_sold,
-                net_tokens=EXCLUDED.net_tokens, market_resolved=EXCLUDED.market_resolved,
-                won=EXCLUDED.won, payout=EXCLUDED.payout, realized_pnl=EXCLUDED.realized_pnl,
-                is_resolved=EXCLUDED.is_resolved, is_win=EXCLUDED.is_win, computed_at=NOW()
-            """,
-            address, cid, merged["outcome"], fields["total_bought"], fields["total_sold"],
-            fields["net_tokens"], fields["market_resolved"], fields["won"], fields["payout"],
-            fields["realized_pnl"], fields["is_resolved"], fields["is_win"],
-            p.get("category"), p.get("subcategory"),
-        )
+        key = (cid, p.get("outcome") or "")
+        if key in seen:
+            continue
+        fields = classify_position(p, is_closed_endpoint=True)
+        if fields is None:
+            continue
+        seen.add(key)
+        await _upsert(conn, address, p, fields)
+        count += 1
+
+    # Open positions — resolved ones (redeemable) the wallet hasn't exited yet.
+    try:
+        openp = await fetch_positions(session, address)
+    except Exception as e:
+        logger.warning(f"positions fetch failed for {address[:10]}: {e}")
+        openp = []
+    for p in (openp or []):
+        cid = p.get("conditionId")
+        if not cid or count >= POSITION_CAP:
+            continue
+        key = (cid, p.get("outcome") or "")
+        if key in seen:
+            continue
+        fields = classify_position(p, is_closed_endpoint=False)
+        if fields is None:
+            continue
+        seen.add(key)
+        await _upsert(conn, address, p, fields)
+        count += 1

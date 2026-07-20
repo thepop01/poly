@@ -28,6 +28,7 @@ async def get_smart_money_alerts(
         a.condition_id, a.outcome, a.title as market_title, a.event_at as created_at,
         m.category, m.subcategory,
         w.username as wallet_name,
+        w.tier as wallet_tier,
         wm.total_volume as wallet_total_volume,
         wm.balance as wallet_balance,
         wm.position_value as wallet_position_value
@@ -111,3 +112,54 @@ async def get_smart_money_alerts(
             alerts.append(alert)
             
     return {"alerts": alerts, "total_count": total_count}
+
+
+@router.get("/summary")
+async def get_alpha_calls_summary(request: Request) -> dict[str, Any]:
+    """Aggregate stats for the Alpha Calls stat cards, over the smart-money feed."""
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    # Same universe as the feed: curated / might-cook wallets or >= $10k volume.
+    base = """
+    FROM wallet_activity_v2 a
+    JOIN wallets_v2 w ON a.address = w.address
+    JOIN wallet_metrics_v2 wm ON a.address = wm.address
+    WHERE (w.tier = 'CURATED' OR w.tier = 'MIGHT_COOK' OR wm.total_volume >= 10000)
+    """
+
+    counts_query = f"""
+    SELECT
+        COUNT(*) FILTER (WHERE a.event_type = 'TRADE'   AND a.amount_usdc >= 1000)  AS trades,
+        COUNT(*) FILTER (WHERE a.event_type = 'DEPOSIT' AND a.amount_usdc >= 10000) AS deposits,
+        COALESCE(SUM(a.amount_usdc) FILTER (WHERE a.event_type = 'DEPOSIT' AND a.amount_usdc >= 10000), 0) AS deposit_inflow
+    {base}
+    """
+
+    biggest_query = f"""
+    SELECT a.amount_usdc, a.address, w.username AS wallet_name
+    {base}
+      AND ((a.event_type = 'TRADE' AND a.amount_usdc >= 1000)
+        OR (a.event_type = 'DEPOSIT' AND a.amount_usdc >= 10000))
+    ORDER BY a.amount_usdc DESC
+    LIMIT 1
+    """
+
+    async with pool.acquire() as conn:
+        counts = await conn.fetchrow(counts_query)
+        biggest = await conn.fetchrow(biggest_query)
+
+    trades = int(counts["trades"] or 0)
+    deposits = int(counts["deposits"] or 0)
+    return {
+        "live_events": trades + deposits,
+        "trades": trades,
+        "deposits": deposits,
+        "deposit_inflow": float(counts["deposit_inflow"] or 0),
+        "biggest": {
+            "amount": float(biggest["amount_usdc"]) if biggest else 0,
+            "address": biggest["address"] if biggest else None,
+            "wallet_name": biggest["wallet_name"] if biggest else None,
+        },
+    }

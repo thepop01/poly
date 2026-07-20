@@ -16,9 +16,14 @@ async def get_watchlist(request: Request, user: dict = Depends(get_current_user)
     user_id = user["sub"]
 
     query = """
-    SELECT tw.*, uw.alerts_enabled 
+    SELECT
+        tw.address, tw.username, tw.tier, tw.is_dormant, tw.last_trade_at,
+        wm.total_pnl AS pnl, wm.roi_pct, wm.win_rate,
+        wm.balance, wm.total_volume AS volume, wm.position_value,
+        uw.alerts_enabled, uw.added_at
     FROM user_watchlists uw
     LEFT JOIN wallets_v2 tw ON uw.wallet_address = tw.address
+    LEFT JOIN wallet_metrics_v2 wm ON uw.wallet_address = wm.address
     WHERE uw.user_id = $1::uuid
     ORDER BY uw.added_at DESC
     """

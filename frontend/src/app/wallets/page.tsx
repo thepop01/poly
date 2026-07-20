@@ -202,7 +202,7 @@ function WalletsPageInner() {
       ];
     }
     if (tab === "low_balance") {
-      return [wallet, source, pnl, volume, balance, position, lastTraded];
+      return [wallet, source, pnl, volume, roi, balance, position, lastTraded];
     }
     if (tab === "hibernated") {
       return [

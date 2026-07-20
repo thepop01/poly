@@ -53,9 +53,20 @@ async def test_promotes_on_pnl_alone(conn):
 
 
 @pytest.mark.asyncio
-async def test_does_not_promote_below_min_resolved(conn):
+async def test_promotes_regardless_of_resolved_count(conn):
+    # Resolved-count gate was removed (Supabase retired). A qualifying wallet
+    # promotes on ROI/PnL alone, even with a tiny resolved_count.
     addr = "0x" + "a3" * 20
     await _seed(conn, addr, "STANDARD", roi=99.0, pnl=99_000.0, resolved=3, dormant=False)
+    await sweep_curated_tiers(conn)
+    assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "CURATED"
+
+
+@pytest.mark.asyncio
+async def test_does_not_promote_below_thresholds(conn):
+    # Low ROI and low PnL → stays STANDARD.
+    addr = "0x" + "a8" * 20
+    await _seed(conn, addr, "STANDARD", roi=5.0, pnl=500.0, resolved=99, dormant=False)
     await sweep_curated_tiers(conn)
     assert await conn.fetchval("SELECT tier FROM wallets_v2 WHERE address=$1", addr) == "STANDARD"
 

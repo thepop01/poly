@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from src.utils.alchemy_client import fetch_capital_metrics
 from src.utils.category_classifier import classify_tags
 from src.workers.leaderboard_stats import (
-    fetch_balance, fetch_website_pnl, fetch_supabase_wallet_profile, fetch_positions,
+    fetch_balance, fetch_website_pnl, fetch_positions,
     _fetch_wallet_data, _fetch_category_pnl_batch, compute_stats, compute_wallet_tags,
     compute_category_stats, select_headline_pnl, _computed_volume, _parse, _parse_end
 )
@@ -88,22 +88,19 @@ async def process_wallet_v2(conn: asyncpg.Connection, session: aiohttp.ClientSes
     is_curated = row["tier"] == "CURATED"
     start_stats_at = datetime.now(timezone.utc) - timedelta(days=365) # Approximation for v2
 
-    supabase = None
     if is_curated:
         data = await _fetch_wallet_data(session, address, start_stats_at)
         trades, positions, balance, website = data["trades"], data["positions"], data["balance"], data["website"]
         deposits, withdrawals, peak_capital = data["deposits"], data["withdrawals"], data["peak_capital"]
     else:
-        balance_f, website_f, supabase_f, positions_f = await asyncio.gather(
+        balance_f, website_f, positions_f = await asyncio.gather(
             fetch_balance(session, address),
             fetch_website_pnl(session, address),
-            fetch_supabase_wallet_profile(session, address),
             fetch_positions(session, address),
             return_exceptions=True,
         )
         balance = balance_f if isinstance(balance_f, (int, float)) else 0.0
         website = website_f if isinstance(website_f, dict) else None
-        supabase = supabase_f if isinstance(supabase_f, dict) else None
         trades, positions = [], positions_f if isinstance(positions_f, list) else []
         capital_f = await fetch_capital_metrics(session, address)
         if isinstance(capital_f, tuple) and len(capital_f) == 3:
@@ -113,54 +110,51 @@ async def process_wallet_v2(conn: asyncpg.Connection, session: aiohttp.ClientSes
 
     # NON-CURATED short-circuit
     if not is_curated:
-        sb_wr = supabase["win_rate"] if supabase and supabase.get("win_rate") is not None else None
-        sb_roi = supabase["roi_pct"] if supabase and supabase.get("roi_pct") is not None else None
-        sb_resolved = supabase["resolved_count"] if supabase and supabase.get("resolved_count") is not None else None
-        sb_winning = supabase["winning_count"] if supabase and supabase.get("winning_count") is not None else None
-
         total_pnl = website["pnl"] if website else None
         total_volume = website["volume"] if website else None
         pos_val = sum(_parse(p.get("currentValue", 0)) for p in positions)
 
+        # ROI from PnL / peak_capital (no Supabase). Win rate / resolved counts
+        # are only computed for curated wallets from curated_positions; leave
+        # them NULL here — they are no longer promotion inputs.
+        roi = (total_pnl / peak_capital * 100.0) if (total_pnl is not None and peak_capital and peak_capital > 0) else None
+
         await conn.execute("""
-            INSERT INTO wallet_metrics_v2 (address, win_rate, roi_pct, resolved_count, winning_count, total_volume, total_pnl, balance, deposits, withdrawals, position_value, peak_capital, computed_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+            INSERT INTO wallet_metrics_v2 (address, roi_pct, total_volume, total_pnl, balance, deposits, withdrawals, position_value, peak_capital, computed_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
             ON CONFLICT (address) DO UPDATE SET
-                win_rate=EXCLUDED.win_rate, roi_pct=EXCLUDED.roi_pct,
-                resolved_count=EXCLUDED.resolved_count, winning_count=EXCLUDED.winning_count,
+                roi_pct=EXCLUDED.roi_pct,
                 total_volume=EXCLUDED.total_volume, total_pnl=EXCLUDED.total_pnl,
                 balance=EXCLUDED.balance, deposits=EXCLUDED.deposits,
                 withdrawals=EXCLUDED.withdrawals, position_value=EXCLUDED.position_value,
                 peak_capital=EXCLUDED.peak_capital, computed_at=NOW()
-        """, address, sb_wr, sb_roi, sb_resolved, sb_winning, total_volume, total_pnl, balance, deposits, withdrawals, pos_val, peak_capital)
+        """, address, roi, total_volume, total_pnl, balance, deposits, withdrawals, pos_val, peak_capital)
         return
 
     # CURATED WALLETS
-    if not supabase:
-        supabase_f = await fetch_supabase_wallet_profile(session, address)
-        supabase = supabase_f if isinstance(supabase_f, dict) else None
-
     from src.utils.etherscan_client import fetch_historical_redemptions_polygonscan, build_synthetic_closed_positions
     proxies = set(t.get("proxyWallet") for t in trades if t.get("proxyWallet") and isinstance(t.get("proxyWallet"), str))
     addresses_to_query = [address] + list(proxies)
-    
+
     redemptions = await fetch_historical_redemptions_polygonscan(session, addresses_to_query)
     synthetic_closed = build_synthetic_closed_positions(trades, redemptions)
-    
+
     await upsert_closed_positions_v2(conn, address, synthetic_closed)
     closed = synthetic_closed
-    
+
     headline = select_headline_pnl(website, 0.0, _computed_volume(trades))
     stats = compute_stats(positions, closed, headline["pnl"], headline["volume"], start_stats_at, peak_capital)
 
-    if supabase:
-        if supabase.get("win_rate") is not None: stats["win_rate"] = supabase["win_rate"]
-        if supabase.get("roi_pct") is not None: stats["roi_pct"] = supabase["roi_pct"]
-        if supabase.get("resolved_count") is not None: stats["resolved_count"] = supabase["resolved_count"]
-        if supabase.get("winning_count") is not None: stats["winning_count"] = supabase["winning_count"]
-
+    # Win rate / resolved / ROI now come from curated_positions (below), not Supabase.
     from src.workers.curated_positions_builder import build_wallet_positions
     await build_wallet_positions(conn, session, address)
+
+    # Feed the raw trade log (independent of win-rate; drives the trade-feed UI).
+    from src.workers.curated_trade_feed import sync_wallet_trades
+    try:
+        await sync_wallet_trades(conn, session, address)
+    except Exception as e:
+        logger.warning(f"trade feed sync failed for {address[:10]}: {e}")
     wr_row = await conn.fetchrow(
         """
         SELECT COUNT(*) FILTER (WHERE is_resolved) AS resolved,

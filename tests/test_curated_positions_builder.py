@@ -4,31 +4,37 @@ from src.workers.curated_positions_builder import classify_position
 
 
 def test_hold_to_zero_loser_counts_as_loss():
-    # bought $100, never sold, market resolved, held losing outcome
-    pos = {"total_bought": 100.0, "total_sold": 0.0, "net_tokens": 200.0, "outcome": "Yes"}
-    res = {"resolved": True, "winning_outcome": "No"}
-    r = classify_position(pos, res)
+    # open position on a resolved market, rode to zero: realizedPnl + cashPnl < 0
+    pos = {"redeemable": True, "realizedPnl": 0.0, "cashPnl": -100.0,
+           "totalBought": 100.0, "size": 200.0, "currentValue": 0.0, "outcome": "Yes"}
+    r = classify_position(pos, is_closed_endpoint=False)
     assert r["is_resolved"] is True
     assert r["is_win"] is False
-    assert r["payout"] == 0.0
     assert r["realized_pnl"] == -100.0
 
 
-def test_winner_gets_payout():
-    pos = {"total_bought": 100.0, "total_sold": 0.0, "net_tokens": 200.0, "outcome": "Yes"}
-    res = {"resolved": True, "winning_outcome": "Yes"}
-    r = classify_position(pos, res)
-    assert r["payout"] == 200.0
-    assert r["realized_pnl"] == 100.0
+def test_sold_before_resolution_at_profit_is_a_win():
+    # Held the LOSING outcome but exited early at a profit — must count as a WIN.
+    # This is the case the old outcome-matching logic scored as a loss.
+    pos = {"redeemable": True, "realizedPnl": 6103.9, "cashPnl": -177.0,
+           "totalBought": 189281.0, "size": 177048.0, "currentValue": 0.0, "outcome": "DN SOOPers"}
+    r = classify_position(pos, is_closed_endpoint=False)
     assert r["is_win"] is True
+    assert round(r["realized_pnl"], 1) == 5926.9
 
 
-def test_unresolved_is_open():
-    pos = {"total_bought": 100.0, "total_sold": 0.0, "net_tokens": 200.0, "outcome": "Yes"}
-    res = {"resolved": False, "winning_outcome": None}
-    r = classify_position(pos, res)
-    assert r["is_resolved"] is False
-    assert r["is_win"] is False
+def test_closed_position_uses_realized_pnl():
+    pos = {"realizedPnl": 139020.2, "totalBought": 5000.0, "outcome": "Yes"}
+    r = classify_position(pos, is_closed_endpoint=True)
+    assert r["is_resolved"] is True
+    assert r["is_win"] is True
+    assert r["realized_pnl"] == 139020.2
+
+
+def test_open_unresolved_is_excluded():
+    pos = {"redeemable": False, "realizedPnl": 0.0, "cashPnl": 50.0,
+           "totalBought": 100.0, "size": 200.0, "outcome": "Yes"}
+    assert classify_position(pos, is_closed_endpoint=False) is None
 
 
 import os, pytest_asyncio, asyncpg
