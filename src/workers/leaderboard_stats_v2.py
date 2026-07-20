@@ -159,6 +159,21 @@ async def process_wallet_v2(conn: asyncpg.Connection, session: aiohttp.ClientSes
         if supabase.get("resolved_count") is not None: stats["resolved_count"] = supabase["resolved_count"]
         if supabase.get("winning_count") is not None: stats["winning_count"] = supabase["winning_count"]
 
+    from src.workers.curated_positions_builder import build_wallet_positions
+    await build_wallet_positions(conn, session, address)
+    wr_row = await conn.fetchrow(
+        """
+        SELECT COUNT(*) FILTER (WHERE is_resolved) AS resolved,
+               COUNT(*) FILTER (WHERE is_win) AS wins
+        FROM curated_positions WHERE address = $1
+        """,
+        address,
+    )
+    if wr_row and wr_row["resolved"]:
+        stats["resolved_count"] = wr_row["resolved"]
+        stats["winning_count"] = wr_row["wins"]
+        stats["win_rate"] = wr_row["wins"] / wr_row["resolved"]
+
     pos_val = sum(_parse(p.get("currentValue", 0)) for p in positions)
 
     await conn.execute("""
