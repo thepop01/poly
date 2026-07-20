@@ -253,7 +253,7 @@ export default function CuratedListPage() {
           <p className="text-xs text-muted-fg mt-0.5">
             {isCategoryView
               ? `${CATEGORY_TABS.find(c => c.key === category)?.label} wallets - category-specific PnL`
-              : "ROI > 30% OR Win Rate > 70% OR PnL > $10k - active in last 30 days"
+              : "ROI > 30% OR PnL > $10k - active in last 30 days"
             }
           </p>
         </div>

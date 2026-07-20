@@ -21,6 +21,10 @@ REFRESH_STALE_AFTER_HOURS = 12
 BATCH_SIZE = 100
 POLL_INTERVAL = 600  # run every 10 minutes
 
+CURATED_MIN_ROI = 30.0
+CURATED_MIN_PNL = 10_000.0
+CURATED_MIN_RESOLVED = 10
+
 async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
     try:
         b = await alchemy_get_token_balances(session, address, [PUSD_CONTRACT])
@@ -31,6 +35,56 @@ async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
     except Exception as e:
         logger.warning(f"Failed to fetch balance for {address}: {e}")
     return 0.0
+
+async def sweep_curated_tiers(conn: asyncpg.Connection):
+    """Promote qualifying active STANDARD wallets to CURATED; demote curated
+    wallets (except source='custom') that no longer qualify. Dormancy does NOT
+    demote — the curated list query already filters is_dormant=FALSE."""
+    # PROMOTE: active STANDARD wallets meeting the threshold rule.
+    await conn.execute(
+        """
+        UPDATE wallets_v2 w
+        SET tier = 'CURATED',
+            tier_reason = 'auto: roi/pnl threshold',
+            curated_at = NOW(),
+            updated_at = NOW()
+        FROM wallet_metrics_v2 m
+        WHERE m.address = w.address
+          AND w.tier = 'STANDARD'
+          AND w.is_dormant = FALSE
+          AND COALESCE(m.resolved_count, 0) >= $3
+          AND (COALESCE(m.roi_pct, 0) > $1 OR COALESCE(m.total_pnl, 0) > $2)
+        """,
+        CURATED_MIN_ROI, CURATED_MIN_PNL, CURATED_MIN_RESOLVED,
+    )
+
+    # DEMOTE: curated, non-custom wallets that fail the rule → canonical tier.
+    await conn.execute(
+        """
+        UPDATE wallets_v2 w
+        SET tier = CASE
+                WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) <= 0 THEN
+                    CASE WHEN w.last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
+                WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) < 1000 THEN 'LOW_BALANCE'
+                WHEN w.last_trade_at IS NULL THEN 'NEW'
+                ELSE 'STANDARD'
+            END,
+            tier_reason = 'auto: demoted below curated threshold',
+            updated_at = NOW()
+        FROM wallet_metrics_v2 m
+        WHERE m.address = w.address
+          AND w.tier = 'CURATED'
+          AND NOT EXISTS (
+              SELECT 1 FROM wallet_sources_v2 s
+              WHERE s.address = w.address AND s.source = 'custom'
+          )
+          AND (
+              COALESCE(m.resolved_count, 0) < $3
+              OR (COALESCE(m.roi_pct, 0) <= $1 AND COALESCE(m.total_pnl, 0) <= $2)
+          )
+        """,
+        CURATED_MIN_ROI, CURATED_MIN_PNL, CURATED_MIN_RESOLVED,
+    )
 
 async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.ClientSession):
     stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=REFRESH_STALE_AFTER_HOURS)
@@ -55,6 +109,8 @@ async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.Cli
     # Sweep tiers to the canonical model for every wallet with metrics.
     # CURATED is never auto-demoted; UNCLASSIFIED rows are the vetting
     # queue owned by wallet_trade_history — don't dequeue them here.
+    # Model: balance decides the bucket first; NEW = funded ($1k+) but
+    # zero trades ever. Discovery date (added_at) is NOT a signal.
     await conn.execute("""
         UPDATE wallets_v2 w
         SET tier = sub.new_tier, tier_reason = 'stats_refresher reclassify', updated_at = NOW()
@@ -63,9 +119,8 @@ async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.Cli
                 CASE
                     WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) <= 0 THEN
                         CASE WHEN w2.last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
-                    WHEN w2.last_trade_at IS NULL THEN 'NEW'
-                    WHEN w2.added_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
                     WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) < 1000 THEN 'LOW_BALANCE'
+                    WHEN w2.last_trade_at IS NULL THEN 'NEW'
                     ELSE 'STANDARD'
                 END AS new_tier
             FROM wallets_v2 w2
@@ -74,6 +129,9 @@ async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.Cli
         ) sub
         WHERE sub.address = w.address AND sub.new_tier != w.tier
     """)
+
+    # Promote/demote the curated tier on fresh metrics (spec 2026-07-20).
+    await sweep_curated_tiers(conn)
 
     # Fetch active wallets to refresh
     # We prioritize wallets that have never been computed, then stale ones.
@@ -126,15 +184,15 @@ async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.Cli
 
             # Reclassify on fresh numbers (canonical model: DEAD /
             # LOW_BALANCE / NEW / STANDARD; CURATED never auto-demoted,
-            # UNCLASSIFIED stays queued for vetting)
+            # UNCLASSIFIED stays queued for vetting). NEW = funded ($1k+)
+            # with zero trades ever; discovery date is not a signal.
             await conn.execute("""
                 UPDATE wallets_v2
                 SET tier = CASE
                         WHEN $2 <= 0 THEN
                             CASE WHEN last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
-                        WHEN last_trade_at IS NULL THEN 'NEW'
-                        WHEN added_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
                         WHEN $2 < 1000 THEN 'LOW_BALANCE'
+                        WHEN last_trade_at IS NULL THEN 'NEW'
                         ELSE 'STANDARD'
                     END,
                     tier_reason = 'stats_refresher reclassify',
@@ -144,9 +202,8 @@ async def refresh_tracked_wallets(conn: asyncpg.Connection, session: aiohttp.Cli
                   AND tier != CASE
                         WHEN $2 <= 0 THEN
                             CASE WHEN last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
-                        WHEN last_trade_at IS NULL THEN 'NEW'
-                        WHEN added_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
                         WHEN $2 < 1000 THEN 'LOW_BALANCE'
+                        WHEN last_trade_at IS NULL THEN 'NEW'
                         ELSE 'STANDARD'
                     END
             """, address, balance + position_value)

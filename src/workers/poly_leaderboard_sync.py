@@ -1,13 +1,15 @@
 """
 Polymarket Leaderboard Sync Worker
 
-Weekly sync that:
+Discovery only. Weekly sync that:
 1. Fetches top 5000 wallets from Polymarket ALL leaderboard
 2. Fetches top 2000 from SPORTS leaderboard
 3. Fetches top 500 from each category leaderboard
 4. Adds new wallets to wallets_v2 (source='leaderboard')
-5. Checks curated conditions for category top-5000
-6. Promotes qualified wallets to curated list
+5. Stores per-category PnL/volume stats
+
+Curated promotion/demotion is handled by stats_refresher.py
+(see docs/CORE_LOGIC.md section 1). This worker no longer promotes.
 
 Runs once per week on Monday at 2 PM UTC.
 """
@@ -178,79 +180,7 @@ async def store_category_stats(
     return upserted, removed_count
 
 
-async def check_and_promote_curated(
-    conn: asyncpg.Connection,
-    entries: list[dict],
-    category: str,
-) -> int:
-    """Check if leaderboard top-100 wallets qualify for curated. Returns count promoted."""
-    promoted = 0
-    for entry in entries[:100]:
-        address = (entry.get("proxyWallet") or "").lower()
-        if not address or len(address) != 42:
-            continue
 
-        # Check if wallet is tracked and has stats
-        row = await conn.fetchrow("""
-            SELECT w.address, w.tier, w.is_dormant, wm.balance,
-                   wm.resolved_count, wm.win_rate, wm.roi_pct, wm.total_pnl
-            FROM wallets_v2 w
-            LEFT JOIN wallet_metrics_v2 wm ON w.address = wm.address
-            WHERE w.address = $1
-        """, address)
-
-        if not row:
-            continue
-        if row["tier"] == 'CURATED':
-            continue
-        if row["is_dormant"]:
-            continue
-
-        # Curated conditions: global OR per-category
-        resolved = row["resolved_count"] or 0
-        win_rate = float(row["win_rate"] or 0)
-        roi = float(row["roi_pct"] or 0)
-        pnl = float(row["total_pnl"] or 0)
-
-        qualifies = (
-            roi > 30
-            or float(row["balance"] or 0) > 5_000
-            or pnl > 10_000
-        )
-
-        # Also check per-category stats
-        if not qualifies:
-            cat_row = await conn.fetchrow("""
-                SELECT pnl, win_rate, roi_pct, volume
-                FROM category_stats_v2
-                WHERE address = $1 AND category ILIKE $2 AND subcategory = '' AND window_size = 0
-            """, address, category)
-            if cat_row:
-                cat_vol = float(cat_row["volume"] or 0)
-                cat_pnl = float(cat_row["pnl"] or 0)
-                cat_roi = float(cat_row["roi_pct"] or 0)
-                cat_wr = float(cat_row["win_rate"] or 0)
-                if cat_vol >= 5_000 and (cat_roi > 30 or cat_wr > 0.60 or cat_pnl > 5_000):
-                    qualifies = True
-
-        if qualifies:
-            await conn.execute("""
-                UPDATE wallets_v2 SET
-                    tier = 'CURATED',
-                    curated_at = NOW(),
-                    last_checked_for_curated = NOW()
-                WHERE address = $1 AND tier != 'CURATED'
-            """, address)
-            promoted += 1
-            logger.info(f"Promoted to curated from leaderboard ({category}): {address[:10]}...")
-
-        # Always update last_checked_for_curated
-        await conn.execute(
-            "UPDATE wallets_v2 SET last_checked_for_curated = NOW() WHERE address = $1",
-            address,
-        )
-
-    return promoted
 
 
 async def run_weekly_sync(db_url: str = DB_URL):
@@ -298,12 +228,7 @@ async def run_weekly_sync(db_url: str = DB_URL):
                 logger.info(f"{cat}: {upserted} upserted, {removed} dropped off")
                 await asyncio.sleep(0.1)
 
-            # 5. Check curated conditions for category top-100
-            total_promoted = 0
-            for cat, entries in category_entries.items():
-                promoted = await check_and_promote_curated(conn, entries, cat)
-                total_promoted += promoted
-            logger.info(f"Promoted {total_promoted} wallets to curated")
+
 
             # 6. Set next_check_at = NOW() for new wallets so stats worker picks them up
             await conn.execute("""
