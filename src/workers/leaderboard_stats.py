@@ -1496,34 +1496,7 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
             stats["max_trade_size"],
             balance, deposits, withdrawals, position_value, last_trade_dt)
 
-    # ── Store ALL trades for curated wallets ──
-    if qualifies:
-        for t in trades:
-            title = t.get("title") or t.get("market_name") or ""
-            tx_hash = t.get("transactionHash") or t.get("txHash") or ""
-            condition_id = t.get("conditionId") or ""
-            side = t.get("side") or ""
-            price = _parse(t.get("price"))
-            size = _parse(t.get("size"))
-            usdc = price * size
-            ts = t.get("timestamp", 0)
-            dt = datetime.fromtimestamp(int(ts), tz=timezone.utc) if ts else datetime.now(timezone.utc)
 
-            cat, detailed_sub = classify_tags([title]) if title else ("Other", "General")
-            flat_sub = flatten_subcategory(cat, detailed_sub)
-
-            if tx_hash:
-                try:
-                    await conn.execute("""
-                        INSERT INTO global_wallet_trades
-                        (wallet_address, tx_hash, condition_id, market_name, side, price,
-                         size, amount_usdc, traded_at, category, subcategory, detailed_subcategory)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                        ON CONFLICT (wallet_address, tx_hash) DO NOTHING
-                    """, address, tx_hash, condition_id, title, side, price,
-                        size, usdc, dt, cat, flat_sub, detailed_sub)
-                except Exception as e:
-                    logger.warning(f"Failed to insert curated trade for {address[:10]}: {e}")
 
 
 # ── Parallel runner ──────────────────────────────────────────────────────
