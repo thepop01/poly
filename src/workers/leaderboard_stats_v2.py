@@ -114,21 +114,68 @@ async def process_wallet_v2(conn: asyncpg.Connection, session: aiohttp.ClientSes
         total_volume = website["volume"] if website else None
         pos_val = sum(_parse(p.get("currentValue", 0)) for p in positions)
 
-        # ROI from PnL / peak_capital (no Supabase). Win rate / resolved counts
-        # are only computed for curated wallets from curated_positions; leave
-        # them NULL here — they are no longer promotion inputs.
+        # --- Win Rate via position heuristics (Option B included) ---
+        resolved, wins = 0, 0
+        cat_volume: dict[str, float] = {}
+
+        for p in positions:
+            cur_price = _parse(p.get("curPrice"))
+            redeemable = p.get("redeemable", False)
+            total_bought = _parse(p.get("totalBought"))
+            title = p.get("title") or ""
+            end_date = p.get("endDate")
+
+            # Classify position
+            if cur_price < 0.03 or (end_date and not redeemable and cur_price < 0.10):
+                # Option B: near-worthless open position treated as loss
+                resolved += 1
+            elif redeemable and cur_price > 0.97:
+                resolved += 1
+                wins += 1
+
+            # Accumulate category volume
+            category = classify_tags([title])[0] if title else "OTHER"
+            cat_volume[category] = cat_volume.get(category, 0.0) + total_bought
+
+        win_rate_computed = (wins / resolved) if resolved > 0 else None
         roi = (total_pnl / peak_capital * 100.0) if (total_pnl is not None and peak_capital and peak_capital > 0) else None
 
         await conn.execute("""
-            INSERT INTO wallet_metrics_v2 (address, roi_pct, total_volume, total_pnl, balance, deposits, withdrawals, position_value, peak_capital, computed_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+            INSERT INTO wallet_metrics_v2 (
+                address, roi_pct, total_volume, total_pnl, balance, deposits, 
+                withdrawals, position_value, peak_capital,
+                win_rate, resolved_count, winning_count, computed_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
             ON CONFLICT (address) DO UPDATE SET
                 roi_pct=EXCLUDED.roi_pct,
                 total_volume=EXCLUDED.total_volume, total_pnl=EXCLUDED.total_pnl,
                 balance=EXCLUDED.balance, deposits=EXCLUDED.deposits,
                 withdrawals=EXCLUDED.withdrawals, position_value=EXCLUDED.position_value,
-                peak_capital=EXCLUDED.peak_capital, computed_at=NOW()
-        """, address, roi, total_volume, total_pnl, balance, deposits, withdrawals, pos_val, peak_capital)
+                peak_capital=EXCLUDED.peak_capital,
+                win_rate=EXCLUDED.win_rate,
+                resolved_count=EXCLUDED.resolved_count,
+                winning_count=EXCLUDED.winning_count,
+                computed_at=NOW()
+        """, address, roi, total_volume, total_pnl, balance, deposits, 
+             withdrawals, pos_val, peak_capital, win_rate_computed, resolved, wins)
+
+        # --- Write category stats ---
+        # Always delete stale window=0 rows first, even if no new positions found.
+        # Without this, old data from a prior worker run would persist and show wrong categories.
+        await conn.execute(
+            "DELETE FROM category_stats_v2 WHERE address = $1 AND window_size = 0", address
+        )
+        for cat, vol in cat_volume.items():
+            if cat == "OTHER" or vol < 1.0:
+                continue
+            await conn.execute("""
+                INSERT INTO category_stats_v2
+                    (address, category, subcategory, window_size, volume, computed_at)
+                VALUES ($1, $2, '', 0, $3, NOW())
+                ON CONFLICT DO NOTHING
+            """, address, cat.upper(), vol)
+
         return
 
     # CURATED WALLETS
