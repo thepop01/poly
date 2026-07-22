@@ -17,6 +17,7 @@ from collections import defaultdict
 
 from src.utils.etherscan_client import fetch_recent_trades_etherscan, get_latest_block_etherscan
 from src.utils.category_classifier import classify_tags
+from src.utils.accounting import apply_fill
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ WHALE_TRADE_THRESHOLD = 1_000
 LARGE_TRADE_THRESHOLD = 5_000
 POLL_INTERVAL = 15
 
-LAST_BLOCK_FILE = ".whale_last_block"
+LAST_BLOCK_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", ".whale_last_block")
 
 _rolling_volumes = defaultdict(lambda: defaultdict(list))
 ROLLING_WINDOW_SECS = 12 * 3600
@@ -146,8 +147,29 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                             _rolling_volumes[wallet][market_id].append((ts, usd_value, tx_hash, side))
                             total_12h_vol = sum(t[1] for t in _rolling_volumes[wallet][market_id])
 
+                            is_tracked = await conn.fetchval("SELECT address FROM wallets_v2 WHERE address = $1", wallet) is not None
+
+                            is_instant_whale = usd_value >= LARGE_TRADE_THRESHOLD
+                            is_accumulated_whale = total_12h_vol >= LARGE_TRADE_THRESHOLD
+
+                            if is_instant_whale or is_accumulated_whale:
+                                whale_wallets.append(wallet)
+                                if is_accumulated_whale:
+                                    _rolling_volumes[wallet][market_id].clear()
+
+                            # If it's a whale trade, it BECOMES a tracked wallet
                             if usd_value >= WHALE_TRADE_THRESHOLD:
                                 whale_wallets.append(wallet)
+                                try:
+                                    track_count = await maybe_add_to_global(conn, wallet, dt)
+                                    if track_count > 1:
+                                        logger.info(f"Wallet re-detected: A{track_count} | {wallet[:10]}... | ${usd_value:,.0f}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to add {wallet[:10]} to global: {e}")
+                                # It's now tracked
+                                is_tracked = True
+
+                            if is_tracked:
                                 try:
                                     exists = await conn.fetchval("SELECT id FROM wallet_activity_v2 WHERE tx_hash = $1 AND event_type = 'TRADE'", tx_hash)
                                     if not exists:
@@ -165,25 +187,43 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                                             INSERT INTO wallet_activity_v2 (address, event_type, amount_usdc, tx_hash, condition_id, outcome, title, event_at, created_at)
                                             VALUES ($1, 'TRADE', $2, $3, $4, $5, $6, $7, NOW())
                                         """, wallet, usd_value, tx_hash, market_id, side, title, dt)
+
+                                        # Upsert into test_computed_positions
+                                        condition_id = trade.get("conditionId") or market_id
+                                        token_qty = float(trade.get("token_size", 0))
+                                        
+                                        # 1. Fetch current state
+                                        row = await conn.fetchrow("""
+                                            SELECT total_bought_usd, total_buy_tokens, total_sold_usd, total_sell_tokens, realized_pnl
+                                            FROM test_computed_positions
+                                            WHERE address = $1 AND condition_id = $2
+                                        """, wallet, condition_id)
+                                        
+                                        current_state = dict(row) if row else {}
+                                        
+                                        # 2. Apply math
+                                        new_state = apply_fill(current_state, trade)
+                                        
+                                        # 3. Upsert
+                                        await conn.execute("""
+                                            INSERT INTO test_computed_positions (
+                                                address, condition_id, total_bought_usd, total_buy_tokens, 
+                                                total_sold_usd, total_sell_tokens, realized_pnl
+                                            )
+                                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                            ON CONFLICT (address, condition_id) DO UPDATE SET
+                                                total_bought_usd = EXCLUDED.total_bought_usd,
+                                                total_buy_tokens = EXCLUDED.total_buy_tokens,
+                                                total_sold_usd = EXCLUDED.total_sold_usd,
+                                                total_sell_tokens = EXCLUDED.total_sell_tokens,
+                                                realized_pnl = EXCLUDED.realized_pnl,
+                                                updated_at = NOW()
+                                        """, wallet, condition_id, 
+                                        new_state["total_bought_usd"], new_state["total_buy_tokens"],
+                                        new_state["total_sold_usd"], new_state["total_sell_tokens"],
+                                        new_state["realized_pnl"])
                                 except Exception as e:
-                                    logger.warning(f"Failed to insert smart money trade into activity v2: {e}")
-
-                            is_instant_whale = usd_value >= LARGE_TRADE_THRESHOLD
-                            is_accumulated_whale = total_12h_vol >= LARGE_TRADE_THRESHOLD
-
-                            if is_instant_whale or is_accumulated_whale:
-                                whale_wallets.append(wallet)
-                                if is_accumulated_whale:
-                                    _rolling_volumes[wallet][market_id].clear()
-
-                            # Whale trade >= $1k → add to global list
-                            if usd_value >= WHALE_TRADE_THRESHOLD:
-                                try:
-                                    track_count = await maybe_add_to_global(conn, wallet, dt)
-                                    if track_count > 1:
-                                        logger.info(f"Wallet re-detected: A{track_count} | {wallet[:10]}... | ${usd_value:,.0f}")
-                                except Exception as e:
-                                    logger.warning(f"Failed to add {wallet[:10]} to global: {e}")
+                                    logger.warning(f"Failed to process trade for {wallet}: {e}")
 
                     if whale_wallets:
                         whale_wallets = list(set(whale_wallets))

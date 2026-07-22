@@ -37,6 +37,29 @@ def test_open_unresolved_is_excluded():
     assert classify_position(pos, is_closed_endpoint=False) is None
 
 
+def test_trim_page_no_cursor_keeps_all():
+    from src.workers.leaderboard_stats import _trim_closed_page
+    items = [{"timestamp": 300}, {"timestamp": 200}, {"timestamp": 100}]
+    kept, reached = _trim_closed_page(items, None)
+    assert kept == items and reached is False
+
+
+def test_trim_page_stops_at_cursor():
+    from src.workers.leaderboard_stats import _trim_closed_page
+    items = [{"timestamp": 300}, {"timestamp": 200}, {"timestamp": 100}]
+    kept, reached = _trim_closed_page(items, 200)
+    # 200 itself is already stored (<= cursor) — only strictly newer kept
+    assert [p["timestamp"] for p in kept] == [300]
+    assert reached is True
+
+
+def test_trim_page_missing_timestamp_is_kept():
+    from src.workers.leaderboard_stats import _trim_closed_page
+    items = [{"timestamp": 300}, {"no_ts": True}, {"timestamp": 100}]
+    kept, reached = _trim_closed_page(items, 150)
+    assert {"no_ts": True} in kept and reached is True
+
+
 import os, pytest_asyncio, asyncpg
 
 DB_URL = os.getenv("DATABASE_URL", "postgres://poly_user:poly_password@localhost:5432/poly_db")

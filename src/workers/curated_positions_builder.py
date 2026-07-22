@@ -80,17 +80,32 @@ async def build_wallet_positions(conn: asyncpg.Connection, session: aiohttp.Clie
     Open endpoint contributes markets the wallet still holds a token in
     (resolved only when `redeemable`); closed endpoint contributes fully-exited
     markets. Together they form the complete resolved-position set the win rate
-    is computed over. Win/loss = sign of realized PnL (see classify_position)."""
+    is computed over. Win/loss = sign of realized PnL (see classify_position).
+
+    Incremental: the closed fetch resumes from curated_position_sync's cursor —
+    a wallet that left and re-entered the curated list only fetches the gap
+    since its last complete fetch (latest 5000 of the gap if larger). The
+    cursor advances ONLY after a complete pass, so interrupted runs re-fetch
+    the same gap and self-heal. Positions are never deleted on demotion."""
     seen: set[tuple[str, str]] = set()
     count = 0
+
+    cursor = await conn.fetchval(
+        "SELECT last_closed_ts FROM curated_position_sync WHERE wallet_address = $1",
+        address,
+    )
+    newer_than = cursor.timestamp() if cursor else None
 
     # Closed positions first — these are the realized wins/losses the wallet
     # already exited, which the open endpoint omits.
     try:
-        closed = await fetch_closed_positions(session, address)
+        closed, closed_complete = await fetch_closed_positions(session, address, newer_than_epoch=newer_than)
     except Exception as e:
         logger.warning(f"closed-positions fetch failed for {address[:10]}: {e}")
-        closed = []
+        closed, closed_complete = [], False
+    if not closed_complete:
+        logger.warning(f"closed fetch incomplete for {address[:10]} (deadline); cursor NOT advanced")
+    max_ts = max((float(p["timestamp"]) for p in (closed or []) if p.get("timestamp") is not None), default=None)
     for p in (closed or []):
         cid = p.get("conditionId")
         if not cid or count >= POSITION_CAP:
@@ -124,3 +139,18 @@ async def build_wallet_positions(conn: asyncpg.Connection, session: aiohttp.Clie
         seen.add(key)
         await _upsert(conn, address, p, fields)
         count += 1
+
+    # Advance the incremental cursor ONLY after a complete closed fetch — a
+    # failed, deadline-truncated, or interrupted pass leaves it untouched so
+    # the unfetched tail of the gap re-fetches next run.
+    if closed_complete and max_ts is not None:
+        await conn.execute(
+            """
+            INSERT INTO curated_position_sync (wallet_address, last_closed_ts, updated_at)
+            VALUES ($1, to_timestamp($2), NOW())
+            ON CONFLICT (wallet_address) DO UPDATE SET
+                last_closed_ts = GREATEST(COALESCE(curated_position_sync.last_closed_ts, to_timestamp(0)), EXCLUDED.last_closed_ts),
+                updated_at = NOW()
+            """,
+            address, max_ts,
+        )

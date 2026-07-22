@@ -35,6 +35,7 @@ WALLET_SORT_COLUMNS = {
     "deposits": "m.deposits",
     "last_trade_at": "w.last_trade_at",
     "added_at": "w.added_at",
+    "win_rate": "m.win_rate",
 }
 
 WALLET_SOURCES = ("trade", "deposit", "leaderboard", "custom")
@@ -85,9 +86,12 @@ async def get_wallets_tabbed(
                w.last_trade_at, w.added_at,
                COALESCE(m.pm_pnl, m.total_pnl) AS pnl,
                COALESCE(m.pm_volume, m.total_volume) AS volume,
-               m.roi_pct, m.win_rate, m.balance, m.position_value, m.deposits, m.withdrawals,
+               m.roi_pct, m.win_rate, m.resolved_count, m.winning_count, m.balance, m.position_value, m.deposits, m.withdrawals,
                (SELECT array_agg(s.source ORDER BY s.spotted_at)
                   FROM wallet_sources_v2 s WHERE s.address = w.address) AS sources,
+               (SELECT array_agg(c.category)
+                  FROM (SELECT category FROM category_stats_v2 WHERE address = w.address AND window_size = 0 AND category != 'OTHER' ORDER BY volume DESC LIMIT 3) c
+               ) AS categories,
                COUNT(*) OVER() AS total_count
         FROM wallets_v2 w
         LEFT JOIN wallet_metrics_v2 m ON m.address = w.address
@@ -316,6 +320,10 @@ async def get_curated_wallet_list(
             "total_volume": "m.total_volume",
             "website_pnl": "m.pm_pnl",
             "last_trade_at": "w.last_trade_at",
+            "win_rate": "m.win_rate",
+            "roi_pct": "m.roi_pct",
+            "resolved_count": "m.resolved_count",
+            "winning_count": "m.winning_count",
         }.get(sort_by, "m.total_pnl")
         
         query = f"""
@@ -334,9 +342,17 @@ async def get_curated_wallet_list(
     else:
         order_col = {
             "total_pnl": "c.pnl",
+            "category_pnl": "c.pnl",
             "total_volume": "c.volume",
+            "category_volume": "c.volume",
             "website_pnl": "m.pm_pnl",
             "last_trade_at": "w.last_trade_at",
+            "win_rate": "c.win_rate",
+            "category_win_rate": "c.win_rate",
+            "roi_pct": "c.roi_pct",
+            "category_roi": "c.roi_pct",
+            "resolved_count": "c.resolved_count",
+            "winning_count": "c.winning_count",
         }.get(sort_by, "c.pnl")
 
         query = f"""

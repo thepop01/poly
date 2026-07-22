@@ -446,6 +446,55 @@ def _parse_redemption_log(log: dict, topic0: str) -> dict | None:
         return None
 
 
+async def fetch_recent_redemptions_etherscan(session: aiohttp.ClientSession, from_block: int | str = "latest", to_block: int | str = "latest") -> list[dict]:
+    if from_block == "latest":
+        from_block = await get_latest_block_etherscan(session)
+    from_block = int(from_block)
+
+    if to_block == "latest":
+        to_block = int(await get_latest_block_etherscan(session))
+    else:
+        to_block = int(to_block)
+
+    all_logs = []
+    for contract, topic0 in REDEMPTION_SOURCES:
+        url = (
+            f"https://api.etherscan.io/v2/api?chainid=137&module=logs&action=getLogs"
+            f"&address={contract}"
+            f"&fromBlock={from_block}&toBlock={to_block}"
+            f"&topic0={topic0}"
+            f"&apikey={_get_next_polygonscan_key()}"
+        )
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("status") == "1" and isinstance(data.get("result"), list):
+                        for log in data["result"]:
+                            parsed = _parse_redemption_log(log, topic0)
+                            if parsed:
+                                topics = log.get("topics", [])
+                                if len(topics) >= 2:
+                                    redeemer = "0x" + topics[1][-40:]
+                                    parsed["wallet"] = redeemer.lower()
+                                    
+                                    b_num = log.get("blockNumber", "0")
+                                    if isinstance(b_num, str) and b_num.startswith("0x"):
+                                        parsed["blockNumber"] = int(b_num, 16)
+                                    else:
+                                        parsed["blockNumber"] = int(b_num)
+                                        
+                                    all_logs.append(parsed)
+                    elif data.get("message") == "No records found":
+                        pass
+                    else:
+                        logger.warning(f"Etherscan API warning for {contract}: {data.get('message')}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch global redemptions from {contract}: {e}")
+
+    return all_logs
+
+
 async def fetch_historical_redemptions_polygonscan(session: aiohttp.ClientSession, addresses: list[str]) -> list[dict]:
     """
     Fetch all PayoutRedemption logs for the given wallet(s) from both the base CTF contract

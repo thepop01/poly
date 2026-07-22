@@ -98,12 +98,12 @@ const SORT_OPTIONS = [
 ];
 
 const PNL_WINDOW_OPTIONS = [
-  { value: "", label: "All-Time" },
-  { value: "pnl_100", label: "Last 100" },
-  { value: "pnl_300", label: "Last 300" },
-  { value: "pnl_800", label: "Last 800" },
-  { value: "pnl_1500", label: "Last 1500" },
+  { value: "", label: "Last 5000" },
   { value: "pnl_2500", label: "Last 2500" },
+  { value: "pnl_1500", label: "Last 1500" },
+  { value: "pnl_800", label: "Last 800" },
+  { value: "pnl_300", label: "Last 300" },
+  { value: "pnl_100", label: "Last 100" },
 ];
 
 export default function CuratedListPage() {
@@ -239,7 +239,7 @@ export default function CuratedListPage() {
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
-  const pnlWindowLabel = PNL_WINDOW_OPTIONS.find(o => o.value === pnlWindow)?.label || "All-Time";
+  const pnlWindowLabel = PNL_WINDOW_OPTIONS.find(o => o.value === pnlWindow)?.label || "Last 5000";
 
   return (
     <div className="w-full h-full flex flex-col gap-3">

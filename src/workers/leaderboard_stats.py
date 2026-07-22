@@ -228,7 +228,40 @@ async def fetch_positions(session: aiohttp.ClientSession, address: str) -> list[
     return all_positions[:max_positions]
 
 
-async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -> list[dict]:
+def _trim_closed_page(items: list[dict], newer_than_epoch: float | None) -> tuple[list[dict], bool]:
+    """Split one newest-first closed-positions page against an epoch cursor.
+
+    Returns (items strictly newer than the cursor, cursor_reached). Items with
+    a missing timestamp are kept (idempotent upserts make that safe). Filters
+    rather than breaking mid-page so intra-page ordering quirks can't drop
+    newer items."""
+    if newer_than_epoch is None:
+        return list(items), False
+    kept, reached = [], False
+    for p in items:
+        ts = p.get("timestamp")
+        if ts is not None and float(ts) <= newer_than_epoch:
+            reached = True
+        else:
+            kept.append(p)
+    return kept, reached
+
+
+async def fetch_closed_positions(
+    session: aiohttp.ClientSession,
+    address: str,
+    newer_than_epoch: float | None = None,
+) -> tuple[list[dict], bool]:
+    """Fetch closed positions newest-first, up to 5000.
+
+    newer_than_epoch: incremental cursor — stop paginating once positions at or
+    before this epoch are reached, returning only the newer gap (its latest
+    5000 if the gap is larger). None = full fetch.
+
+    Returns (positions, complete). complete=False means the 120s deadline cut
+    the fetch short with older data still unfetched — callers keeping an
+    incremental cursor MUST NOT advance it then, or the unfetched tail becomes
+    a permanent hole. Hitting the 5000 cap or the cursor counts as complete."""
     import time
     all_closed = []
     offset = 0
@@ -236,14 +269,17 @@ async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -
     max_closed = 5000
     batch_size = 20  # Fetch 20 pages concurrently per batch
     deadline = time.monotonic() + 120  # 120s max for this function
+    finished_naturally = False
 
     while len(all_closed) < max_closed and time.monotonic() < deadline:
         remaining = max_closed - len(all_closed)
         pages_to_fetch = min(batch_size, remaining // limit + 1)
 
-        # Build URLs for concurrent fetches
+        # Build URLs for concurrent fetches. Newest-first is CRITICAL: the API's
+        # default order is biggest-PnL-first, which for wallets past the 5000
+        # cap would keep only their largest winners and silently drop losers.
         urls = [
-            f"https://data-api.polymarket.com/closed-positions?user={address}&limit={limit}&offset={offset + i * limit}"
+            f"https://data-api.polymarket.com/closed-positions?user={address}&limit={limit}&offset={offset + i * limit}&sortBy=TIMESTAMP&sortDirection=DESC"
             for i in range(pages_to_fetch)
         ]
 
@@ -259,7 +295,10 @@ async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -
         for i, result in enumerate(results):
             if isinstance(result, Exception) or not result or not isinstance(result, list):
                 continue
-            all_closed.extend(result)
+            kept, reached = _trim_closed_page(result, newer_than_epoch)
+            all_closed.extend(kept)
+            if reached:
+                hit_end = True  # older pages are all at/before the cursor
             if len(result) < limit:
                 any_page_empty = True
 
@@ -269,12 +308,16 @@ async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -
             hit_end = True
 
         if hit_end:
+            finished_naturally = True
             break
 
         offset += pages_to_fetch * limit
         await asyncio.sleep(API_DELAY)
 
-    return all_closed[:max_closed]
+    # Complete = reached the end of data / the cursor (natural), or filled the
+    # 5000 cap (intended truncation). Anything else = the deadline cut us off.
+    complete = finished_naturally or len(all_closed) >= max_closed
+    return all_closed[:max_closed], complete
 
 
 async def fetch_trades_after(session: aiohttp.ClientSession, address: str, cutoff: datetime, max_trades: int = 2500) -> list[dict]:
@@ -423,12 +466,13 @@ async def aggregate_and_upsert_positions(conn, address, trades, closed_positions
         if not cid: continue
         
         realized_pnl = _parse(cp.get('realizedPnl'))
+        cash_pnl = _parse(cp.get('cashPnl'))
         pos_map[(cid, asset)] = {
             'outcome': cp.get('outcome', ''),
             'title': cp.get('title', ''),
             'opened_at': None,
             'closed_at': _parse_end(cp.get('endDate')),
-            'status': 'win' if realized_pnl > 0 else 'loss',
+            'status': 'win' if (realized_pnl + cash_pnl) > 0 else 'loss',
             'avg_buy_price': _parse(cp.get('avgPrice')),
             'avg_sell_price': _parse(cp.get('avgSellPrice')),
             'total_bought': _parse(cp.get('totalBought')),
@@ -457,7 +501,7 @@ async def aggregate_and_upsert_positions(conn, address, trades, closed_positions
             'outcome': p.get('outcome', ''),
             'title': p.get('title', ''),
             'opened_at': None,
-            'closed_at': None,
+            'closed_at': _parse_end(p.get('endDate')) if status == 'loss' else None,
             'status': status,
             'avg_buy_price': _parse(p.get('avgPrice')),
             'avg_sell_price': 0.0,
@@ -626,6 +670,7 @@ def compute_stats(positions, closed_positions, headline_pnl, headline_volume, st
         avg_p = _parse(p.get("avgPrice"))
         total_bought = _parse(p.get("totalBought"))
         total_sold = _parse(p.get("totalSold"))
+        cash_pnl = _parse(p.get("cashPnl"))
         
         # Volume & Max Trade Size approximation
         total_volume += (total_bought + total_sold)
@@ -634,7 +679,7 @@ def compute_stats(positions, closed_positions, headline_pnl, headline_volume, st
             
         # Resolved stats
         resolved_count += 1
-        won = realized_pnl > 0
+        won = (realized_pnl + cash_pnl) > 0
         if won:
             winning_count += 1
             if realized_pnl > biggest_win:

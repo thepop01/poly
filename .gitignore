@@ -212,3 +212,10 @@ verify_checkpoint_simple.py
 verify_imports.py
 CHECKPOINT_VERIFICATION_SUMMARY.md
 TASK_3_3_FINAL_RESULTS.md
+
+# Data directory
+data/
+
+# Logs directory
+logs/
+

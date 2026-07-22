@@ -149,6 +149,22 @@ function WalletsPageInner() {
       label: "Source",
       render: (w) => <SourceBadges sources={w.sources} />,
     };
+    const categories: ColumnDef = {
+      key: "categories",
+      label: "Categories",
+      render: (w) => {
+        if (!w.categories || w.categories.length === 0) return <>—</>;
+        return (
+          <div className="flex flex-wrap gap-1">
+            {w.categories.map((c: string) => (
+              <span key={c} className="px-1.5 py-0.5 bg-primary/10 text-primary rounded text-[10px] uppercase font-bold tracking-wider">
+                {c}
+              </span>
+            ))}
+          </div>
+        );
+      },
+    };
     const pnl: ColumnDef = { key: "pnl", label: "PnL", sortable: true, render: (w) => signedCurrency(w.pnl, true) };
     const volume: ColumnDef = {
       key: "volume",
@@ -171,6 +187,28 @@ function WalletsPageInner() {
             {n > 0 ? "+" : ""}
             {n.toFixed(2)}%
           </span>
+        );
+      },
+    };
+    const winRate: ColumnDef = {
+      key: "win_rate",
+      label: "Win Rate",
+      sortable: true,
+      render: (w) => {
+        const wr = num(w.win_rate);
+        const resolved = num(w.resolved_count) || 0;
+        const wins = num(w.winning_count) || 0;
+        if (wr == null || resolved === 0) return <>—</>;
+        const wrPct = wr * 100;
+        return (
+          <div className="flex flex-col">
+            <span className={wrPct >= 50 ? "text-green-500" : "text-red-500"}>
+              {wrPct.toFixed(1)}%
+            </span>
+            <span className="text-xs text-muted-fg">
+              {wins}/{resolved}
+            </span>
+          </div>
         );
       },
     };
@@ -202,14 +240,16 @@ function WalletsPageInner() {
       ];
     }
     if (tab === "low_balance") {
-      return [wallet, source, pnl, volume, roi, balance, position, lastTraded];
+      return [wallet, source, categories, pnl, volume, winRate, roi, balance, position, lastTraded];
     }
     if (tab === "hibernated") {
       return [
         wallet,
         source,
+        categories,
         pnl,
         volume,
+        winRate,
         roi,
         balance,
         position,
@@ -229,7 +269,7 @@ function WalletsPageInner() {
         },
       ];
     }
-    return [wallet, source, pnl, volume, roi, balance, position, lastTraded];
+    return [wallet, source, categories, pnl, volume, winRate, roi, balance, position, lastTraded];
   }, [tab, copiedAddress, handleCopy, watchlistStatus, handleAddToWatchlist]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
