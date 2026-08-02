@@ -572,7 +572,6 @@ export default function CuratedListPage() {
               <tr className="border-b border-border bg-surface text-muted-fg font-mono uppercase tracking-wider text-xs">
                 <th className="py-2.5 px-4 font-semibold w-12 text-center">#</th>
                 <th className="py-2.5 px-4 font-semibold">Wallet</th>
-                {!isCategoryView && <th className="py-2.5 px-4 font-semibold">Category</th>}
                 <th className="py-2.5 px-4 font-semibold text-right cursor-pointer hover:text-foreground select-none" onClick={() => handleSort("win_rate")}>
                   <div className="flex items-center justify-end gap-1">Win% {sortBy === "win_rate" && (sortOrder === "desc" ? "↓" : "↑")}</div>
                 </th>
@@ -695,19 +694,6 @@ export default function CuratedListPage() {
                         </button>
                       </div>
                     </td>
-                    {!isCategoryView && (
-                      <td className="py-2.5 px-4 text-xs">
-                        {w.categories?.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {w.categories.map(cat => (
-                              <span key={cat} className="px-1.5 py-0.5 text-[10px] rounded bg-surface-2 text-muted-fg border border-border">
-                                {cat}
-                              </span>
-                            ))}
-                          </div>
-                        ) : "—"}
-                      </td>
-                    )}
                     <td className="py-2.5 px-4 text-right font-mono">{(Number(w.win_rate || 0) * 100).toFixed(0)}%</td>
                     <td className="py-2.5 px-4 text-right font-mono">{w.winning_count || 0}</td>
                     <td className={`py-2.5 px-4 text-right font-mono font-bold ${pnl >= 0 ? "text-green-500" : "text-red-500"}`}>

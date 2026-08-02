@@ -149,6 +149,18 @@ function WalletsPageInner() {
       label: "Source",
       render: (w) => <SourceBadges sources={w.sources} />,
     };
+    const CATEGORY_COLORS: Record<string, string> = {
+      POLITICS:  "bg-blue-500/15 text-blue-400 border border-blue-500/30",
+      SPORTS:    "bg-green-500/15 text-green-400 border border-green-500/30",
+      CRYPTO:    "bg-amber-500/15 text-amber-400 border border-amber-500/30",
+      ECONOMICS: "bg-purple-500/15 text-purple-400 border border-purple-500/30",
+      CULTURE:   "bg-pink-500/15 text-pink-400 border border-pink-500/30",
+      TECH:      "bg-cyan-500/15 text-cyan-400 border border-cyan-500/30",
+      WEATHER:   "bg-sky-500/15 text-sky-400 border border-sky-500/30",
+      FINANCE:   "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30",
+      OTHER:     "bg-zinc-500/15 text-zinc-400 border border-zinc-500/30",
+    };
+
     const categories: ColumnDef = {
       key: "categories",
       label: "Categories",
@@ -156,11 +168,14 @@ function WalletsPageInner() {
         if (!w.categories || w.categories.length === 0) return <>—</>;
         return (
           <div className="flex flex-wrap gap-1">
-            {w.categories.map((c: string) => (
-              <span key={c} className="px-1.5 py-0.5 bg-primary/10 text-primary rounded text-[10px] uppercase font-bold tracking-wider">
-                {c}
-              </span>
-            ))}
+            {w.categories.map((c: string) => {
+              const colorClass = CATEGORY_COLORS[c.toUpperCase()] || CATEGORY_COLORS.OTHER;
+              return (
+                <span key={c} className={`px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider cursor-default ${colorClass}`}>
+                  {c}
+                </span>
+              );
+            })}
           </div>
         );
       },
@@ -198,10 +213,16 @@ function WalletsPageInner() {
         const wr = num(w.win_rate);
         const resolved = num(w.resolved_count) || 0;
         const wins = num(w.winning_count) || 0;
-        if (wr == null || resolved === 0) return <>—</>;
+        
+        if (wr == null || resolved < 3) return (
+          <span className="text-muted-fg text-xs">
+            {resolved > 0 ? `${resolved} trades` : '—'}
+          </span>
+        );
+        
         const wrPct = wr * 100;
         return (
-          <div className="flex flex-col">
+          <div className="flex flex-col" title={`${wins} wins / ${resolved} resolved`}>
             <span className={wrPct >= 50 ? "text-green-500" : "text-red-500"}>
               {wrPct.toFixed(1)}%
             </span>
