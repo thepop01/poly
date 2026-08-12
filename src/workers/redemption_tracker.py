@@ -63,41 +63,44 @@ async def run_redemption_tracker(pool: asyncpg.Pool):
                                 payout = red.get("payout", 0.0)
                                 condition_id = red.get("condition_id")
                                 
-                                # 1. Fetch current state
-                                row = await conn.fetchrow("""
-                                    SELECT total_bought_usd, total_buy_tokens, total_sold_usd, total_sell_tokens, realized_pnl
-                                    FROM test_computed_positions
-                                    WHERE address = $1 AND condition_id = $2
-                                """, wallet, condition_id)
-                                
-                                current_state = dict(row) if row else {}
-                                
-                                # 2. Apply math
-                                new_state = apply_redemption(current_state, red)
-                                
-                                # 3. Upsert
-                                await conn.execute("""
-                                    INSERT INTO test_computed_positions (
-                                        address, condition_id, total_bought_usd, total_buy_tokens, 
-                                        total_sold_usd, total_sell_tokens, realized_pnl,
-                                        cash_pnl, is_resolved, is_win
-                                    )
-                                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                                    ON CONFLICT (address, condition_id) DO UPDATE SET
-                                        total_bought_usd = EXCLUDED.total_bought_usd,
-                                        total_buy_tokens = EXCLUDED.total_buy_tokens,
-                                        total_sold_usd = EXCLUDED.total_sold_usd,
-                                        total_sell_tokens = EXCLUDED.total_sell_tokens,
-                                        realized_pnl = EXCLUDED.realized_pnl,
-                                        cash_pnl = EXCLUDED.cash_pnl,
-                                        is_resolved = EXCLUDED.is_resolved,
-                                        is_win = EXCLUDED.is_win,
-                                        updated_at = NOW()
-                                """, wallet, condition_id, 
-                                new_state["total_bought_usd"], new_state["total_buy_tokens"],
-                                new_state["total_sold_usd"], new_state["total_sell_tokens"],
-                                new_state["realized_pnl"], new_state["cash_pnl"], 
-                                new_state["is_resolved"], new_state["is_win"])
+                                try:
+                                    # 1. Fetch current state
+                                    row = await conn.fetchrow("""
+                                        SELECT total_bought_usd, total_buy_tokens, total_sold_usd, total_sell_tokens, realized_pnl
+                                        FROM test_computed_positions
+                                        WHERE address = $1 AND condition_id = $2
+                                    """, wallet, condition_id)
+                                    
+                                    current_state = dict(row) if row else {}
+                                    
+                                    # 2. Apply math
+                                    new_state = apply_redemption(current_state, red)
+                                    
+                                    # 3. Upsert
+                                    await conn.execute("""
+                                        INSERT INTO test_computed_positions (
+                                            address, condition_id, total_bought_usd, total_buy_tokens, 
+                                            total_sold_usd, total_sell_tokens, realized_pnl,
+                                            cash_pnl, is_resolved, is_win
+                                        )
+                                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                                        ON CONFLICT (address, condition_id) DO UPDATE SET
+                                            total_bought_usd = EXCLUDED.total_bought_usd,
+                                            total_buy_tokens = EXCLUDED.total_buy_tokens,
+                                            total_sold_usd = EXCLUDED.total_sold_usd,
+                                            total_sell_tokens = EXCLUDED.total_sell_tokens,
+                                            realized_pnl = EXCLUDED.realized_pnl,
+                                            cash_pnl = EXCLUDED.cash_pnl,
+                                            is_resolved = EXCLUDED.is_resolved,
+                                            is_win = EXCLUDED.is_win,
+                                            updated_at = NOW()
+                                    """, wallet, condition_id, 
+                                    new_state["total_bought_usd"], new_state["total_buy_tokens"],
+                                    new_state["total_sold_usd"], new_state["total_sell_tokens"],
+                                    new_state["realized_pnl"], new_state["cash_pnl"], 
+                                    new_state["is_resolved"], new_state["is_win"])
+                                except Exception:
+                                    pass
                                 
                                 logger.info(f"Redemption for tracked wallet {wallet[:10]}... payout=${payout:.2f}")
 

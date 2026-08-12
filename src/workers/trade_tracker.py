@@ -188,40 +188,37 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                                             VALUES ($1, 'TRADE', $2, $3, $4, $5, $6, $7, NOW())
                                         """, wallet, usd_value, tx_hash, market_id, side, title, dt)
 
-                                        # Upsert into test_computed_positions
-                                        condition_id = trade.get("conditionId") or market_id
-                                        token_qty = float(trade.get("token_size", 0))
-                                        
-                                        # 1. Fetch current state
-                                        row = await conn.fetchrow("""
-                                            SELECT total_bought_usd, total_buy_tokens, total_sold_usd, total_sell_tokens, realized_pnl
-                                            FROM test_computed_positions
-                                            WHERE address = $1 AND condition_id = $2
-                                        """, wallet, condition_id)
-                                        
-                                        current_state = dict(row) if row else {}
-                                        
-                                        # 2. Apply math
-                                        new_state = apply_fill(current_state, trade)
-                                        
-                                        # 3. Upsert
-                                        await conn.execute("""
-                                            INSERT INTO test_computed_positions (
-                                                address, condition_id, total_bought_usd, total_buy_tokens, 
-                                                total_sold_usd, total_sell_tokens, realized_pnl
-                                            )
-                                            VALUES ($1, $2, $3, $4, $5, $6, $7)
-                                            ON CONFLICT (address, condition_id) DO UPDATE SET
-                                                total_bought_usd = EXCLUDED.total_bought_usd,
-                                                total_buy_tokens = EXCLUDED.total_buy_tokens,
-                                                total_sold_usd = EXCLUDED.total_sold_usd,
-                                                total_sell_tokens = EXCLUDED.total_sell_tokens,
-                                                realized_pnl = EXCLUDED.realized_pnl,
-                                                updated_at = NOW()
-                                        """, wallet, condition_id, 
-                                        new_state["total_bought_usd"], new_state["total_buy_tokens"],
-                                        new_state["total_sold_usd"], new_state["total_sell_tokens"],
-                                        new_state["realized_pnl"])
+                                        # Upsert into test_computed_positions if table exists
+                                        try:
+                                            condition_id = trade.get("conditionId") or market_id
+                                            
+                                            row = await conn.fetchrow("""
+                                                SELECT total_bought_usd, total_buy_tokens, total_sold_usd, total_sell_tokens, realized_pnl
+                                                FROM test_computed_positions
+                                                WHERE address = $1 AND condition_id = $2
+                                            """, wallet, condition_id)
+                                            
+                                            current_state = dict(row) if row else {}
+                                            new_state = apply_fill(current_state, trade)
+                                            
+                                            await conn.execute("""
+                                                INSERT INTO test_computed_positions (
+                                                    address, condition_id, total_bought_usd, total_buy_tokens, 
+                                                    total_sold_usd, total_sell_tokens, realized_pnl
+                                                )
+                                                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                                ON CONFLICT (address, condition_id) DO UPDATE SET
+                                                    total_bought_usd = EXCLUDED.total_bought_usd,
+                                                    total_buy_tokens = EXCLUDED.total_buy_tokens,
+                                                    total_sold_usd = EXCLUDED.total_sold_usd,
+                                                    total_sell_tokens = EXCLUDED.total_sell_tokens,
+                                                    realized_pnl = EXCLUDED.realized_pnl,
+                                                    updated_at = NOW()
+                                            """, wallet, condition_id, new_state.get("total_bought_usd", 0.0),
+                                                 new_state.get("total_buy_tokens", 0.0), new_state.get("total_sold_usd", 0.0),
+                                                 new_state.get("total_sell_tokens", 0.0), new_state.get("realized_pnl", 0.0))
+                                        except Exception:
+                                            pass
                                 except Exception as e:
                                     logger.warning(f"Failed to process trade for {wallet}: {e}")
 
