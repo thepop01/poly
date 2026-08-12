@@ -114,9 +114,17 @@ async def run_trade_tracker(pool: asyncpg.Pool):
     last_block = read_last_block()
 
     async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-        while True:
-            try:
-                trades = await fetch_recent_trades_etherscan(session, from_block=last_block, to_block="latest")
+                tip_str = await get_latest_block_etherscan(session)
+                if not tip_str:
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+                tip = int(tip_str)
+
+                start_block = int(last_block) if str(last_block).isdigit() else tip - 100
+                if tip - start_block > 500:
+                    start_block = tip - 500
+
+                trades = await fetch_recent_trades_etherscan(session, from_block=start_block, to_block=tip)
 
                 if trades:
                     whale_wallets = []
@@ -227,14 +235,8 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                         async with pool.acquire() as conn:
                             await add_to_discovery_queue(conn, whale_wallets)
 
-                    if highest_block > 0:
-                        last_block = str(highest_block + 1)
-                        write_last_block(highest_block + 1)
-                else:
-                    current_tip = await get_latest_block_etherscan(session)
-                    if current_tip and current_tip != "89410000":
-                        last_block = current_tip
-                        write_last_block(int(current_tip))
+                write_last_block(tip)
+                last_block = str(tip)
 
             except Exception as e:
                 logger.error(f"Trade tracker error: {e}", exc_info=True)
