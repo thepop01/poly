@@ -1,6 +1,6 @@
 "use client";
 
-import { Flame } from "lucide-react";
+
 
 export const SOURCE_LABELS: Record<string, { label: string; className: string }> = {
   trade: { label: "Trade", className: "bg-orange-500/10 text-orange-400 border border-orange-500/20" },
@@ -37,15 +37,3 @@ export function SourceBadges({ sources }: { sources?: string[] | null }) {
   );
 }
 
-export function MightCookBadge({ mightCookType }: { mightCookType?: string | null }) {
-  if (!mightCookType) return null;
-  return (
-    <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-500/10 text-red-400 border border-red-500/20"
-      title="Deposited ≥ $5k with 0 trades"
-    >
-      <Flame size={10} />
-      Might Cook
-    </span>
-  );
-}

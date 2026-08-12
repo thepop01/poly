@@ -80,12 +80,18 @@ async def fetch_positions(session: aiohttp.ClientSession, address: str) -> list[
 
 
 async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -> list[dict]:
-    """Fetch all resolved/closed positions for a wallet."""
+    """Fetch resolved/closed positions for a wallet. Hard cap: 5,000 positions.
+
+    The Polymarket /closed-positions API does not serve beyond 5,000 results;
+    we match that limit explicitly so no wallet ever exceeds it, regardless of
+    whether the wallet is curated or not. No on-chain bypass is used.
+    """
+    MAX_CLOSED = 5000
     all_closed = []
     offset = 0
     limit = 50
 
-    while True:
+    while len(all_closed) < MAX_CLOSED:
         url = f"https://data-api.polymarket.com/closed-positions?user={address}&limit={limit}&offset={offset}"
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -97,22 +103,16 @@ async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -
                     if len(data) < limit:
                         break
                     offset += limit
-                    if offset > 15000:
-                        break
                 else:
-                    # Skip failed page, continue with next
                     offset += limit
-                    if offset > 15000:
-                        break
                     await asyncio.sleep(1)
         except Exception as e:
             logger.warning(f"Failed to fetch closed positions for {address} at offset {offset}: {e}")
             offset += limit
-            if offset > 15000:
-                break
             await asyncio.sleep(1)
 
-    return all_closed
+    return all_closed[:MAX_CLOSED]
+
 
 
 async def _get_tiered(session: aiohttp.ClientSession, url: str) -> list | dict | None:
@@ -156,45 +156,12 @@ async def fetch_website_pnl(session: aiohttp.ClientSession, address: str) -> dic
 
 
 async def fetch_all_trades(session: aiohttp.ClientSession, address: str) -> list[dict]:
-    """Fetch all historical trades for a wallet from Polymarket Data API (paginated).
-    Uses ?user= param for complete coverage.
-    If the 3,500 trade limit is hit, falls back to Polygonscan deep fetch."""
-    from src.utils.etherscan_client import fetch_historical_trades_polygonscan
-
-    all_trades = []
-    limit = 500
-    needs_deep_fetch = False
-    offset = 0
-
-    while True:
-        if offset >= 3000:
-            needs_deep_fetch = True
-            break
-
-        url = f"https://data-api.polymarket.com/trades?user={address}&limit={limit}&offset={offset}"
-        data = await _get_tiered(session, url)
-        if data is None:
-            break
-        if not data:
-            break
-        if isinstance(data, dict) and "error" in data:
-            needs_deep_fetch = True
-            break
-        if not isinstance(data, list) or (len(data) > 0 and not isinstance(data[0], dict)):
-            break
-        
-        all_trades.extend(data)
-        if len(data) < limit:
-            break
-        offset += limit
-
-    if needs_deep_fetch:
-        proxies = set(t.get("proxyWallet") for t in all_trades if t.get("proxyWallet") and isinstance(t.get("proxyWallet"), str))
-        addresses_to_query = [address] + list(proxies)
-        logger.info(f"Wallet {address} hit 3500 trade limit. Falling back to Polygonscan deep fetch with proxies: {list(proxies)}")
-        return await fetch_historical_trades_polygonscan(session, addresses_to_query)
-
-    return all_trades
+    """Lightweight 1-trade fetch to get recent trade metadata without heavy pagination."""
+    url = f"https://data-api.polymarket.com/trades?user={address}&limit=1&offset=0"
+    data = await _get_tiered(session, url)
+    if isinstance(data, list):
+        return data
+    return []
 
 
 async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
@@ -258,39 +225,30 @@ async def process_batch(conn: asyncpg.Connection, session: aiohttp.ClientSession
         website_rank = website["rank"] if website else None
         username = website["username"] if website else ""
 
+        # Total Capital = cash balance + open position value
+        total_cap = balance + position_value
+
         # ── decide promotion ──
-        # Vetting gate: balance + last_trade_at determine global list entry
+        # Vetting gate: total_cap (balance + position_value) + last_trade_at determine global list entry
+        now = datetime.now(timezone.utc)
+        is_dormant_flag = (last_trade_dt is None or (now - last_trade_dt) >= timedelta(days=30))
 
-        if balance <= 0:
-            # Zero balance → mark as DEAD
+        if total_cap < BALANCE_THRESHOLD:
+            # total_cap < $1k (including 0 capital) → LOW_BALANCE tier
+            # is_dormant = TRUE if inactive > 30 days or never traded; FALSE if active in last 30 days
+            tier_reason_str = 'zero capital' if total_cap <= 0 else 'capital < $1k at vetting'
             await conn.execute("""
                 INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
-                VALUES ($1, $2, 'DEAD', 'zero balance', FALSE, $3, NOW(), NOW())
+                VALUES ($1, $2, 'LOW_BALANCE', $5, $4, $3, NOW(), NOW())
                 ON CONFLICT (address) DO UPDATE SET
-                    tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'DEAD' END,
-                    tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'zero balance' END,
+                    tier = CASE WHEN wallets_v2.tier IN ('CURATED', 'PREVIOUSLY_CURATED') THEN wallets_v2.tier ELSE 'LOW_BALANCE' END,
+                    tier_reason = CASE WHEN wallets_v2.tier IN ('CURATED', 'PREVIOUSLY_CURATED') THEN wallets_v2.tier_reason ELSE $5 END,
                     username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
                     last_trade_at = GREATEST(COALESCE(wallets_v2.last_trade_at, EXCLUDED.last_trade_at), EXCLUDED.last_trade_at),
-                    is_dormant = FALSE,
+                    is_dormant = $4,
                     updated_at = NOW()
-            """, address, username, last_trade_dt)
-            logger.info(f"Zero balance: {address[:10]}... marking DEAD")
-            continue
-
-        if balance < BALANCE_THRESHOLD:
-            # 0 < balance < $1k → LOW_BALANCE tier
-            await conn.execute("""
-                INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
-                VALUES ($1, $2, 'LOW_BALANCE', 'balance < $1k at vetting', FALSE, $3, NOW(), NOW())
-                ON CONFLICT (address) DO UPDATE SET
-                    tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'LOW_BALANCE' END,
-                    tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'balance < $1k at vetting' END,
-                    username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
-                    last_trade_at = GREATEST(COALESCE(wallets_v2.last_trade_at, EXCLUDED.last_trade_at), EXCLUDED.last_trade_at),
-                    is_dormant = FALSE,
-                    updated_at = NOW()
-            """, address, username, last_trade_dt)
-            logger.debug(f"Low balance: {address[:10]}... balance={balance:.0f} → LOW_BALANCE")
+            """, address, username, last_trade_dt, is_dormant_flag, tier_reason_str)
+            logger.info(f"Low capital (<$1k, cap={total_cap:.0f}): {address[:10]}... marking LOW_BALANCE (dormant={is_dormant_flag})")
             continue
 
         # Balance > $1k — check last trade recency
@@ -303,8 +261,8 @@ async def process_batch(conn: asyncpg.Connection, session: aiohttp.ClientSession
                 INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
                 VALUES ($1, $2, 'NEW', 'balance >= $1k, 0 trades', FALSE, NULL, NOW(), NOW())
                 ON CONFLICT (address) DO UPDATE SET
-                    tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'NEW' END,
-                    tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'balance >= $1k, 0 trades' END,
+                    tier = CASE WHEN wallets_v2.tier IN ('CURATED', 'PREVIOUSLY_CURATED') THEN wallets_v2.tier ELSE 'NEW' END,
+                    tier_reason = CASE WHEN wallets_v2.tier IN ('CURATED', 'PREVIOUSLY_CURATED') THEN wallets_v2.tier_reason ELSE 'balance >= $1k, 0 trades' END,
                     username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
                     is_dormant = FALSE,
                     updated_at = NOW()
@@ -315,13 +273,17 @@ async def process_batch(conn: asyncpg.Connection, session: aiohttp.ClientSession
         is_stale = (now_utc - last_trade_dt) >= timedelta(days=30)
 
         if is_stale:
-            # Stale → STANDARD but dormant (hibernated)
+            # Stale → STANDARD but dormant (hibernated) or PREVIOUSLY_CURATED if previously curated
             await conn.execute("""
                 INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
                 VALUES ($1, $2, 'STANDARD', 'hibernated: >30d inactive', TRUE, $3, NOW(), NOW())
                 ON CONFLICT (address) DO UPDATE SET
-                    tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'STANDARD' END,
-                    tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'hibernated: >30d inactive' END,
+                    tier = CASE 
+                        WHEN wallets_v2.tier = 'CURATED' THEN 'PREVIOUSLY_CURATED'
+                        WHEN wallets_v2.tier = 'PREVIOUSLY_CURATED' THEN 'PREVIOUSLY_CURATED'
+                        ELSE 'STANDARD'
+                    END,
+                    tier_reason = CASE WHEN wallets_v2.tier IN ('CURATED', 'PREVIOUSLY_CURATED') THEN wallets_v2.tier_reason ELSE 'hibernated: >30d inactive' END,
                     username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
                     last_trade_at = GREATEST(COALESCE(wallets_v2.last_trade_at, EXCLUDED.last_trade_at), EXCLUDED.last_trade_at),
                     is_dormant = TRUE,
@@ -337,8 +299,8 @@ async def process_batch(conn: asyncpg.Connection, session: aiohttp.ClientSession
             INSERT INTO wallets_v2 (address, username, tier, tier_reason, is_dormant, last_trade_at, added_at, updated_at)
             VALUES ($1, $2, 'STANDARD', 'passed vetting', FALSE, $3, NOW(), NOW())
             ON CONFLICT (address) DO UPDATE SET
-                tier = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier ELSE 'STANDARD' END,
-                tier_reason = CASE WHEN wallets_v2.tier = 'CURATED' THEN wallets_v2.tier_reason ELSE 'passed vetting' END,
+                tier = CASE WHEN wallets_v2.tier IN ('CURATED', 'PREVIOUSLY_CURATED') THEN 'CURATED' ELSE 'STANDARD' END,
+                tier_reason = CASE WHEN wallets_v2.tier IN ('CURATED', 'PREVIOUSLY_CURATED') THEN wallets_v2.tier_reason ELSE 'passed vetting' END,
                 username = COALESCE(NULLIF(EXCLUDED.username, ''), wallets_v2.username),
                 last_trade_at = GREATEST(COALESCE(wallets_v2.last_trade_at, EXCLUDED.last_trade_at), EXCLUDED.last_trade_at),
                 is_dormant = FALSE,

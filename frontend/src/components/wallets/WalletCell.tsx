@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { Globe, Copy, PlusCircle, Check, Info } from "lucide-react";
+import { Globe, Copy, Check, Info } from "lucide-react";
 import { formatAddress } from "@/utils/format";
 import type { WatchlistStatus } from "@/hooks/useWatchlistAdd";
+import { LikeButton } from "@/components/ui/LikeButton";
 
 export function WalletCell({
   address,
@@ -12,14 +13,32 @@ export function WalletCell({
   onCopy,
   watchlistStatus,
   onAddToWatchlist,
+  favoriteCount,
+  isLiked,
+  onToggleLike,
 }: {
   address: string;
   username?: string | null;
   copiedAddress: string | null;
   onCopy: (e: React.MouseEvent, address: string) => void;
-  watchlistStatus: Record<string, WatchlistStatus>;
-  onAddToWatchlist: (e: React.MouseEvent, address: string) => void;
+  watchlistStatus?: Record<string, WatchlistStatus>;
+  onAddToWatchlist?: (e: React.MouseEvent, address: string) => void;
+  favoriteCount?: number;
+  isLiked?: boolean;
+  onToggleLike?: (e: React.MouseEvent, address: string) => void;
 }) {
+  const isCurrentlyLiked = isLiked || (watchlistStatus && watchlistStatus[address] === "success");
+
+  const handleLike = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (onToggleLike) {
+      onToggleLike(e, address);
+    } else if (onAddToWatchlist) {
+      onAddToWatchlist(e, address);
+    }
+  };
+
   return (
     <div className="flex items-center gap-1.5">
       {username && username.length <= 20 && (
@@ -58,18 +77,14 @@ export function WalletCell({
       >
         <Info size={11} />
       </a>
-      <button
-        onClick={(e) => onAddToWatchlist(e, address)}
-        disabled={watchlistStatus[address] === "loading" || watchlistStatus[address] === "success"}
-        className="p-1 hover:bg-surface-2 rounded text-muted-fg hover:text-foreground transition-colors disabled:opacity-50"
-        title="Add to Watchlist"
-      >
-        {watchlistStatus[address] === "success" ? (
-          <Check size={11} className="text-green-500" />
-        ) : (
-          <PlusCircle size={11} />
-        )}
-      </button>
+
+      {/* Like / Favorite Button + Count Chip */}
+      <LikeButton
+        isLiked={Boolean(isCurrentlyLiked)}
+        onToggle={handleLike}
+        favoriteCount={favoriteCount}
+        size={13}
+      />
     </div>
   );
 }

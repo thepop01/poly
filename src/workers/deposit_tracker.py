@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
 MIN_DEPOSIT = 5_000
-MIGHT_COOK_THRESHOLD = 5_000
+
 POLL_INTERVAL = 60
 LAST_BLOCK_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", ".deposit_last_block")
 INITIAL_LOOKBACK_BLOCKS = int(os.environ.get("DEPOSIT_INITIAL_LOOKBACK_BLOCKS", "10000"))
@@ -204,8 +204,6 @@ async def run_deposit_tracker():
                             if not addr:
                                 continue
 
-                            is_might_cook = False
-
                             # Queue the wallet FIRST — wallet_activity_v2 has an
                             # FK to wallets_v2, so the row must exist before any
                             # activity insert for a brand-new address.
@@ -238,17 +236,6 @@ async def run_deposit_tracker():
                                     """, addr, tx["value"], tx["hash"], deposited_at)
                                     new_deposits += 1
 
-                                # Deposit >= $5k with 0 trades → might-cook badge
-                                # (MIGHT_COOK tier is retired; it's a badge, not a tier)
-                                if tx["value"] >= MIGHT_COOK_THRESHOLD:
-                                    trade_count = await check_trade_count(session, addr)
-                                    if trade_count == 0:
-                                        is_might_cook = True
-                                        await conn.execute("""
-                                            UPDATE wallets_v2 SET might_cook_type = 'deposit_no_trades'
-                                            WHERE address = $1 AND might_cook_type IS NULL
-                                        """, addr)
-                                        logger.info(f"MIGHT COOK: {addr[:10]}... deposit ${tx['value']:,.0f}, 0 trades")
 
                                 # Deposit >= $5k → add to global list
                                 track_count = await add_to_global(conn, addr)

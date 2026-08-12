@@ -106,14 +106,14 @@ export async function getWalletPnlChart(address: string) {
   return fetchAuthData(`/api/v2/wallets/${address}/pnl-chart`);
 }
 
-export async function toggleWatchlist(address: string, action: 'add' | 'remove') {
-  if (action === 'add') {
+export async function toggleWatchlist(address: string, action?: 'add' | 'remove') {
+  if (action === 'remove') {
     return fetchAuthData(`/api/watchlist/${address}`, {
-      method: 'POST'
+      method: 'DELETE'
     });
   } else {
     return fetchAuthData(`/api/watchlist/${address}`, {
-      method: 'DELETE'
+      method: 'POST'
     });
   }
 }
@@ -123,8 +123,11 @@ export async function globalSearch(query: string) {
 }
 
 export interface WalletListParams {
-  tab: 'all' | 'standard' | 'low_balance' | 'new' | 'hibernated';
+  tab: 'all' | 'curated' | 'standard' | 'low_balance' | 'new' | 'hibernated';
   source?: string;
+  category?: string;
+  subcategory?: string;
+  pnl_window?: string;
   search?: string;
   sort_by?: string;
   sort_order?: 'asc' | 'desc';
@@ -246,10 +249,30 @@ export async function getWatchlist() {
   return fetchAuthData(`/api/watchlist`);
 }
 
-export async function toggleWalletAlert(address: string, enabled: boolean) {
+export function toggleWalletAlert(address: string, enabled: boolean) {
   return fetchAuthData(`/api/watchlist/${address}/alerts?enabled=${enabled}`, {
     method: 'POST'
   });
+}
+
+export async function renameTrackerList(listId: number, name: string) {
+  return fetchAuthData(`/api/tracker/lists/${listId}?name=${encodeURIComponent(name)}`, { method: "PATCH" });
+}
+
+export async function getWatchlistStatus(addresses: string[]) {
+  if (!addresses || addresses.length === 0) return { liked: [] };
+  const addrs = addresses.join(",");
+  return fetchAuthData(`/api/watchlist/status?addresses=${encodeURIComponent(addrs)}`);
+}
+
+export async function getWatchlistCounts(addresses: string[]) {
+  if (!addresses || addresses.length === 0) return { counts: {} };
+  const addrs = addresses.join(",");
+  return fetchAuthData(`/api/watchlist/counts?addresses=${encodeURIComponent(addrs)}`);
+}
+
+export async function getTrackedWalletAlerts(limit: number = 20) {
+  return fetchAuthData(`/api/v2/alpha-calls/tracked-alerts?limit=${limit}`);
 }
 
 export async function listAgents() {

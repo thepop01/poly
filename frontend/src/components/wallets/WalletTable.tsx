@@ -7,7 +7,6 @@ export interface WalletRow {
   username?: string | null;
   tier: string;
   is_dormant: boolean;
-  might_cook_type?: string | null;
   sources?: string[] | null;
   pnl?: string | number | null;
   volume?: string | number | null;
@@ -19,13 +18,30 @@ export interface WalletRow {
   withdrawals?: string | number | null;
   last_trade_at?: string | null;
   added_at?: string | null;
+  categories?: string[] | null;
+  resolved_count?: string | number | null;
+  winning_count?: string | number | null;
+  avg_buy_price?: string | number | null;
+  buys_below_15c?: string | number | null;
+  wins_below_15c?: string | number | null;
+  buys_15_30c?: string | number | null;
+  wins_15_30c?: string | number | null;
+  buys_30_45c?: string | number | null;
+  wins_30_45c?: string | number | null;
+  buys_45_60c?: string | number | null;
+  wins_45_60c?: string | number | null;
+  buys_60_75c?: string | number | null;
+  wins_60_75c?: string | number | null;
+  buys_above_75c?: string | number | null;
+  wins_above_75c?: string | number | null;
+  favorite_count?: string | number | null;
 }
 
 export interface ColumnDef {
   key: string;
-  label: string;
+  label: React.ReactNode;
   sortable?: boolean;
-  align?: "left" | "right";
+  align?: "left" | "right" | "center";
   render: (w: WalletRow, index: number) => React.ReactNode;
 }
 
@@ -57,12 +73,12 @@ export function WalletTable({
             {columns.map((col) => (
               <th
                 key={col.key}
-                className={`py-2.5 px-4 font-semibold select-none ${
-                  col.align === "left" ? "text-left" : "text-right"
+                className={`py-2.5 px-3 font-semibold select-none ${
+                  col.align === "left" ? "text-left" : col.align === "center" ? "text-center" : "text-right"
                 } ${col.sortable ? "cursor-pointer hover:text-foreground transition-colors" : ""}`}
                 onClick={() => col.sortable && onSort(col.key)}
               >
-                <div className={`flex items-center gap-1 ${col.align === "left" ? "justify-start" : "justify-end"}`}>
+                <div className={`flex items-center gap-1 ${col.align === "left" ? "justify-start" : col.align === "center" ? "justify-center" : "justify-end"}`}>
                   {col.label}
                   {col.sortable && sortField === col.key && (sortOrder === "desc" ? "↓" : "↑")}
                 </div>
@@ -95,7 +111,7 @@ export function WalletTable({
                 {columns.map((col) => (
                   <td
                     key={col.key}
-                    className={`py-3.5 px-4 font-mono text-xs ${col.align === "left" ? "text-left" : "text-right"}`}
+                    className={`py-3.5 px-3 font-mono text-xs ${col.align === "left" ? "text-left" : col.align === "center" ? "text-center" : "text-right"}`}
                   >
                     {col.render(row, i)}
                   </td>

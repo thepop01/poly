@@ -29,9 +29,7 @@ const NAV_SECTIONS: { title: string; items: NavItem[] }[] = [
     title: "Discovery",
     items: [
       { name: "Wallets", path: "/wallets", icon: Globe, exact: true },
-      { name: "Curated", path: "/wallets/curated", icon: Star },
-      { name: "Custom Wallets", path: "/wallets/custom", icon: UserPlus },
-      { name: "Alpha Calls", path: "/alpha-calls", icon: Zap },
+      { name: "Feed", path: "/feed", icon: Zap },
     ],
   },
   {

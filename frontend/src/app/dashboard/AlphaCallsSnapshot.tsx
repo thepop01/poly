@@ -20,7 +20,7 @@ export function AlphaCallsSnapshot({ items }: { items: AlphaSnapshotItem[] }) {
   return (
     <div className="card p-5 flex flex-col">
       <div className="mb-4">
-        <h2 className="text-base font-bold text-foreground">Latest alpha calls</h2>
+        <h2 className="text-base font-bold text-foreground">Latest feed activity</h2>
         <p className="text-xs text-subtle">Fresh signals from the trade and deposit scanners.</p>
       </div>
 
@@ -28,10 +28,10 @@ export function AlphaCallsSnapshot({ items }: { items: AlphaSnapshotItem[] }) {
         <EmptyState icon={<Zap size={22} />} title="No signals in the current window" />
       ) : (
         <div className="divide-y divide-border flex-1">
-          {items.map((item) => {
+          {items.map((item, index) => {
             const t = timeAgo(item.timestamp);
             return (
-              <div key={item.id} className="flex items-center justify-between gap-3 py-3 first:pt-0">
+              <div key={`${item.id}-${index}`} className="flex items-center justify-between gap-3 py-3 first:pt-0">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <TypeBadge kind={item.type} />
                   <div className="min-w-0">
@@ -56,7 +56,7 @@ export function AlphaCallsSnapshot({ items }: { items: AlphaSnapshotItem[] }) {
       )}
 
       <Link
-        href="/alpha-calls"
+        href="/feed"
         className="mt-4 inline-flex items-center gap-1.5 self-start px-3 py-1.5 rounded-lg bg-surface-2 border border-border text-xs font-medium text-foreground hover:bg-surface-3 transition-colors"
       >
         Open full feed <ArrowUpRight size={13} />

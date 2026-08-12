@@ -38,9 +38,13 @@ BALANCE_THRESHOLD = 1000.0  # $1k minimum balance to qualify for global list
 CONCURRENCY = int(os.environ.get("STATS_WORKER_CONCURRENCY", "10"))
 WALLET_TIMEOUT = int(os.environ.get("STATS_WALLET_TIMEOUT", "600"))
 API_DELAY = 0.03  # 30ms between sequential API calls within a wallet
-SUPABASE_RATE_LIMIT = 30  # 30 calls per minute
-SUPABASE_DELAY = 60.0 / SUPABASE_RATE_LIMIT  # 2 seconds between calls
-_sb_semaphore = None  # Initialized in run_leaderboard_stats
+
+# Per-fetch position cap. Each API call fetches at most 5,000 most-recent positions
+# (open or closed). This aligns with our largest analysis window (pnl_5000).
+# The DB accumulates positions across many fetches over time and will naturally
+# grow beyond 5,000 — that is expected. Most-recent win rate > lifetime win rate.
+MAX_POSITIONS = 5000
+
 
 
 def _parse(val, default=0.0):
@@ -190,33 +194,30 @@ async def fetch_incremental_closed_positions(
 # ── API Fetchers ──────────────────────────────────────────────────────────
 
 async def _get(session: aiohttp.ClientSession, url: str) -> list | dict | None:
-    """Single shared GET helper with progressive tiered timeouts: 10s, 30s, 60s, 90s, 150s."""
-    timeouts = [10, 30, 60, 90, 150]
-    for i, t in enumerate(timeouts):
+    """Single shared GET helper with fast 12s timeout and 429 backoff retry."""
+    for attempt in range(3):
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=t)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
                 if resp.status == 429:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(2 * (attempt + 1))
                     continue
                 if resp.status != 200:
                     return None
                 return await resp.json()
-        except Exception as e:
-            if i < len(timeouts) - 1:
-                logger.debug(f"Timeout {t}s failed for {url}. Retrying with {timeouts[i+1]}s...")
+        except Exception:
+            if attempt < 2:
                 await asyncio.sleep(1)
                 continue
-            logger.warning(f"All tiered timeouts failed for {url}: {e}")
             return None
     return None
 
 
 async def fetch_positions(session: aiohttp.ClientSession, address: str) -> list[dict]:
+    """Fetch open positions for a wallet. Hard cap: MAX_POSITIONS (5,000)."""
     all_positions = []
     offset = 0
     limit = 500
-    max_positions = 10000
-    while len(all_positions) < max_positions:
+    while len(all_positions) < MAX_POSITIONS:
         data = await _get(session, f"https://data-api.polymarket.com/positions?user={address}&limit={limit}&offset={offset}")
         if not data or not isinstance(data, list):
             break
@@ -225,7 +226,7 @@ async def fetch_positions(session: aiohttp.ClientSession, address: str) -> list[
             break
         offset += limit
         await asyncio.sleep(API_DELAY)
-    return all_positions[:max_positions]
+    return all_positions[:MAX_POSITIONS]
 
 
 def _trim_closed_page(items: list[dict], newer_than_epoch: float | None) -> tuple[list[dict], bool]:
@@ -267,52 +268,42 @@ async def fetch_closed_positions(
     offset = 0
     limit = 50  # API caps closed-positions at 50/page
     max_closed = 5000
-    batch_size = 20  # Fetch 20 pages concurrently per batch
-    deadline = time.monotonic() + 120  # 120s max for this function
+    batch_size = 10  # Fetch 10 pages (500 positions) concurrently per batch
+    deadline = time.monotonic() + 180  # 180s deadline allows full 5000 positions in single pass
     finished_naturally = False
 
     while len(all_closed) < max_closed and time.monotonic() < deadline:
         remaining = max_closed - len(all_closed)
-        pages_to_fetch = min(batch_size, remaining // limit + 1)
+        batch_size = 5  # 5 pages (250 items) concurrently per batch to prevent rate limiting
+        pages_to_fetch = min(batch_size, (remaining + limit - 1) // limit)
 
-        # Build URLs for concurrent fetches. Newest-first is CRITICAL: the API's
-        # default order is biggest-PnL-first, which for wallets past the 5000
-        # cap would keep only their largest winners and silently drop losers.
         urls = [
             f"https://data-api.polymarket.com/closed-positions?user={address}&limit={limit}&offset={offset + i * limit}&sortBy=TIMESTAMP&sortDirection=DESC"
             for i in range(pages_to_fetch)
         ]
 
-        # Fetch all pages concurrently
+        # Fetch batch pages concurrently
         results = await asyncio.gather(
             *[_get(session, url) for url in urls],
             return_exceptions=True
         )
 
-        # Process results in order, skip failed pages
         hit_end = False
-        any_page_empty = False
-        for i, result in enumerate(results):
-            if isinstance(result, Exception) or not result or not isinstance(result, list):
+        for result in results:
+            if isinstance(result, Exception) or not isinstance(result, list):
                 continue
             kept, reached = _trim_closed_page(result, newer_than_epoch)
             all_closed.extend(kept)
-            if reached:
-                hit_end = True  # older pages are all at/before the cursor
-            if len(result) < limit:
-                any_page_empty = True
+            if reached or len(result) < limit:
+                hit_end = True
+                break
 
-        if any_page_empty and not any(
-            isinstance(r, list) and len(r) == limit for r in results
-        ):
-            hit_end = True
-
-        if hit_end:
+        if hit_end or not any(isinstance(r, list) and r for r in results):
             finished_naturally = True
             break
 
         offset += pages_to_fetch * limit
-        await asyncio.sleep(API_DELAY)
+        await asyncio.sleep(0.05)
 
     # Complete = reached the end of data / the cursor (natural), or filled the
     # 5000 cap (intended truncation). Anything else = the deadline cut us off.
@@ -390,66 +381,7 @@ async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
     return 0.0
 
 
-SUPABASE_URL = "https://gzydspfquuaudqeztorw.supabase.co/functions/v1/public-api"
-SUPABASE_KEY = "psk_d679feca8ad644ddb3ced58992421de0"
-
 PM_CATEGORIES = ["SPORTS", "POLITICS", "CRYPTO", "ESPORTS", "CULTURE", "TECH", "FINANCE", "ECONOMICS", "WEATHER"]
-
-
-async def fetch_supabase_wallet_profile(session: aiohttp.ClientSession, address: str) -> dict | None:
-    """Fetch win_rate, roi, resolved_count, last_trade_at from Supabase PolymarketScan wallet_profile.
-    Rate limited to 30 calls per minute."""
-    global _sb_semaphore
-    if _sb_semaphore is None:
-        _sb_semaphore = asyncio.Semaphore(1)  # Single permit = sequential calls
-    
-    async with _sb_semaphore:
-        try:
-            url = f"{SUPABASE_URL}?endpoint=wallet_profile&address={address}"
-            headers = {"x-api-key": SUPABASE_KEY}
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 429:
-                    logger.warning(f"Supabase rate limited for {address[:10]}..., waiting 60s")
-                    await asyncio.sleep(60)
-                    return None
-                if resp.status != 200:
-                    return None
-                body = await resp.json()
-                data = body.get("data", {})
-                if not data:
-                    return None
-                win_rate = data.get("win_rate")
-                roi = data.get("roi")
-                wins = data.get("wins")
-                losses = data.get("losses")
-                last_trade_at = data.get("last_trade_date")
-                # wallet_profile returns win_rate as 0-100 integer, normalize to 0-1
-                wr = _parse(win_rate) / 100.0 if win_rate is not None else None
-                # Use wins/losses for resolved_count (num_trades is capped at 100k)
-                resolved = int(_parse(wins)) + int(_parse(losses))
-                winning = int(_parse(wins))
-                # Parse last_trade_at if it's a string timestamp
-                last_trade_dt = None
-                if last_trade_at:
-                    try:
-                        if isinstance(last_trade_at, str):
-                            last_trade_dt = datetime.fromisoformat(last_trade_at.replace("Z", "+00:00"))
-                        elif isinstance(last_trade_at, (int, float)):
-                            last_trade_dt = datetime.fromtimestamp(last_trade_at, tz=timezone.utc)
-                    except Exception:
-                        pass
-                return {
-                    "win_rate": wr if wr is not None else None,
-                    "roi_pct": _parse(roi),
-                    "resolved_count": resolved,
-                    "winning_count": winning,
-                    "last_trade_at": last_trade_dt,
-                }
-        except Exception as e:
-            logger.debug(f"Supabase wallet_profile fetch failed for {address[:10]}...: {e}")
-            return None
-        finally:
-            await asyncio.sleep(SUPABASE_DELAY)
 
 
 # ── Compute Functions ─────────────────────────────────────────────────────
@@ -619,7 +551,7 @@ def compute_stats(positions, closed_positions, headline_pnl, headline_volume, st
     total_volume = 0.0
     max_trade_size = 0.0
     buy_prices: list[float] = []
-    buys_below_10c = buys_below_20c = buys_below_30c = buys_below_40c = buys_above_70c = 0
+    buys_below_15c = buys_15_30c = buys_30_45c = buys_45_60c = buys_60_75c = buys_above_75c = 0
     active_days = 0 # No longer calculated per-trade
 
     resolved_count = 0
@@ -627,8 +559,8 @@ def compute_stats(positions, closed_positions, headline_pnl, headline_volume, st
     biggest_win = 0.0
     biggest_loss = 0.0
 
-    wins_below_10c = wins_below_20c = wins_below_30c = wins_below_40c = wins_above_70c = 0
-    losses_below_10c = losses_below_20c = losses_below_30c = losses_below_40c = losses_above_70c = 0
+    wins_below_15c = wins_15_30c = wins_30_45c = wins_45_60c = wins_60_75c = wins_above_75c = 0
+    losses_below_15c = losses_15_30c = losses_30_45c = losses_45_60c = losses_60_75c = losses_above_75c = 0
 
     # ── 1. Process Open Positions ──
     for p in positions:
@@ -644,25 +576,36 @@ def compute_stats(positions, closed_positions, headline_pnl, headline_volume, st
         # Buy price distribution
         if avg_p > 0:
             buy_prices.append(avg_p)
-            if avg_p < 0.10: buys_below_10c += 1
-            elif avg_p < 0.20: buys_below_20c += 1
-            elif avg_p < 0.30: buys_below_30c += 1
-            elif avg_p < 0.40: buys_below_40c += 1
-            elif avg_p > 0.70: buys_above_70c += 1
+            if avg_p < 0.15: buys_below_15c += 1
+            elif avg_p < 0.30: buys_15_30c += 1
+            elif avg_p < 0.45: buys_30_45c += 1
+            elif avg_p < 0.60: buys_45_60c += 1
+            elif avg_p < 0.75: buys_60_75c += 1
+            else: buys_above_75c += 1
 
-        # Triangle Logic: Near-worthless open position -> Loss
-        if cur_price < 0.03:
+        # Triangle Logic: Near-worthless or redeemable open positions
+        redeemable = p.get("redeemable", False)
+        cash_pnl = _parse(p.get("cashPnl"))
+        realized_pnl = _parse(p.get("realizedPnl"))
+        pos_pnl = realized_pnl + cash_pnl
+
+        if cur_price < 0.03 or redeemable:
             resolved_count += 1
-            cash_pnl = _parse(p.get("cashPnl"))
-            if cash_pnl < biggest_loss:
-                biggest_loss = cash_pnl
-            
-            if avg_p > 0:
-                if avg_p < 0.10: losses_below_10c += 1
-                elif avg_p < 0.20: losses_below_20c += 1
-                elif avg_p < 0.30: losses_below_30c += 1
-                elif avg_p < 0.40: losses_below_40c += 1
-                elif avg_p > 0.70: losses_above_70c += 1
+            if pos_pnl > 0 or cur_price > 0.97:
+                winning_count += 1
+                if pos_pnl > biggest_win:
+                    biggest_win = pos_pnl
+            else:
+                if cash_pnl < biggest_loss:
+                    biggest_loss = cash_pnl
+                
+                if avg_p > 0:
+                    if avg_p < 0.15: losses_below_15c += 1
+                    elif avg_p < 0.30: losses_15_30c += 1
+                    elif avg_p < 0.45: losses_30_45c += 1
+                    elif avg_p < 0.60: losses_45_60c += 1
+                    elif avg_p < 0.75: losses_60_75c += 1
+                    else: losses_above_75c += 1
 
     # ── 2. Process Closed Positions ──
     for p in closed_positions:
@@ -690,21 +633,30 @@ def compute_stats(positions, closed_positions, headline_pnl, headline_volume, st
                 
         if avg_p > 0:
             buy_prices.append(avg_p)
-            if avg_p < 0.10:
-                if won: wins_below_10c += 1
-                else: losses_below_10c += 1
-            elif avg_p < 0.20:
-                if won: wins_below_20c += 1
-                else: losses_below_20c += 1
+            if avg_p < 0.15:
+                buys_below_15c += 1
+                if won: wins_below_15c += 1
+                else: losses_below_15c += 1
             elif avg_p < 0.30:
-                if won: wins_below_30c += 1
-                else: losses_below_30c += 1
-            elif avg_p < 0.40:
-                if won: wins_below_40c += 1
-                else: losses_below_40c += 1
-            if avg_p > 0.70:
-                if won: wins_above_70c += 1
-                else: losses_above_70c += 1
+                buys_15_30c += 1
+                if won: wins_15_30c += 1
+                else: losses_15_30c += 1
+            elif avg_p < 0.45:
+                buys_30_45c += 1
+                if won: wins_30_45c += 1
+                else: losses_30_45c += 1
+            elif avg_p < 0.60:
+                buys_45_60c += 1
+                if won: wins_45_60c += 1
+                else: losses_45_60c += 1
+            elif avg_p < 0.75:
+                buys_60_75c += 1
+                if won: wins_60_75c += 1
+                else: losses_60_75c += 1
+            else:
+                buys_above_75c += 1
+                if won: wins_above_75c += 1
+                else: losses_above_75c += 1
 
     avg_buy_price = sum(buy_prices) / len(buy_prices) if buy_prices else 0.0
 
@@ -712,7 +664,7 @@ def compute_stats(positions, closed_positions, headline_pnl, headline_volume, st
     effective_volume = max(total_volume, headline_volume)
     effective_pnl = headline_pnl
 
-    win_rate = (winning_count / resolved_count) if resolved_count > 0 else 0.0
+    win_rate = (winning_count / resolved_count) if resolved_count > 0 else None
     
     # Calculate ROI using Peak Capital logic
     if peak_capital is not None and peak_capital > 0:
@@ -729,15 +681,15 @@ def compute_stats(positions, closed_positions, headline_pnl, headline_volume, st
         "biggest_win": biggest_win, "biggest_loss": biggest_loss,
         "active_days": active_days,
         "avg_buy_price": avg_buy_price,
-        "buys_below_10c": buys_below_10c, "buys_below_20c": buys_below_20c,
-        "buys_below_30c": buys_below_30c, "buys_below_40c": buys_below_40c,
-        "buys_above_70c": buys_above_70c,
-        "wins_below_10c": wins_below_10c, "wins_below_20c": wins_below_20c,
-        "wins_below_30c": wins_below_30c, "wins_below_40c": wins_below_40c,
-        "wins_above_70c": wins_above_70c,
-        "losses_below_10c": losses_below_10c, "losses_below_20c": losses_below_20c,
-        "losses_below_30c": losses_below_30c, "losses_below_40c": losses_below_40c,
-        "losses_above_70c": losses_above_70c,
+        "buys_below_15c": buys_below_15c, "buys_15_30c": buys_15_30c,
+        "buys_30_45c": buys_30_45c, "buys_45_60c": buys_45_60c,
+        "buys_60_75c": buys_60_75c, "buys_above_75c": buys_above_75c,
+        "wins_below_15c": wins_below_15c, "wins_15_30c": wins_15_30c,
+        "wins_30_45c": wins_30_45c, "wins_45_60c": wins_45_60c,
+        "wins_60_75c": wins_60_75c, "wins_above_75c": wins_above_75c,
+        "losses_below_15c": losses_below_15c, "losses_15_30c": losses_15_30c,
+        "losses_30_45c": losses_30_45c, "losses_45_60c": losses_45_60c,
+        "losses_60_75c": losses_60_75c, "losses_above_75c": losses_above_75c,
     }
 
 
@@ -869,12 +821,13 @@ def compute_category_stats(trades, closed_positions, pm_category_pnl=None):
 # ── Core: fetch all data for one wallet concurrently ──────────────────────
 
 async def _fetch_wallet_data(session: aiohttp.ClientSession, address: str, start_stats_at: datetime) -> dict:
-    """Fire all API calls for a single wallet concurrently (except closed positions)."""
-    trades_f, positions_f, balance_f, website_f = await asyncio.gather(
+    """Fire all API calls for a single wallet concurrently including capital metrics."""
+    trades_f, positions_f, balance_f, website_f, capital_f = await asyncio.gather(
         fetch_all_trades(session, address),
         fetch_positions(session, address),
         fetch_balance(session, address),
         fetch_website_pnl(session, address),
+        fetch_capital_metrics(session, address),
         return_exceptions=True,
     )
     trades = trades_f if isinstance(trades_f, list) else []
@@ -882,8 +835,6 @@ async def _fetch_wallet_data(session: aiohttp.ClientSession, address: str, start
     balance = balance_f if isinstance(balance_f, (int, float)) else 0.0
     website = website_f if isinstance(website_f, dict) else None
 
-    # Deposits/withdrawals/peak capital (Alchemy)
-    capital_f = await fetch_capital_metrics(session, address)
     if isinstance(capital_f, tuple) and len(capital_f) == 3:
         deposits, withdrawals, peak_capital = capital_f
     else:
@@ -939,7 +890,6 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
         await conn.execute("UPDATE wallets_v2 SET start_stats_at = $1 WHERE address = $2", start_stats_at, address)
 
     # Fetch wallet data based on curated status
-    supabase = None
     if is_curated:
         # Curated wallets: full tracking with trades and positions
         data = await _fetch_wallet_data(session, address, start_stats_at)
@@ -950,24 +900,36 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
         deposits = data["deposits"]
         withdrawals = data["withdrawals"]
     else:
-        # Non-curated wallets: balance, website, deposits, withdrawals + Supabase win_rate
-        balance_f, website_f, supabase_f, positions_f = await asyncio.gather(
+        # Non-curated wallets: balance, website, positions, capital metrics
+        balance_f, website_f, positions_f = await asyncio.gather(
             fetch_balance(session, address),
             fetch_website_pnl(session, address),
-            fetch_supabase_wallet_profile(session, address),
             fetch_positions(session, address),
             return_exceptions=True,
         )
         balance = balance_f if isinstance(balance_f, (int, float)) else 0.0
         website = website_f if isinstance(website_f, dict) else None
-        supabase = supabase_f if isinstance(supabase_f, dict) else None
         trades = []
         positions = positions_f if isinstance(positions_f, list) else []
-        capital_f = await fetch_capital_metrics(session, address)
-        if isinstance(capital_f, tuple) and len(capital_f) == 3:
-            deposits, withdrawals, peak_capital = capital_f
+        
+        crow = await conn.fetchrow(
+            "SELECT deposits, withdrawals, net_capital, peak_capital, last_capital_block FROM wallet_metrics_v2 WHERE address = $1", address
+        )
+        cur_dep = float(crow["deposits"]) if crow and crow["deposits"] is not None else 0.0
+        cur_wdw = float(crow["withdrawals"]) if crow and crow["withdrawals"] is not None else 0.0
+        cur_net = float(crow["net_capital"]) if crow and crow["net_capital"] is not None else 0.0
+        cur_peak = float(crow["peak_capital"]) if crow and crow["peak_capital"] is not None else 0.0
+        last_block = int(crow["last_capital_block"]) if crow and crow["last_capital_block"] is not None else 0
+        from_block = last_block + 1 if last_block > 0 else 0
+
+        capital_f = await fetch_capital_metrics(
+            session, address, from_block=from_block, current_deposits=cur_dep, current_withdrawals=cur_wdw, current_net_capital=cur_net, current_peak_capital=cur_peak
+        )
+        if isinstance(capital_f, tuple) and len(capital_f) == 5 and capital_f[0] is not None:
+            deposits, withdrawals, peak_capital, net_capital, max_block = capital_f
+            next_last_block = max(last_block, max_block or 0)
         else:
-            deposits, withdrawals, peak_capital = None, None, None
+            deposits, withdrawals, peak_capital, net_capital, next_last_block = cur_dep, cur_wdw, cur_peak, cur_net, last_block
 
     if deposits is None or withdrawals is None:
         logger.warning(f"Alchemy unavailable for {address[:10]}... falling back to stored values")
@@ -975,7 +937,7 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
         withdrawals = withdrawals if withdrawals is not None else 0.0
 
     # ══════════════════════════════════════════════════════════════════════
-    # NON-CURATED WALLET: Supabase + Polymarket API only. No trade scan.
+    # NON-CURATED WALLET: Polymarket API only. No trade scan.
     # ══════════════════════════════════════════════════════════════════════
     if not is_curated:
         # ── Vetting gate: balance + last_trade_at ──
@@ -1009,8 +971,6 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
                 position_value += curr_val
                 
         total_assets = balance + position_value
-        sb_resolved = supabase["resolved_count"] if supabase and supabase.get("resolved_count") is not None else None
-
         # Rule 1 & 2: total_assets < 1k → below threshold, skip global list, move to "Low Balance" Might Cook
         if total_assets < BALANCE_THRESHOLD:
             await conn.execute(
@@ -1021,7 +981,7 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
             return
 
         # Rule 2.5: balance > $1k but no trades → Might Cook "New Wallets"
-        has_trades = (sb_resolved and sb_resolved > 0) or last_trade_dt is not None
+        has_trades = last_trade_dt is not None
         if not has_trades:
             if last_trade_dt and (now - last_trade_dt) >= timedelta(days=30):
                 # Stale with no trades → hibernate
@@ -1069,18 +1029,10 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
                 UPDATE wallet_metrics_v2 SET pm_pnl=$2, pm_volume=$3, pm_rank=$4 WHERE address=$1
             """, address, website_pnl, website_volume, website["rank"])
 
-        # Use Supabase data for win_rate/roi/resolved — NULL if not available
-        sb_wr = supabase["win_rate"] if supabase and supabase.get("win_rate") is not None else None
-        sb_roi = supabase["roi_pct"] if supabase and supabase.get("roi_pct") is not None else None
-        sb_resolved = supabase["resolved_count"] if supabase and supabase.get("resolved_count") is not None else None
-        sb_winning = supabase["winning_count"] if supabase and supabase.get("winning_count") is not None else None
-
         # PnL from Polymarket leaderboard (website), NULL if not available
         total_pnl = website_pnl
         total_volume = website_volume
 
-        # ── We are completely bypassing the Triangle Logic for Curated wallets right now ──
-        # Use Supabase data as the display values (win_rate, roi_pct, etc.) for EVERY wallet.
         await conn.execute("""
             INSERT INTO wallet_metrics_v2 (address, win_rate, roi_pct, resolved_count, winning_count,
                 total_volume, total_pnl, unrealised_pnl, biggest_win, biggest_loss,
@@ -1091,17 +1043,19 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
                 win_rate_100, win_rate_300, win_rate_800, win_rate_1500, win_rate_2500,
                 sb_win_rate, sb_roi_pct, sb_resolved_count, sb_winning_count,
                 tl_win_rate, tl_roi_pct, tl_resolved_count, tl_winning_count,
+                deposits, withdrawals, net_capital, peak_capital, last_capital_block,
                 last_updated)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,$8,$9,$10,$11,NULL,NULL,NULL,NULL,NOW())
+            VALUES ($1,NULL,NULL,NULL,NULL,$2,$3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,$4,$5,$6,$7,$8,NOW())
             ON CONFLICT (address) DO UPDATE SET
-                win_rate=EXCLUDED.win_rate, roi_pct=EXCLUDED.roi_pct, resolved_count=EXCLUDED.resolved_count,
-                winning_count=EXCLUDED.winning_count, total_volume=EXCLUDED.total_volume, total_pnl=EXCLUDED.total_pnl,
-                sb_win_rate=EXCLUDED.sb_win_rate, sb_roi_pct=EXCLUDED.sb_roi_pct,
-                sb_resolved_count=EXCLUDED.sb_resolved_count, sb_winning_count=EXCLUDED.sb_winning_count,
+                total_volume=EXCLUDED.total_volume, total_pnl=EXCLUDED.total_pnl,
+                deposits=EXCLUDED.deposits, withdrawals=EXCLUDED.withdrawals,
+                net_capital=EXCLUDED.net_capital, peak_capital=EXCLUDED.peak_capital,
+                last_capital_block=EXCLUDED.last_capital_block,
+                sb_win_rate=NULL, sb_roi_pct=NULL,
+                sb_resolved_count=NULL, sb_winning_count=NULL,
                 tl_win_rate=NULL, tl_roi_pct=NULL, tl_resolved_count=NULL, tl_winning_count=NULL,
                 last_updated=EXCLUDED.last_updated
-        """, address, sb_wr, sb_roi, sb_resolved, sb_winning, total_volume, total_pnl,
-            sb_wr, sb_roi, sb_resolved, sb_winning)
+        """, address, total_volume, total_pnl, deposits, withdrawals, net_capital, peak_capital, next_last_block)
 
         await conn.execute("""
             UPDATE wallets_v2 SET
@@ -1121,23 +1075,12 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
     # ══════════════════════════════════════════════════════════════════════
     # CURATED WALLET: Full trade scan + Triangle Logic
     # ══════════════════════════════════════════════════════════════════════
-    # Also fetch Supabase data for sb_ columns (comparison)
-    if not supabase:
-        supabase_f = await fetch_supabase_wallet_profile(session, address)
-        supabase = supabase_f if isinstance(supabase_f, dict) else None
 
-    # ── Closed positions: synthetic on-chain build (Bypassing 5,000 API limit) ──
-    from src.utils.etherscan_client import fetch_historical_redemptions_polygonscan, build_synthetic_closed_positions
-    proxies = set(t.get("proxyWallet") for t in trades if t.get("proxyWallet") and isinstance(t.get("proxyWallet"), str))
-    addresses_to_query = [address] + list(proxies)
-    
-    redemptions = await fetch_historical_redemptions_polygonscan(session, addresses_to_query)
-    synthetic_closed = build_synthetic_closed_positions(trades, redemptions)
-    
-    # We still upsert them to the DB so other parts of the UI/API can use them,
-    # but we use `synthetic_closed` directly for compute_stats.
-    await upsert_closed_positions(conn, address, synthetic_closed)
-    closed = synthetic_closed
+    # ── Closed positions: REST API, capped at MAX_POSITIONS (5,000) ──
+    # This is the hard limit for ALL wallets — curated or not. No on-chain bypass.
+    closed_result = await fetch_closed_positions(session, address)
+    closed = closed_result[0] if isinstance(closed_result, tuple) else closed_result
+    await upsert_closed_positions(conn, address, closed)
 
     website_pnl = website["pnl"] if website else 0.0
     website_volume = website["volume"] if website else 0.0
@@ -1171,32 +1114,18 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
     # Calculate remaining in-memory stats (roi_pct, biggest_win)
     stats = compute_stats(positions, closed, headline["pnl"], headline["volume"], start_stats_at, peak_capital)
 
-    # NOTE: win_rate, roi_pct, resolved_count, winning_count ALWAYS come from Supabase (for global page).
-    # Curated page reads Triangle Logic data from tl_ columns.
-    # Do NOT overwrite stats with computed/db values for these fields.
-
     # Store Triangle Logic data in tl_ columns for curated page
     tl_wr = db_stats.get("win_rate_all") if db_stats else None
     tl_resolved = db_stats.get("resolved_count") if db_stats else None
     tl_winning = db_stats.get("winning_count") if db_stats else None
     tl_roi = stats.get("roi_pct")  # Computed from trades (effective_pnl / effective_volume)
 
-    # Override stats with Supabase values for DB write (global page always shows these)
-    if supabase:
-        if supabase.get("win_rate") is not None:
-            stats["win_rate"] = supabase["win_rate"]
-        if supabase.get("roi_pct") is not None:
-            stats["roi_pct"] = supabase["roi_pct"]
-        if supabase.get("resolved_count") is not None:
-            stats["resolved_count"] = supabase["resolved_count"]
-        if supabase.get("winning_count") is not None:
-            stats["winning_count"] = supabase["winning_count"]
-
     # ── Batch DB writes ──
-    sb_wr = supabase["win_rate"] if supabase and supabase.get("win_rate") is not None else None
-    sb_roi = supabase["roi_pct"] if supabase and supabase.get("roi_pct") is not None else None
-    sb_resolved = supabase["resolved_count"] if supabase and supabase.get("resolved_count") is not None else None
-    sb_winning = supabase["winning_count"] if supabase and supabase.get("winning_count") is not None else None
+    # sb_ columns are retired (Supabase removed) — always NULL
+    sb_wr = None
+    sb_roi = None
+    sb_resolved = None
+    sb_winning = None
 
     latest_trade_ts = max(
         (t.get("timestamp", 0) for t in trades if t.get("timestamp")),
@@ -1547,9 +1476,7 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
 # ── Parallel runner ──────────────────────────────────────────────────────
 
 async def run_leaderboard_stats(db_url: str = DB_URL):
-    logger.info("Starting Leaderboard Stats worker (concurrency=%d, interval=%ds, supabase_rate=%d/min)...", CONCURRENCY, POLL_INTERVAL, SUPABASE_RATE_LIMIT)
-    global _sb_semaphore
-    _sb_semaphore = asyncio.Semaphore(1)  # Sequential Supabase calls
+    logger.info("Starting Leaderboard Stats worker (concurrency=%d, interval=%ds)...", CONCURRENCY, POLL_INTERVAL)
     try:
         pool = await asyncpg.create_pool(db_url, min_size=2, max_size=15)
     except Exception as e:

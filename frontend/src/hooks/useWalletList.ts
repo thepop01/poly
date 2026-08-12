@@ -12,7 +12,7 @@ export function useWalletList(params: WalletListParams) {
   const [refetchTick, setRefetchTick] = useState(0);
   const requestId = useRef(0);
 
-  const { tab, source, search, sort_by, sort_order, limit, offset } = params;
+  const { tab, source, category, subcategory, pnl_window, search, sort_by, sort_order, limit, offset } = params;
 
   useEffect(() => {
     const id = ++requestId.current;
@@ -24,7 +24,7 @@ export function useWalletList(params: WalletListParams) {
     const delay = search ? 300 : 0;
     const timer = setTimeout(async () => {
       try {
-        const res = await getWalletList({ tab, source, search, sort_by, sort_order, limit, offset });
+        const res = await getWalletList({ tab, source, category, subcategory, pnl_window, search, sort_by, sort_order, limit, offset });
         if (cancelled || id !== requestId.current) return;
         setWallets(res.wallets || []);
         setTotal(res.total_count || 0);
@@ -42,7 +42,7 @@ export function useWalletList(params: WalletListParams) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [tab, source, search, sort_by, sort_order, limit, offset, refetchTick]);
+  }, [tab, source, category, subcategory, pnl_window, search, sort_by, sort_order, limit, offset, refetchTick]);
 
   return {
     wallets,

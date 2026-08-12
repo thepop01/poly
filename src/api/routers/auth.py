@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, Request, HTTPException
+from fastapi import APIRouter, Depends, Request, HTTPException
 from src.api.errors import AuthError, ConflictError
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -114,6 +114,25 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         return payload
     except Exception:
         raise AuthError("Invalid token")
+
+@router.post("/guest")
+async def guest_login(request: Request):
+    """Generate or retrieve an anonymous guest JWT token."""
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    guest_email = f"guest_{secrets.token_hex(8)}@polytracker.local"
+    hashed_pwd = pwd_context.hash(secrets.token_hex(16))
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING user_id",
+            guest_email, hashed_pwd
+        )
+        user_id = str(row["user_id"])
+        access_token = create_access_token(user_id, guest_email, expires_delta=timedelta(days=365))
+        return {"access_token": access_token, "user_id": user_id}
 
 async def require_admin(
     request: Request,

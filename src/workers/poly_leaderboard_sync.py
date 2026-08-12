@@ -168,15 +168,8 @@ async def store_category_stats(
         """, address, category, pnl, volume)
         upserted += 1
 
-    # Remove wallets no longer in this category's leaderboard
-    removed = await conn.execute("""
-        DELETE FROM category_stats_v2
-        WHERE category = $1 AND subcategory = '' AND window_size = 0
-        AND address NOT IN (SELECT unnest($2::text[]))
-    """, category, list(current_addresses)) if current_addresses else 0
-    # Parse "DELETE N" from result
-    removed_count = int(removed.split()[-1]) if removed and removed.startswith("DELETE") else 0
-
+    # User requirement: Do NOT remove any wallets or category stats from database
+    removed_count = 0
     return upserted, removed_count
 
 
@@ -244,20 +237,21 @@ async def run_weekly_sync(db_url: str = DB_URL):
     logger.info("Polymarket leaderboard weekly sync complete.")
 
 
-def next_monday_2pm_utc() -> datetime:
-    """Calculate the next Monday 2 PM UTC from now."""
+def next_weekly_sync_utc(sync_day: int = SYNC_DAY, sync_hour: int = SYNC_HOUR) -> datetime:
+    """Calculate the next target day & hour UTC (e.g. Monday 2 PM UTC) from now."""
     now = datetime.now(timezone.utc)
-    days_until_monday = (SYNC_DAY - now.weekday()) % 7
-    if days_until_monday == 0 and now.hour >= SYNC_HOUR:
-        days_until_monday = 7
-    target = now.replace(hour=SYNC_HOUR, minute=0, second=0, microsecond=0) + timedelta(days=days_until_monday)
+    target = now.replace(hour=sync_hour, minute=0, second=0, microsecond=0)
+    days_ahead = (sync_day - now.weekday()) % 7
+    if days_ahead == 0 and target <= now:
+        days_ahead = 7
+    target += timedelta(days=days_ahead)
     return target
 
 
 # ── Standalone runner with shutdown support ──
 
 async def main():
-    """Run sync every Monday 2 PM UTC with graceful shutdown."""
+    """Run weekly sync on Monday at 2 PM UTC with graceful shutdown."""
     shutdown = asyncio.Event()
 
     def _handler():
@@ -271,11 +265,16 @@ async def main():
         except NotImplementedError:
             pass
 
-    logger.info("Leaderboard sync worker started (Monday 2 PM UTC)")
+    logger.info("Leaderboard sync worker started (weekly Monday 2 PM UTC) - running immediate initial sync...")
+    try:
+        await run_weekly_sync()
+    except Exception as e:
+        logger.error(f"Initial leaderboard sync error: {e}", exc_info=True)
+
     while not shutdown.is_set():
-        target = next_monday_2pm_utc()
+        target = next_weekly_sync_utc()
         wait_seconds = (target - datetime.now(timezone.utc)).total_seconds()
-        logger.info(f"Next sync: {target.isoformat()} ({wait_seconds/3600:.1f}h from now)")
+        logger.info(f"Next scheduled sync: {target.isoformat()} ({wait_seconds/3600:.1f}h from now)")
         
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=wait_seconds)
@@ -287,8 +286,6 @@ async def main():
             await run_weekly_sync()
         except Exception as e:
             logger.error(f"Leaderboard sync error: {e}", exc_info=True)
-
-    logger.info("Leaderboard sync worker shut down cleanly.")
 
     logger.info("Leaderboard sync worker shut down cleanly.")
 

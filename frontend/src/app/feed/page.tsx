@@ -26,10 +26,10 @@ function tierNumber(walletTier?: string | null): number | null {
 // Size bucket (distinct from wallet quality) for filtering by trade/deposit size.
 const SIZE_BUCKETS = [
   { value: "all", label: "Any size" },
-  { value: "Tier 4", label: "$100k+" },
-  { value: "Tier 3", label: "$50k+" },
-  { value: "Tier 2", label: "$20k+" },
-  { value: "Tier 1", label: "$5k+" },
+  { value: "$100k+", label: "$100k+ Size" },
+  { value: "$50k+", label: "$50k+ Size" },
+  { value: "$20k+", label: "$20k+ Size" },
+  { value: "$5k+", label: "$5k+ Size" },
 ];
 
 interface Alert {
@@ -229,11 +229,11 @@ export default function AlphaFeedPage() {
                   </td>
                 </tr>
               ) : (
-                filtered.map((a) => {
+                filtered.map((a, i) => {
                   const isDeposit = a.alert_type === "LARGE_DEPOSIT";
                   const t = timeAgo(a.created_at);
                   return (
-                    <tr key={`${a.id}-${a.transaction_hash}`} className="hover:bg-surface-2/40 transition-colors group">
+                    <tr key={`${a.id}-${a.transaction_hash || i}-${i}`} className="hover:bg-surface-2/40 transition-colors group">
                       <td className="py-3 px-4">
                         <TypeBadge kind={isDeposit ? "deposit" : "trade"} />
                       </td>
@@ -259,7 +259,7 @@ export default function AlphaFeedPage() {
                         </div>
                       </td>
                       <td className="py-3 px-4">
-                        <TierBadge tier={tierNumber(a.wallet_tier)} />
+                        <TierBadge tier={a.wallet_tier} />
                       </td>
                       <td className="py-3 px-4 max-w-[280px]">
                         {isDeposit ? (

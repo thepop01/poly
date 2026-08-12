@@ -6,7 +6,7 @@ SRC = Path("src/api/routers/leaderboard_v2.py").read_text(encoding="utf-8")
 
 
 def test_tab_filters_match_canonical_model():
-    assert '"all":' in SRC and "w.tier NOT IN ('DEAD', 'UNCLASSIFIED')" in SRC
+    assert '"all":' in SRC and "w.tier NOT IN ('DEAD', 'UNCLASSIFIED') AND w.is_dormant = FALSE" in SRC
     assert "w.tier = 'STANDARD' AND w.is_dormant = FALSE" in SRC
     assert "w.tier = 'LOW_BALANCE' AND w.is_dormant = FALSE" in SRC
     assert "w.tier = 'NEW' AND w.is_dormant = FALSE" in SRC
@@ -14,8 +14,8 @@ def test_tab_filters_match_canonical_model():
 
 
 def test_tabs_are_disjoint_except_all():
-    """standard/low_balance/new require is_dormant = FALSE; hibernated requires TRUE."""
-    active_tabs = ["'STANDARD'", "'LOW_BALANCE'", "'NEW'"]
+    """curated/standard/low_balance/new require is_dormant = FALSE; hibernated requires TRUE."""
+    active_tabs = ["'CURATED'", "'STANDARD'", "'LOW_BALANCE'", "'NEW'"]
     for tier in active_tabs:
         assert f"w.tier = {tier} AND w.is_dormant = FALSE" in SRC
 
@@ -42,9 +42,9 @@ def test_no_user_input_interpolated_into_sql():
     assert "'%{search}%'" not in SRC.replace('f"%{search}%"', "")
 
 
-def test_counts_endpoint_counts_all_five_tabs():
+def test_counts_endpoint_counts_all_six_tabs():
     m = re.search(r"async def get_wallet_counts.*?FROM wallets_v2", SRC, re.S)
     assert m, "counts endpoint missing"
     body = m.group(0)
-    for alias in ("all_count", "standard", "low_balance", "new", "hibernated"):
+    for alias in ("all_count", "curated", "standard", "low_balance", "new", "hibernated"):
         assert f"AS {alias}" in body

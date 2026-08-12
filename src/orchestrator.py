@@ -1,8 +1,15 @@
+# src/orchestrator.py
 """
-Robust Worker Orchestrator.
+Robust Worker Orchestrator
+==========================
+Supervises all specialized background workers and services.
+Automatically restarts crashed workers with exponential backoff.
 
-Supervises all background workers and bots. If a worker crashes, it is automatically
-restarted with exponential backoff.
+Decoupled Workers Managed:
+1. Worker 1: Positions & Win-Rate Sync (Polymarket REST API + 10-Window PnLs)
+2. Worker 2: Capital Metrics Worker (Alchemy RPC USDC Deposits, Peak Capital, ROI %)
+3. Worker 3: On-Chain Verifier (Polygonscan Cross-Checker for 0-vol wallets)
+4. Worker 4: Leaderboard Discovery Sync (Daily 3 AM UTC Leaderboard & Hibernation Sync)
 """
 
 import asyncio
@@ -11,14 +18,10 @@ import signal
 import sys
 import traceback
 
-from src.workers.trade_tracker import _standalone as trade_tracker_main
-from src.workers.wallet_trade_history import main as wallet_trade_history_main
-from src.workers.leaderboard_stats_v2 import run_leaderboard_stats_v2 as leaderboard_stats_main
-from src.workers.deposit_tracker import run_deposit_tracker as deposit_tracker_main
-from src.workers.stats_refresher import main as stats_refresher_main
+from src.workers.positions_winrate_backfill import run_positions_winrate_backfill
+from src.workers.capital_metrics_backfill import run_capital_metrics_backfill
+from src.workers.onchain_verifier import run_onchain_verifier
 from src.workers.poly_leaderboard_sync import main as poly_leaderboard_sync_main
-from src.workers.agent_evaluator import main as agent_evaluator_main
-from src.workers.redemption_tracker import _standalone as redemption_tracker_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,13 +31,12 @@ logging.basicConfig(
 logger = logging.getLogger("orchestrator")
 
 
-
 async def supervise_task(task_func, name: str, shutdown_event: asyncio.Event):
     backoff = 1.0
     max_backoff = 60.0
 
     while not shutdown_event.is_set():
-        logger.info(f"[{name}] Starting...")
+        logger.info(f"[{name}] Starting worker...")
         try:
             await task_func()
 
@@ -58,52 +60,8 @@ async def supervise_task(task_func, name: str, shutdown_event: asyncio.Event):
             backoff = 1.0
 
 
-async def supervise_subprocess(module_name: str, name: str, shutdown_event: asyncio.Event):
-    backoff = 1.0
-    max_backoff = 60.0
-
-    while not shutdown_event.is_set():
-        logger.info(f"[{name}] Starting subprocess (python -m {module_name})...")
-        try:
-            proc = await asyncio.create_subprocess_exec(sys.executable, "-m", module_name)
-
-            while not shutdown_event.is_set() and proc.returncode is None:
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    pass
-
-            if shutdown_event.is_set():
-                if proc.returncode is None:
-                    logger.info(f"[{name}] Terminating subprocess...")
-                    proc.terminate()
-                    try:
-                        await asyncio.wait_for(proc.wait(), timeout=5.0)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"[{name}] Subprocess did not terminate, killing...")
-                        proc.kill()
-                break
-
-            if proc.returncode != 0:
-                logger.error(f"[{name}] Subprocess crashed with exit code {proc.returncode}")
-                logger.info(f"[{name}] Restarting in {backoff}s...")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-            else:
-                logger.warning(f"[{name}] Subprocess exited cleanly unexpectedly. Restarting in {backoff}s...")
-                await asyncio.sleep(backoff)
-
-        except asyncio.CancelledError:
-            logger.info(f"[{name}] Supervisor cancelled via shutdown.")
-            break
-        except Exception as e:
-            logger.error(f"[{name}] Subprocess supervisor error: {e}")
-            if not shutdown_event.is_set():
-                await asyncio.sleep(backoff)
-
-
 async def main():
-    logger.info("Initializing Worker Orchestrator...")
+    logger.info("=== INITIALIZING ORCHESTRATOR (4 SPECIALIZED WORKERS) ===")
     shutdown_event = asyncio.Event()
 
     def _signal_handler():
@@ -117,44 +75,28 @@ async def main():
         except NotImplementedError:
             pass
 
-    internal_workers = [
-        (leaderboard_stats_main, "leaderboard_stats"),
-        (trade_tracker_main, "trade_tracker"),
-        (wallet_trade_history_main, "wallet_trade_history"),
-        (deposit_tracker_main, "deposit_tracker"),
-        (stats_refresher_main, "stats_refresher"),
-        (poly_leaderboard_sync_main, "poly_leaderboard_sync"),
-        (agent_evaluator_main, "agent_evaluator"),
-        (redemption_tracker_main, "redemption_tracker"),
-    ]
-
-    external_bots = [
+    workers = [
+        (run_positions_winrate_backfill, "Worker 1: Polymarket REST Sync & 10-Window PnLs"),
+        (run_capital_metrics_backfill,  "Worker 2: Alchemy Capital Metrics"),
+        (run_onchain_verifier,          "Worker 3: Polygonscan On-Chain Verifier"),
+        (poly_leaderboard_sync_main,     "Worker 4: Leaderboard Discovery Sync"),
     ]
 
     tasks = []
-
-    for func, name in internal_workers:
+    for func, name in workers:
         t = asyncio.create_task(supervise_task(func, name, shutdown_event), name=name)
         tasks.append(t)
 
-    for module_name, name in external_bots:
-        t = asyncio.create_task(supervise_subprocess(module_name, name, shutdown_event), name=name)
-        tasks.append(t)
-
-    logger.info(f"All {len(tasks)} workers supervised and running.")
+    logger.info(f"All {len(tasks)} specialized workers supervised and running.")
 
     await shutdown_event.wait()
 
-    logger.info("Waiting for tasks to wind down (up to 10s)...")
+    logger.info("Waiting for workers to wind down (up to 10s)...")
     done, pending = await asyncio.wait(tasks, timeout=10)
     for t in pending:
         t.cancel()
-
-    logger.info("Orchestrator cleanly shut down.")
+    logger.info("Orchestrator shutdown complete.")
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received at outer loop. Exiting.")
+    asyncio.run(main())

@@ -8,6 +8,7 @@ services:
       POSTGRES_DB: poly_db
     ports:
       - "5432:5432"
+    command: postgres -c max_connections=300
     volumes:
       - postgres_data:/var/lib/postgresql/data
   redis:

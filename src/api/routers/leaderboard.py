@@ -184,7 +184,7 @@ ws.biggest_win,
             rows = await conn.fetch(query, *args)
 
     else:
-        # Overall view: use Supabase stats from tracked_wallets
+        # Overall view: stats from tracked_wallets
         allowed_sorts = {
             "total_volume": "COALESCE(tw.total_volume, ws.total_volume, 0)",
             "total_pnl": "COALESCE(tw.total_pnl, ws.total_pnl, tw.website_pnl, 0)",
@@ -465,134 +465,6 @@ ws.biggest_win,
     return result
 
 
-# ---------------------------------------------------------------------------
-# MIGHT COOK WALLETS
-# ---------------------------------------------------------------------------
-
-@router.get("/might-cook")
-async def get_might_cook_wallets(
-    request: Request,
-    sort_by: str = "deposited_at",
-    sort_order: str = "desc",
-    limit: int = 50,
-    offset: int = 0,
-    tab: str = "zero_balance",
-) -> dict[str, Any]:
-    """Wallets flagged for review.
-    
-    Tabs:
-    - zero_balance: Wallets with zero pUSD balance
-    - new_wallets: Wallets with balance > $1k but no trades yet
-    """
-    pool = getattr(request.app.state, "pool", None)
-    if not pool:
-        raise HTTPException(status_code=500, detail="Database pool not initialized")
-
-    order_dir = "ASC" if sort_order.lower() == "asc" else "DESC"
-
-    allowed_sorts = {
-        "deposited_at": "tw.added_at",
-        "balance": "COALESCE(tw.balance, 0)",
-        "total_pnl": "COALESCE(tw.total_pnl, 0)",
-        "position_value": "COALESCE(tw.position_value, 0)",
-        "last_trade_at": "tw.last_trade_at",
-    }
-
-    # New wallets tab: balance > $1k, no trades (resolved_count = 0, no last_trade_at)
-    if tab == "new_wallets":
-        order_col = allowed_sorts.get(sort_by, "tw.added_at")
-
-        query = (
-            "SELECT tw.address as wallet_address, 0 as amount_usdc, tw.added_at as deposited_at, "
-            "'' as tx_hash, "
-            "COALESCE(tw.total_pnl, 0) as total_pnl, "
-            "COALESCE(tw.total_volume, 0) as total_volume, "
-            "COALESCE(tw.website_pnl, 0) as website_pnl, "
-            "COALESCE(tw.balance, 0) as balance, "
-            "COALESCE(tw.position_value, 0) as position_value, "
-            "tw.username, tw.source_type, wt.category, wt.subcategory, tw.last_trade_at "
-            "FROM tracked_wallets tw "
-            "LEFT JOIN wallet_tags wt ON tw.address = wt.address "
-            "WHERE COALESCE(tw.balance, 0) > 1000 "
-            "AND tw.last_trade_at IS NULL "
-            "AND tw.status != 'HIBERNATING' "
-            "AND tw.is_zero_balance = FALSE "
-            f"ORDER BY {order_col} {order_dir} NULLS LAST "
-            "LIMIT $1 OFFSET $2"
-        )
-
-        async with pool.acquire() as conn:
-            total_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM tracked_wallets "
-                "WHERE COALESCE(balance, 0) > 1000 "
-                "AND last_trade_at IS NULL "
-                "AND status != 'HIBERNATING' "
-                "AND is_zero_balance = FALSE"
-            )
-            rows = await conn.fetch(query, limit, offset)
-
-        return {"wallets": [dict(r) for r in rows], "total_count": total_count}
-
-    if tab == "hibernated":
-        order_col = allowed_sorts.get(sort_by, "tw.added_at")
-        
-        query = (
-            "SELECT tw.address as wallet_address, 0 as amount_usdc, tw.added_at as deposited_at, "
-            "'' as tx_hash, "
-            "COALESCE(tw.total_pnl, 0) as total_pnl, "
-            "COALESCE(tw.total_volume, 0) as total_volume, "
-            "COALESCE(tw.website_pnl, 0) as website_pnl, "
-            "COALESCE(tw.balance, 0) as balance, "
-            "COALESCE(tw.position_value, 0) as position_value, "
-            "tw.username, tw.source_type, wt.category, wt.subcategory, tw.last_trade_at "
-            "FROM tracked_wallets tw "
-            "LEFT JOIN wallet_tags wt ON tw.address = wt.address "
-            "WHERE tw.last_trade_at < NOW() - INTERVAL '30 days' "
-            "AND tw.status != 'HIBERNATING' "
-            f"ORDER BY {order_col} {order_dir} NULLS LAST "
-            "LIMIT $1 OFFSET $2"
-        )
-        
-        async with pool.acquire() as conn:
-            total_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM tracked_wallets "
-                "WHERE last_trade_at < NOW() - INTERVAL '30 days' "
-                "AND status != 'HIBERNATING'"
-            )
-            rows = await conn.fetch(query, limit, offset)
-            
-        return {"wallets": [dict(r) for r in rows], "total_count": total_count}
-
-    # Low balance tab (default): tracked_wallets where balance + position < 1000
-    order_col = allowed_sorts.get(sort_by, "tw.added_at")
-
-    query = (
-        "SELECT tw.address as wallet_address, 0 as amount_usdc, tw.added_at as deposited_at, "
-        "'' as tx_hash, "
-        "COALESCE(tw.total_pnl, 0) as total_pnl, "
-        "COALESCE(tw.total_volume, 0) as total_volume, "
-        "COALESCE(tw.website_pnl, 0) as website_pnl, "
-        "COALESCE(tw.balance, 0) as balance, "
-        "COALESCE(tw.position_value, 0) as position_value, "
-        "tw.username, tw.source_type, wt.category, wt.subcategory, tw.last_trade_at "
-        "FROM tracked_wallets tw "
-        "LEFT JOIN wallet_tags wt ON tw.address = wt.address "
-        "WHERE (COALESCE(tw.balance, 0) + COALESCE(tw.position_value, 0)) < 1000 "
-        "AND (tw.last_trade_at >= NOW() - INTERVAL '30 days' OR tw.last_trade_at IS NULL) "
-        "AND tw.status != 'HIBERNATING' "
-        f"ORDER BY {order_col} {order_dir} NULLS LAST "
-        "LIMIT $1 OFFSET $2"
-    )
-
-    async with pool.acquire() as conn:
-        total_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM tracked_wallets WHERE (COALESCE(balance, 0) + COALESCE(position_value, 0)) < 1000 "
-            "AND (last_trade_at >= NOW() - INTERVAL '30 days' OR last_trade_at IS NULL) "
-            "AND status != 'HIBERNATING'"
-        )
-        rows = await conn.fetch(query, limit, offset)
-
-    return {"wallets": [dict(r) for r in rows], "total_count": total_count}
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +519,7 @@ async def get_global_wallet_list(
     cat_upper = (category or "").upper().strip()
     use_category = cat_upper and cat_upper in VALID_CATEGORIES and cat_upper != "OVERALL"
 
-    # Global list is strictly Supabase data now
+    # Global list
     if use_category:
         order_col = {
             "total_pnl": "COALESCE(wcs.total_pnl, 0)",
@@ -832,21 +704,24 @@ async def get_curated_wallet_list(
                 "COALESCE(wcs.resolved_count, 0) as resolved_count, "
                 "COALESCE(wcs.winning_count, 0) as winning_count, "
                 "COALESCE(ws.avg_buy_price, 0) as avg_buy_price, "
-                "COALESCE(ws.buys_below_10c, 0) as buys_below_10c, "
-                "COALESCE(ws.buys_below_20c, 0) as buys_below_20c, "
-                "COALESCE(ws.buys_below_30c, 0) as buys_below_30c, "
-                "COALESCE(ws.buys_below_40c, 0) as buys_below_40c, "
-                "COALESCE(ws.buys_above_70c, 0) as buys_above_70c, "
-                "COALESCE(ws.wins_below_10c, 0) as wins_below_10c, "
-                "COALESCE(ws.wins_below_20c, 0) as wins_below_20c, "
-                "COALESCE(ws.wins_below_30c, 0) as wins_below_30c, "
-                "COALESCE(ws.wins_below_40c, 0) as wins_below_40c, "
-                "COALESCE(ws.wins_above_70c, 0) as wins_above_70c, "
-                "COALESCE(ws.losses_below_10c, 0) as losses_below_10c, "
-                "COALESCE(ws.losses_below_20c, 0) as losses_below_20c, "
-                "COALESCE(ws.losses_below_30c, 0) as losses_below_30c, "
-                "COALESCE(ws.losses_below_40c, 0) as losses_below_40c, "
-                "COALESCE(ws.losses_above_70c, 0) as losses_above_70c, "
+                "COALESCE(ws.buys_below_15c, 0) as buys_below_15c, "
+                "COALESCE(ws.buys_15_30c, 0) as buys_15_30c, "
+                "COALESCE(ws.buys_30_45c, 0) as buys_30_45c, "
+                "COALESCE(ws.buys_45_60c, 0) as buys_45_60c, "
+                "COALESCE(ws.buys_60_75c, 0) as buys_60_75c, "
+                "COALESCE(ws.buys_above_75c, 0) as buys_above_75c, "
+                "COALESCE(ws.wins_below_15c, 0) as wins_below_15c, "
+                "COALESCE(ws.wins_15_30c, 0) as wins_15_30c, "
+                "COALESCE(ws.wins_30_45c, 0) as wins_30_45c, "
+                "COALESCE(ws.wins_45_60c, 0) as wins_45_60c, "
+                "COALESCE(ws.wins_60_75c, 0) as wins_60_75c, "
+                "COALESCE(ws.wins_above_75c, 0) as wins_above_75c, "
+                "COALESCE(ws.losses_below_15c, 0) as losses_below_15c, "
+                "COALESCE(ws.losses_15_30c, 0) as losses_15_30c, "
+                "COALESCE(ws.losses_30_45c, 0) as losses_30_45c, "
+                "COALESCE(ws.losses_45_60c, 0) as losses_45_60c, "
+                "COALESCE(ws.losses_60_75c, 0) as losses_60_75c, "
+                "COALESCE(ws.losses_above_75c, 0) as losses_above_75c, "
             )
         query = (
             "SELECT tw.address, tw.username, tw.source_type, tw.is_dormant, "
@@ -899,21 +774,24 @@ async def get_curated_wallet_list(
                 "COALESCE(ws.resolved_count, 0) as resolved_count, "
                 "COALESCE(ws.winning_count, 0) as winning_count, "
                 "COALESCE(ws.avg_buy_price, 0) as avg_buy_price, "
-                "COALESCE(ws.buys_below_10c, 0) as buys_below_10c, "
-                "COALESCE(ws.buys_below_20c, 0) as buys_below_20c, "
-                "COALESCE(ws.buys_below_30c, 0) as buys_below_30c, "
-                "COALESCE(ws.buys_below_40c, 0) as buys_below_40c, "
-                "COALESCE(ws.buys_above_70c, 0) as buys_above_70c, "
-                "COALESCE(ws.wins_below_10c, 0) as wins_below_10c, "
-                "COALESCE(ws.wins_below_20c, 0) as wins_below_20c, "
-                "COALESCE(ws.wins_below_30c, 0) as wins_below_30c, "
-                "COALESCE(ws.wins_below_40c, 0) as wins_below_40c, "
-                "COALESCE(ws.wins_above_70c, 0) as wins_above_70c, "
-                "COALESCE(ws.losses_below_10c, 0) as losses_below_10c, "
-                "COALESCE(ws.losses_below_20c, 0) as losses_below_20c, "
-                "COALESCE(ws.losses_below_30c, 0) as losses_below_30c, "
-                "COALESCE(ws.losses_below_40c, 0) as losses_below_40c, "
-                "COALESCE(ws.losses_above_70c, 0) as losses_above_70c, "
+                "COALESCE(ws.buys_below_15c, 0) as buys_below_15c, "
+                "COALESCE(ws.buys_15_30c, 0) as buys_15_30c, "
+                "COALESCE(ws.buys_30_45c, 0) as buys_30_45c, "
+                "COALESCE(ws.buys_45_60c, 0) as buys_45_60c, "
+                "COALESCE(ws.buys_60_75c, 0) as buys_60_75c, "
+                "COALESCE(ws.buys_above_75c, 0) as buys_above_75c, "
+                "COALESCE(ws.wins_below_15c, 0) as wins_below_15c, "
+                "COALESCE(ws.wins_15_30c, 0) as wins_15_30c, "
+                "COALESCE(ws.wins_30_45c, 0) as wins_30_45c, "
+                "COALESCE(ws.wins_45_60c, 0) as wins_45_60c, "
+                "COALESCE(ws.wins_60_75c, 0) as wins_60_75c, "
+                "COALESCE(ws.wins_above_75c, 0) as wins_above_75c, "
+                "COALESCE(ws.losses_below_15c, 0) as losses_below_15c, "
+                "COALESCE(ws.losses_15_30c, 0) as losses_15_30c, "
+                "COALESCE(ws.losses_30_45c, 0) as losses_30_45c, "
+                "COALESCE(ws.losses_45_60c, 0) as losses_45_60c, "
+                "COALESCE(ws.losses_60_75c, 0) as losses_60_75c, "
+                "COALESCE(ws.losses_above_75c, 0) as losses_above_75c, "
             )
         query = (
             "SELECT tw.address, tw.username, tw.source_type, tw.is_dormant, "

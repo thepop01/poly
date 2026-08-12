@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
 
-WHALE_TRADE_THRESHOLD = 1_000
+WHALE_TRADE_THRESHOLD = 100
 LARGE_TRADE_THRESHOLD = 5_000
 POLL_INTERVAL = 15
 

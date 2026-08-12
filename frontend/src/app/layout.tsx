@@ -25,7 +25,7 @@ const firaCode = Fira_Code({
 
 export const metadata: Metadata = {
   title: "PolyTracker Analytics",
-  description: "Polymarket analytics platform — alpha calls, wallet tracking, leaderboard, and research.",
+  description: "Polymarket analytics platform — feed, wallet tracking, leaderboard, and research.",
 };
 
 export default function RootLayout({

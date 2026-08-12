@@ -97,3 +97,50 @@ async def toggle_watchlist_alerts(request: Request, address: str, enabled: bool,
             raise HTTPException(status_code=404, detail="Wallet not found in user watchlist")
             
     return {"status": "success", "address": address, "alerts_enabled": row["alerts_enabled"]}
+
+
+@router.get("/status")
+async def get_watchlist_status(request: Request, addresses: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Check which addresses from a comma-separated list are in the user's watchlist."""
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    user_id = user["sub"]
+    addr_list = [a.strip().lower() for a in addresses.split(",") if a.strip()]
+    if not addr_list:
+        return {"liked": []}
+
+    query = """
+    SELECT wallet_address FROM user_watchlists
+    WHERE user_id = $1::uuid AND LOWER(wallet_address) = ANY($2::text[])
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, user_id, addr_list)
+
+    return {"liked": [r["wallet_address"] for r in rows]}
+
+
+@router.get("/counts")
+async def get_watchlist_counts(request: Request, addresses: str) -> dict[str, Any]:
+    """Get the favorite count for a list of addresses."""
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    addr_list = [a.strip().lower() for a in addresses.split(",") if a.strip()]
+    if not addr_list:
+        return {"counts": {}}
+
+    query = """
+    SELECT LOWER(wallet_address) as wallet_address, COUNT(*)::int as count
+    FROM user_watchlists
+    WHERE LOWER(wallet_address) = ANY($1::text[])
+    GROUP BY LOWER(wallet_address)
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, addr_list)
+
+    counts = {r["wallet_address"]: r["count"] for r in rows}
+    return {"counts": counts}
+

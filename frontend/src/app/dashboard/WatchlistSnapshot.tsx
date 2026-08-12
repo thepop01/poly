@@ -25,7 +25,7 @@ export function WatchlistSnapshot({ wallets }: { wallets: WatchlistEntry[] }) {
         <EmptyState
           icon={<Wallet size={22} />}
           title="No wallets on your watchlist yet"
-          hint="Add wallets from the Curated or Wallets pages to see them here."
+          hint="Add wallets from the Wallets page to see them here."
         />
       ) : (
         <div className="divide-y divide-border">

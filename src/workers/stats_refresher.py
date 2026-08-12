@@ -8,8 +8,7 @@ from datetime import datetime, timezone, timedelta
 
 from src.workers.wallet_trade_history import fetch_positions, _parse
 from src.utils.alchemy_client import (
-    fetch_usdc_deposits,
-    fetch_usdc_withdrawals,
+    fetch_capital_metrics,
     alchemy_get_token_balances,
     PUSD_CONTRACT,
 )
@@ -20,16 +19,18 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@lo
 REFRESH_STALE_AFTER_HOURS = 12
 # Sized so a full lap over all active wallets (~9-12k) completes well inside
 # the 12h staleness window: 1000/batch at concurrency 8 ≈ 2k+ wallets/hour.
-# Rate-limit safety lives in the Alchemy client (global 6-permit semaphore +
-# 429 backoff), not here — worker concurrency can't stampede it.
+# Hibernated wallets are NOT refreshed proactively: trade_tracker catches any
+# new trade in real-time → dormancy sweep auto-wakes the wallet → it then
+# falls back into the normal 12h active refresh queue.
 BATCH_SIZE = 1000
 WALLET_CONCURRENCY = 8
 POLL_INTERVAL = 300  # run every 5 minutes
 
 CURATED_MIN_ROI = 30.0
 CURATED_MIN_PNL = 10_000.0
+CURATED_MIN_WIN_RATE = 70.0
 
-async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
+async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float | None:
     try:
         b = await alchemy_get_token_balances(session, address, [PUSD_CONTRACT])
         if b and b.get("tokenBalances"):
@@ -42,52 +43,51 @@ async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
 
 async def sweep_curated_tiers(conn: asyncpg.Connection):
     """Promote qualifying active STANDARD wallets to CURATED; demote curated
-    wallets (except source='custom') that no longer qualify. Dormancy does NOT
-    demote — the curated list query already filters is_dormant=FALSE.
+    wallets (except source='custom') that no longer qualify.
 
-    Qualification is ROI/PnL only: (roi_pct > MIN_ROI OR total_pnl > MIN_PNL).
-    The resolved_count sample-size gate was removed because it depended on
-    Supabase, which is no longer fetched."""
+    Qualification Rule (spec 2026-08-10):
+    PnL > $10,000 AND (ROI > 30% OR Win Rate > 70%)
+    """
     # PROMOTE: active STANDARD wallets meeting the threshold rule.
     await conn.execute(
         """
         UPDATE wallets_v2 w
         SET tier = 'CURATED',
-            tier_reason = 'auto: roi/pnl threshold',
+            tier_reason = 'auto: pnl>10k AND (roi>30% OR win_rate>70%)',
             curated_at = NOW(),
             updated_at = NOW()
         FROM wallet_metrics_v2 m
         WHERE m.address = w.address
           AND w.tier = 'STANDARD'
           AND w.is_dormant = FALSE
-          AND (COALESCE(m.roi_pct, 0) > $1 OR COALESCE(m.total_pnl, 0) > $2)
-        """,
-        CURATED_MIN_ROI, CURATED_MIN_PNL,
+          AND COALESCE(m.total_pnl, 0) > 10000
+          AND (COALESCE(m.roi_pct, 0) > 30 OR COALESCE(m.win_rate, 0) > 70)
+        """
     )
 
-    # DEMOTE: curated, non-custom wallets that fail the rule → canonical tier.
+    # DEMOTE: curated wallets that no longer meet either condition -> demote tag.
     await conn.execute(
         """
         UPDATE wallets_v2 w
         SET tier = CASE
-                WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) <= 0 THEN
-                    CASE WHEN w.last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
                 WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) < 1000 THEN 'LOW_BALANCE'
                 WHEN w.last_trade_at IS NULL THEN 'NEW'
                 ELSE 'STANDARD'
             END,
-            tier_reason = 'auto: demoted below curated threshold',
+            is_dormant = CASE
+                WHEN w.last_trade_at IS NULL OR w.last_trade_at < NOW() - INTERVAL '30 days' THEN TRUE
+                ELSE FALSE
+            END,
+            tier_reason = 'auto: fails pnl>10k AND (roi>30% OR win_rate>70%)',
             updated_at = NOW()
         FROM wallet_metrics_v2 m
         WHERE m.address = w.address
           AND w.tier = 'CURATED'
-          AND NOT EXISTS (
-              SELECT 1 FROM wallet_sources_v2 s
-              WHERE s.address = w.address AND s.source = 'custom'
+          AND (
+              COALESCE(m.total_pnl, 0) <= 10000
+              OR (COALESCE(m.roi_pct, 0) <= 30 AND COALESCE(m.win_rate, 0) <= 70)
           )
-          AND COALESCE(m.roi_pct, 0) <= $1 AND COALESCE(m.total_pnl, 0) <= $2
-        """,
-        CURATED_MIN_ROI, CURATED_MIN_PNL,
+        """
     )
 
 async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSession):
@@ -96,50 +96,70 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
     async with pool.acquire() as conn:
         # Auto-hibernate wallets that haven't traded in 30 days
         hibernate_cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        
+        # 1. Demote dormant CURATED wallets to PREVIOUSLY_CURATED and set is_dormant = TRUE
         await conn.execute("""
             UPDATE wallets_v2
-            SET is_dormant = TRUE
-            WHERE is_dormant = FALSE AND last_trade_at < $1
+            SET tier = 'PREVIOUSLY_CURATED', is_dormant = TRUE, updated_at = NOW()
+            WHERE tier = 'CURATED' AND is_dormant = FALSE AND last_trade_at < $1
         """, hibernate_cutoff)
 
-        # Reverse: wake wallets that traded again (or whose fake last_trade_at
-        # was nulled — never-traded is NEW, not dormant)
+        # 2. Hibernate dormant STANDARD / LOW_BALANCE / NEW wallets
         await conn.execute("""
             UPDATE wallets_v2
-            SET is_dormant = FALSE
-            WHERE is_dormant = TRUE
-              AND (last_trade_at IS NULL OR last_trade_at >= $1)
+            SET is_dormant = TRUE, updated_at = NOW()
+            WHERE tier IN ('STANDARD', 'LOW_BALANCE', 'NEW') AND is_dormant = FALSE AND (last_trade_at IS NULL OR last_trade_at < $1)
+        """, hibernate_cutoff)
+
+        # 3. Wake up PREVIOUSLY_CURATED wallets when they trade again -> promote directly to CURATED
+        await conn.execute("""
+            UPDATE wallets_v2
+            SET tier = 'CURATED', is_dormant = FALSE, updated_at = NOW()
+            WHERE tier = 'PREVIOUSLY_CURATED'
+              AND last_trade_at >= $1
+        """, hibernate_cutoff)
+
+        # 4. Wake up STANDARD / LOW_BALANCE / NEW wallets when they trade again
+        await conn.execute("""
+            UPDATE wallets_v2
+            SET is_dormant = FALSE, updated_at = NOW()
+            WHERE is_dormant = TRUE AND tier != 'PREVIOUSLY_CURATED'
+              AND last_trade_at >= $1
         """, hibernate_cutoff)
 
         # Sweep tiers to the canonical model for every wallet with metrics.
-        # CURATED is never auto-demoted; UNCLASSIFIED rows are the vetting
-        # queue owned by wallet_trade_history — don't dequeue them here.
-        # Model: balance decides the bucket first; NEW = funded ($1k+) but
-        # zero trades ever. Discovery date (added_at) is NOT a signal.
+        # CURATED and PREVIOUSLY_CURATED are never auto-demoted to STANDARD/LOW_BALANCE.
         await conn.execute("""
             UPDATE wallets_v2 w
-            SET tier = sub.new_tier, tier_reason = 'stats_refresher reclassify', updated_at = NOW()
+            SET tier = sub.new_tier,
+                is_dormant = sub.new_is_dormant,
+                tier_reason = 'stats_refresher reclassify',
+                updated_at = NOW()
             FROM (
                 SELECT w2.address,
                     CASE
-                        WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) <= 0 THEN
-                            CASE WHEN w2.last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
                         WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) < 1000 THEN 'LOW_BALANCE'
                         WHEN w2.last_trade_at IS NULL THEN 'NEW'
                         ELSE 'STANDARD'
-                    END AS new_tier
+                    END AS new_tier,
+                    CASE
+                        WHEN w2.last_trade_at IS NULL OR w2.last_trade_at < NOW() - INTERVAL '30 days' THEN TRUE
+                        ELSE FALSE
+                    END AS new_is_dormant
                 FROM wallets_v2 w2
-                JOIN wallet_metrics_v2 m ON m.address = w2.address
-                WHERE w2.tier NOT IN ('CURATED', 'UNCLASSIFIED')
+                LEFT JOIN wallet_metrics_v2 m ON w2.address = m.address
+                WHERE w2.tier NOT IN ('CURATED', 'PREVIOUSLY_CURATED')
             ) sub
-            WHERE sub.address = w.address AND sub.new_tier != w.tier
+            WHERE w.address = sub.address AND (w.tier IS DISTINCT FROM sub.new_tier OR w.is_dormant IS DISTINCT FROM sub.new_is_dormant)
         """)
 
         # Promote/demote the curated tier on fresh metrics (spec 2026-07-20).
         await sweep_curated_tiers(conn)
 
-        # Fetch active wallets to refresh
-        # We prioritize wallets that have never been computed, then stale ones.
+        # Fetch only active wallets stale past the 12-hour window.
+        # Hibernated wallets are NOT refreshed proactively — when they trade,
+        # trade_tracker updates last_trade_at, the dormancy sweep wakes them up
+        # (is_dormant = FALSE), and they re-enter this queue automatically.
         rows = await conn.fetch(
             """
             SELECT w.address
@@ -167,11 +187,25 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
         nonlocal refreshed, errors
         async with sem:
             try:
-                deposits = await fetch_usdc_deposits(session, address)
-                withdrawals = await fetch_usdc_withdrawals(session, address)
+                async with pool.acquire() as rconn:
+                    crow = await rconn.fetchrow(
+                        "SELECT deposits, withdrawals, net_capital, peak_capital, last_capital_block FROM wallet_metrics_v2 WHERE address = $1", address
+                    )
+
+                cur_dep = float(crow["deposits"]) if crow and crow["deposits"] is not None else 0.0
+                cur_wdw = float(crow["withdrawals"]) if crow and crow["withdrawals"] is not None else 0.0
+                cur_net = float(crow["net_capital"]) if crow and crow["net_capital"] is not None else 0.0
+                cur_peak = float(crow["peak_capital"]) if crow and crow["peak_capital"] is not None else 0.0
+                last_block = int(crow["last_capital_block"]) if crow and crow["last_capital_block"] is not None else 0
+                from_block = last_block + 1 if last_block > 0 else 0
+
+                deposits, withdrawals, peak_capital, net_capital, max_block = await fetch_capital_metrics(
+                    session, address, from_block=from_block, current_deposits=cur_dep, current_withdrawals=cur_wdw, current_net_capital=cur_net, current_peak_capital=cur_peak
+                )
 
                 positions = await fetch_positions(session, address)
                 balance = await fetch_balance(session, address)
+                next_last_block = max(last_block, max_block or 0)
 
                 # Compute position_value from open positions
                 position_value = 0.0
@@ -183,41 +217,39 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
                 async with pool.acquire() as wconn:
                     # Upsert into wallet_metrics_v2
                     await wconn.execute("""
-                        INSERT INTO wallet_metrics_v2 (address, balance, deposits, withdrawals, position_value, computed_at)
-                        VALUES ($1, $2, $3, $4, $5, NOW())
+                        INSERT INTO wallet_metrics_v2 (address, balance, deposits, withdrawals, net_capital, peak_capital, position_value, last_capital_block, computed_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
                         ON CONFLICT (address) DO UPDATE SET
                             balance = EXCLUDED.balance,
                             deposits = COALESCE(EXCLUDED.deposits, wallet_metrics_v2.deposits),
                             withdrawals = COALESCE(EXCLUDED.withdrawals, wallet_metrics_v2.withdrawals),
+                            net_capital = COALESCE(EXCLUDED.net_capital, wallet_metrics_v2.net_capital),
+                            peak_capital = COALESCE(EXCLUDED.peak_capital, wallet_metrics_v2.peak_capital),
                             position_value = EXCLUDED.position_value,
+                            last_capital_block = EXCLUDED.last_capital_block,
                             computed_at = NOW()
-                    """, address, balance, deposits, withdrawals, position_value)
+                    """, address, balance, deposits, withdrawals, net_capital, peak_capital, position_value, next_last_block)
 
-                    # Reclassify on fresh numbers (canonical model: DEAD /
+                    # Reclassify on fresh numbers (canonical model:
                     # LOW_BALANCE / NEW / STANDARD; CURATED never auto-demoted,
-                    # UNCLASSIFIED stays queued for vetting). NEW = funded ($1k+)
-                    # with zero trades ever; discovery date is not a signal.
+                    # UNCLASSIFIED stays queued for vetting).
+                    tot_cap = (balance or 0.0) + position_value
                     await wconn.execute("""
                         UPDATE wallets_v2
                         SET tier = CASE
-                                WHEN $2 <= 0 THEN
-                                    CASE WHEN last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
                                 WHEN $2 < 1000 THEN 'LOW_BALANCE'
                                 WHEN last_trade_at IS NULL THEN 'NEW'
                                 ELSE 'STANDARD'
+                            END,
+                            is_dormant = CASE
+                                WHEN last_trade_at IS NULL OR last_trade_at < NOW() - INTERVAL '30 days' THEN TRUE
+                                ELSE FALSE
                             END,
                             tier_reason = 'stats_refresher reclassify',
                             updated_at = NOW()
                         WHERE address = $1
                           AND tier NOT IN ('CURATED', 'UNCLASSIFIED')
-                          AND tier != CASE
-                                WHEN $2 <= 0 THEN
-                                    CASE WHEN last_trade_at IS NULL THEN 'DEAD' ELSE 'LOW_BALANCE' END
-                                WHEN $2 < 1000 THEN 'LOW_BALANCE'
-                                WHEN last_trade_at IS NULL THEN 'NEW'
-                                ELSE 'STANDARD'
-                            END
-                    """, address, balance + position_value)
+                    """, address, tot_cap)
 
                 refreshed += 1
             except Exception as e:

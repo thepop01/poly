@@ -8,9 +8,7 @@ import { useTradeNotifications } from "@/hooks/useTradeNotifications";
 
 const PAGE_TITLES: { prefix: string; title: string; description: string }[] = [
   { prefix: "/dashboard", title: "Dashboard", description: "Your workspace — watchlist, agents, and the live feed" },
-  { prefix: "/alpha-calls", title: "Alpha Calls", description: "Live feed of large trades and deposits caught by the scanners" },
-  { prefix: "/wallets/curated", title: "Curated Wallets", description: "Curated and global wallets ranked by performance" },
-  { prefix: "/wallets/custom", title: "Custom Wallets", description: "Wallets you added by hand" },
+  { prefix: "/feed", title: "Feed", description: "Live feed of large trades and deposits caught by the scanners" },
   { prefix: "/wallets", title: "Wallets", description: "Every tracked wallet, ranked by performance" },
   { prefix: "/tracker", title: "My Tracker", description: "Your personal wallet lists" },
   { prefix: "/agents", title: "Agents", description: "Conditional rules that monitor the market for you" },

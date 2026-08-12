@@ -54,7 +54,7 @@ async def test_promotes_on_pnl_alone(conn):
 
 @pytest.mark.asyncio
 async def test_promotes_regardless_of_resolved_count(conn):
-    # Resolved-count gate was removed (Supabase retired). A qualifying wallet
+    # Resolved-count gate was removed. A qualifying wallet
     # promotes on ROI/PnL alone, even with a tiny resolved_count.
     addr = "0x" + "a3" * 20
     await _seed(conn, addr, "STANDARD", roi=99.0, pnl=99_000.0, resolved=3, dormant=False)

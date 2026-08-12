@@ -7,9 +7,15 @@ import { formatCurrency } from "@/utils/format";
 import Link from "next/link";
 import { ArrowLeft, ExternalLink, Copy, Check } from "lucide-react";
 
+import { useFavoriteToggle } from "@/hooks/useFavoriteToggle";
+import { LikeButton } from "@/components/ui/LikeButton";
+import { getWatchlistCounts } from "@/utils/api";
+
 export default function WalletPage() {
   const params = useParams();
   const address = params?.address as string;
+  const { isLiked, toggleLike } = useFavoriteToggle(address ? [address] : []);
+  const [favoriteCount, setFavoriteCount] = useState<number>(0);
   const [stats, setStats] = useState<any>(null);
   const [trades, setTrades] = useState<any[]>([]);
   const [positions, setPositions] = useState<any[]>([]);
@@ -17,6 +23,21 @@ export default function WalletPage() {
   const [activeTab, setActiveTab] = useState<"positions" | "trades" | "closed">("positions");
   const [closedPositions, setClosedPositions] = useState<any[]>([]);
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!address) return;
+    getWatchlistCounts([address]).then((res) => {
+      if (res?.counts && res.counts[address.toLowerCase()] != null) {
+        setFavoriteCount(res.counts[address.toLowerCase()]);
+      }
+    }).catch(() => {});
+  }, [address]);
+
+  const handleToggle = (e: React.MouseEvent) => {
+    const currentlyLiked = isLiked(address);
+    setFavoriteCount((prev) => (currentlyLiked ? Math.max(0, prev - 1) : prev + 1));
+    toggleLike(address, e);
+  };
 
   useEffect(() => {
     if (!address) return;
@@ -70,6 +91,12 @@ export default function WalletPage() {
           <a href={`https://polygonscan.com/address/${address}`} target="_blank" rel="noreferrer" className="text-[10px] text-[#0EA5E9] hover:underline ml-2">
             POLYGONSCAN <ExternalLink size={10} className="inline" />
           </a>
+          <LikeButton
+            isLiked={isLiked(address)}
+            onToggle={handleToggle}
+            favoriteCount={favoriteCount}
+            size={18}
+          />
         </h1>
       </div>
 

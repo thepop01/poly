@@ -50,6 +50,18 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       const storedToken = localStorage.getItem("poly_auth_token");
       if (storedToken) {
         setToken(storedToken);
+      } else {
+        // Auto-provision a guest token so guest users can like/track seamlessly
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+        fetch(`${apiUrl}/api/auth/guest`, { method: "POST" })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data?.access_token) {
+              setToken(data.access_token);
+              localStorage.setItem("poly_auth_token", data.access_token);
+            }
+          })
+          .catch(() => {});
       }
     }
   }, [searchParams]);

@@ -90,6 +90,29 @@ async def delete_tracker_list(request: Request, list_id: int, user: dict = Depen
     return {"ok": True}
 
 
+@router.patch("/lists/{list_id}")
+async def rename_tracker_list(request: Request, list_id: int, name: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    user_id = user["sub"]
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE tracker_lists
+               SET name = $3
+               WHERE id = $1 AND user_id = $2
+               RETURNING id, name, created_at""",
+            list_id, user_id, name,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="List not found")
+
+    return {"list": dict(row)}
+
+
+
 @router.get("/lists/{list_id}/wallets")
 async def get_tracker_list_wallets(request: Request, list_id: int, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     pool = getattr(request.app.state, "pool", None)

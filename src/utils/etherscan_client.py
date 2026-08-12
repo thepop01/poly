@@ -152,16 +152,33 @@ async def _fetch_market_meta(session: aiohttp.ClientSession, token_id_decimal: s
 
 
 async def get_latest_block_etherscan(session: aiohttp.ClientSession) -> str:
+    # 1. Try Alchemy RPC (fast, reliable, rotated keys)
+    from src.utils.alchemy_client import get_next_key, POLYGON_BASE
+    try:
+        key = get_next_key()
+        url = f"{POLYGON_BASE}/{key}"
+        payload = {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                res = data.get("result")
+                if res and isinstance(res, str) and res.startswith("0x"):
+                    return str(int(res, 16))
+    except Exception as e:
+        logger.debug(f"Alchemy RPC block fetch failed, falling back to Polygonscan: {e}")
+
+    # 2. Fallback to Polygonscan API with safe string check
     url = f"https://api.etherscan.io/v2/api?chainid=137&module=proxy&action=eth_blockNumber&apikey={_get_next_polygonscan_key()}"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                if data.get("result"):
-                    return str(int(data["result"], 16))
+                res = data.get("result")
+                if res and isinstance(res, str) and res.startswith("0x"):
+                    return str(int(res, 16))
     except Exception as e:
         logger.warning(f"Failed to fetch latest block: {e}")
-    return "89410000"
+    return "91719000"
 
 
 async def _fetch_exchange_logs(session: aiohttp.ClientSession, contract: str, from_block: int, to_block: int) -> list[dict]:
@@ -439,7 +456,8 @@ def _parse_redemption_log(log: dict, topic0: str) -> dict | None:
             "condition_id": condition_id,
             "payout": payout_usdc,
             "timestamp": ts,
-            "transactionHash": tx_hash,
+            "tx_hash": tx_hash,          # normalised key used everywhere
+            "transactionHash": tx_hash,  # kept for backward-compat
         }
     except Exception as e:
         logger.warning(f"Error parsing redemption log: {e}")
@@ -495,12 +513,19 @@ async def fetch_recent_redemptions_etherscan(session: aiohttp.ClientSession, fro
     return all_logs
 
 
-async def fetch_historical_redemptions_polygonscan(session: aiohttp.ClientSession, addresses: list[str]) -> list[dict]:
+async def fetch_wallet_redemptions_etherscan(session: aiohttp.ClientSession, addresses: list[str], conn=None) -> list[dict]:
     """
-    Fetch all PayoutRedemption logs for the given wallet(s) from both the base CTF contract
-    and the Neg Risk Adapter (elections/multi-outcome markets redeem through the latter).
-    Bypasses the 5000-record limit of the Polymarket REST API's /closed-positions endpoint.
-    Returns a list of dicts with `condition_id`, `payout`, `timestamp`, `tx_hash`.
+    Fetch PayoutRedemption logs for the given wallet(s) from both the CTF contract
+    and the Neg Risk Adapter.
+
+    Incremental mode (conn provided):
+      - Loads all previously cached redemptions from wallet_redemptions_cache.
+      - For each (wallet, contract) pair, reads the last fetched blockNumber from
+        redemption_sync and only fetches blocks AFTER that cursor.
+      - Stores new logs into wallet_redemptions_cache and advances the cursor.
+      - On subsequent runs for already-synced wallets, fetches near-zero pages.
+
+    Full mode (conn=None): fetches everything from block 0 (original behaviour).
     """
     all_redemptions = []
 
@@ -508,11 +533,37 @@ async def fetch_historical_redemptions_polygonscan(session: aiohttp.ClientSessio
         address = address.lower()
         wallet_padded = "0x000000000000000000000000" + address[2:]
 
+        # Load cached redemptions from DB for this wallet
+        if conn is not None:
+            cached = await conn.fetch(
+                "SELECT condition_id, payout, timestamp, tx_hash, block_number, contract "
+                "FROM wallet_redemptions_cache WHERE address = $1",
+                address,
+            )
+            for row in cached:
+                all_redemptions.append({
+                    "condition_id": row["condition_id"],
+                    "payout": row["payout"],
+                    "timestamp": row["timestamp"],
+                    "tx_hash": row["tx_hash"],
+                })
+
         for contract, topic0 in REDEMPTION_SOURCES:
+            # Determine starting block from cursor
             from_block = 0
+            if conn is not None:
+                cursor_row = await conn.fetchrow(
+                    "SELECT last_block FROM redemption_sync WHERE address = $1 AND contract = $2",
+                    address, contract,
+                )
+                if cursor_row:
+                    from_block = cursor_row["last_block"] + 1
+
             to_block = 999999999
             retries = 0
             max_retries = 5
+            new_logs: list[dict] = []
+            max_block_seen = from_block - 1
 
             while True:
                 url = (
@@ -527,7 +578,7 @@ async def fetch_historical_redemptions_polygonscan(session: aiohttp.ClientSessio
                     f"&page=1&offset=1000"
                 )
                 try:
-                    async with session.get(url, timeout=60.0) as r:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=60.0)) as r:
                         data = await r.json()
 
                         if data.get("status") == "0" and data.get("message") == "NOTOK":
@@ -540,6 +591,12 @@ async def fetch_historical_redemptions_polygonscan(session: aiohttp.ClientSessio
                             for log in logs:
                                 parsed = _parse_redemption_log(log, topic0)
                                 if parsed:
+                                    b_num = log.get("blockNumber", "0")
+                                    block_int = int(b_num, 16) if isinstance(b_num, str) and b_num.startswith("0x") else int(b_num)
+                                    parsed["block_number"] = block_int
+                                    parsed["contract"] = contract
+                                    max_block_seen = max(max_block_seen, block_int)
+                                    new_logs.append(parsed)
                                     all_redemptions.append(parsed)
 
                             if len(logs) == 1000:
@@ -568,8 +625,34 @@ async def fetch_historical_redemptions_polygonscan(session: aiohttp.ClientSessio
                     logger.warning(f"Unexpected error on redemptions for {address}: {e}. Retrying in 2s...")
                     await asyncio.sleep(2.0)
 
+            # Persist new logs and advance cursor
+            if conn is not None and new_logs:
+                cache_rows = [
+                    (address, contract, lg["condition_id"], lg.get("payout"), lg.get("timestamp"), lg.get("tx_hash"), lg.get("block_number"))
+                    for lg in new_logs if lg.get("condition_id") and lg.get("tx_hash")
+                ]
+                if cache_rows:
+                    await conn.executemany("""
+                        INSERT INTO wallet_redemptions_cache
+                            (address, contract, condition_id, payout, timestamp, tx_hash, block_number, fetched_at)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+                        ON CONFLICT (address, contract, tx_hash) DO NOTHING
+                    """, cache_rows)
+
+            if conn is not None and max_block_seen >= 0:
+                await conn.execute("""
+                    INSERT INTO redemption_sync (address, contract, last_block, updated_at)
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (address, contract) DO UPDATE SET
+                        last_block = GREATEST(redemption_sync.last_block, EXCLUDED.last_block),
+                        updated_at = NOW()
+                """, address, contract, max(max_block_seen, 0))
+
     all_redemptions.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
     return all_redemptions
+
+
+
 
 
 def build_synthetic_closed_positions(trades: list[dict], redemptions: list[dict]) -> list[dict]:

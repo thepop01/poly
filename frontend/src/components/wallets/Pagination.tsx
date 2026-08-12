@@ -7,14 +7,17 @@ export function Pagination({
   totalPages,
   totalCount,
   onPageChange,
+  onChange,
   unitLabel = "wallets",
 }: {
   page: number;
   totalPages: number;
-  totalCount: number;
-  onPageChange: (page: number) => void;
+  totalCount?: number;
+  onPageChange?: (page: number) => void;
+  onChange?: (page: number) => void;
   unitLabel?: string;
 }) {
+  const handlePageChange = onPageChange || onChange || (() => {});
   const [pageInput, setPageInput] = useState(page.toString());
 
   useEffect(() => {
@@ -24,7 +27,7 @@ export function Pagination({
   const commitInput = () => {
     const val = parseInt(pageInput);
     if (!isNaN(val) && val >= 1 && val <= totalPages) {
-      onPageChange(val);
+      handlePageChange(val);
     } else {
       setPageInput(page.toString());
     }
@@ -33,7 +36,7 @@ export function Pagination({
   return (
     <div className="flex items-center justify-between px-4 py-2.5 border-t border-border flex-shrink-0 bg-surface">
       <span className="text-xs text-muted-fg">
-        Page {page} of {totalPages} · {totalCount.toLocaleString()} {unitLabel}
+        Page {page} of {totalPages} {totalCount != null ? `· ${totalCount.toLocaleString()} ${unitLabel}` : ""}
       </span>
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
@@ -53,14 +56,14 @@ export function Pagination({
         </div>
         <div className="flex gap-2">
           <button
-            onClick={() => onPageChange(Math.max(1, page - 1))}
+            onClick={() => handlePageChange(Math.max(1, page - 1))}
             disabled={page === 1}
             className="px-3 py-1 text-xs rounded border border-border hover:bg-surface-2 disabled:opacity-40 transition-colors"
           >
             Prev
           </button>
           <button
-            onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+            onClick={() => handlePageChange(Math.min(totalPages, page + 1))}
             disabled={page >= totalPages}
             className="px-3 py-1 text-xs rounded border border-border hover:bg-surface-2 disabled:opacity-40 transition-colors"
           >

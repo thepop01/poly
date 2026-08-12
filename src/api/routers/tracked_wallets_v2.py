@@ -51,7 +51,7 @@ async def get_tracked_wallets(
     sort_col = allowed_sorts.get(sort_by, "m.total_pnl")
     order_dir = "ASC" if sort_order.lower() == "asc" else "DESC"
 
-    conditions = ["w.tier != 'DEAD'"]
+    conditions = ["w.tier != 'UNCLASSIFIED'"]
     args: list[Any] = []
 
     if source:

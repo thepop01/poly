@@ -9,6 +9,9 @@ import { StatCard, StatCardRow } from "@/components/ui/StatCard";
 import { PillTabs } from "@/components/ui/PillTabs";
 import { WatchlistSnapshot, WatchlistEntry } from "./WatchlistSnapshot";
 import { AlphaCallsSnapshot, AlphaSnapshotItem } from "./AlphaCallsSnapshot";
+import { AddWalletsPanel } from "./AddWalletsPanel";
+import { TrackedWalletsTab } from "@/components/dashboard/TrackedWalletsTab";
+import { WalletAlertsCard } from "@/components/dashboard/WalletAlertsCard";
 
 type TabKey = "overview" | "watchlist" | "agents";
 
@@ -139,17 +142,20 @@ export default function DashboardPage() {
           </StatCardRow>
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <div className="lg:col-span-7">
-              <WatchlistSnapshot wallets={watchlist.slice(0, 6)} />
-            </div>
-            <div className="lg:col-span-5">
+            <div className="lg:col-span-4">
               <AlphaCallsSnapshot items={feed} />
+            </div>
+            <div className="lg:col-span-4">
+              <WalletAlertsCard />
+            </div>
+            <div className="lg:col-span-4">
+              <AddWalletsPanel />
             </div>
           </div>
         </>
       )}
 
-      {tab === "watchlist" && <WatchlistSnapshot wallets={watchlist} />}
+      {tab === "watchlist" && <TrackedWalletsTab />}
 
       {tab === "agents" && (
         <div className="card p-5">

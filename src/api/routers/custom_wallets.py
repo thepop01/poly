@@ -49,10 +49,9 @@ async def add_custom_wallets(
                 # We'll do an upsert: if it exists, update tier to CURATED if it's not CURATED, and update reason.
                 wallets_query = """
                     INSERT INTO wallets_v2 (address, tier, tier_reason)
-                    VALUES ($1, 'CURATED', $2)
+                    VALUES ($1, 'NEW', 'custom wallet added')
                     ON CONFLICT (address) DO UPDATE 
-                    SET tier = CASE WHEN wallets_v2.tier = 'DEAD' THEN 'CURATED' ELSE wallets_v2.tier END,
-                        tier_reason = CASE WHEN $2 != '' THEN $2 ELSE wallets_v2.tier_reason END
+                    SET tier_reason = CASE WHEN $2 != '' THEN $2 ELSE wallets_v2.tier_reason END
                 """
                 await conn.executemany(wallets_query, valid_wallets)
 
