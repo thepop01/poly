@@ -39,7 +39,7 @@ async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float |
                 return int(val, 16) / 10**6
     except Exception as e:
         logger.warning(f"Failed to fetch balance for {address}: {e}")
-    return 0.0
+    return None
 
 async def sweep_curated_tiers(conn: asyncpg.Connection):
     """Promote qualifying active STANDARD wallets to CURATED; demote curated
@@ -101,7 +101,7 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
         await conn.execute("""
             UPDATE wallets_v2
             SET tier = 'PREVIOUSLY_CURATED', is_dormant = TRUE, updated_at = NOW()
-            WHERE tier = 'CURATED' AND is_dormant = FALSE AND last_trade_at < $1
+            WHERE tier = 'CURATED' AND (last_trade_at IS NULL OR last_trade_at < $1)
         """, hibernate_cutoff)
 
         # 2. Hibernate dormant STANDARD / LOW_BALANCE / NEW wallets
@@ -111,10 +111,10 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
             WHERE tier IN ('STANDARD', 'LOW_BALANCE', 'NEW') AND is_dormant = FALSE AND (last_trade_at IS NULL OR last_trade_at < $1)
         """, hibernate_cutoff)
 
-        # 3. Wake up PREVIOUSLY_CURATED wallets when they trade again -> promote directly to CURATED
+        # 3. Wake up PREVIOUSLY_CURATED wallets when they trade again -> set to STANDARD (sweep_curated_tiers will re-promote if metrics qualify)
         await conn.execute("""
             UPDATE wallets_v2
-            SET tier = 'CURATED', is_dormant = FALSE, updated_at = NOW()
+            SET tier = 'STANDARD', is_dormant = FALSE, updated_at = NOW()
             WHERE tier = 'PREVIOUSLY_CURATED'
               AND last_trade_at >= $1
         """, hibernate_cutoff)
@@ -166,11 +166,12 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
             FROM wallets_v2 w
             LEFT JOIN wallet_metrics_v2 m ON w.address = m.address
             WHERE w.is_dormant = FALSE
-              AND (m.computed_at IS NULL OR m.computed_at < $1)
+              AND (w.last_trade_at IS NULL OR w.last_trade_at >= NOW() - INTERVAL '7 days')
+              AND (m.computed_at IS NULL OR m.computed_at < NOW() - INTERVAL '12 hours')
             ORDER BY m.computed_at ASC NULLS FIRST
-            LIMIT $2
+            LIMIT $1
             """,
-            stale_cutoff, BATCH_SIZE,
+            BATCH_SIZE,
         )
 
     if not rows:
