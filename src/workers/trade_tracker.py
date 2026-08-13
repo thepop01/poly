@@ -85,7 +85,7 @@ async def maybe_add_to_global(conn: asyncpg.Connection, address: str, trade_dt: 
             UPDATE wallets_v2 
             SET is_dormant = FALSE,
                 updated_at = NOW(),
-                last_trade_at = GREATEST(last_trade_at, $2)
+                last_trade_at = GREATEST(COALESCE(last_trade_at, $2), $2)
             WHERE address = $1
             """,
             address, trade_dt,
@@ -114,13 +114,15 @@ async def run_trade_tracker(pool: asyncpg.Pool):
     last_block = read_last_block()
 
     async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
+        while True:
+            try:
                 tip_str = await get_latest_block_etherscan(session)
                 if not tip_str:
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
                 tip = int(tip_str)
 
-                start_block = int(last_block) if str(last_block).isdigit() else tip - 100
+                start_block = int(last_block) if last_block.isdigit() else tip - 100
                 if tip - start_block > 500:
                     start_block = tip - 500
 
@@ -133,6 +135,11 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                     clean_old_volumes(current_ts)
 
                     async with pool.acquire() as conn:
+                        batch_wallets = list({t.get("wallet", "").lower() for t in trades if t.get("wallet")})
+                        tracked_rows = await conn.fetch("SELECT address FROM wallets_v2 WHERE address = ANY($1::text[])", batch_wallets)
+                        tracked_set = {r["address"] for r in tracked_rows}
+                        accumulated_to_clear = []
+
                         for trade in trades:
                             b_num = trade.get("blockNumber", 0)
                             if b_num > highest_block:
@@ -155,7 +162,7 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                             _rolling_volumes[wallet][market_id].append((ts, usd_value, tx_hash, side))
                             total_12h_vol = sum(t[1] for t in _rolling_volumes[wallet][market_id])
 
-                            is_tracked = await conn.fetchval("SELECT address FROM wallets_v2 WHERE address = $1", wallet) is not None
+                            is_tracked = wallet in tracked_set
 
                             is_instant_whale = usd_value >= LARGE_TRADE_THRESHOLD
                             is_accumulated_whale = total_12h_vol >= LARGE_TRADE_THRESHOLD
@@ -163,7 +170,7 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                             if is_instant_whale or is_accumulated_whale:
                                 whale_wallets.append(wallet)
                                 if is_accumulated_whale:
-                                    _rolling_volumes[wallet][market_id].clear()
+                                    accumulated_to_clear.append((wallet, market_id))
 
                             # If it's a whale trade, it BECOMES a tracked wallet
                             if usd_value >= WHALE_TRADE_THRESHOLD:
@@ -176,6 +183,7 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                                     logger.warning(f"Failed to add {wallet[:10]} to global: {e}")
                                 # It's now tracked
                                 is_tracked = True
+                                tracked_set.add(wallet)
 
                             if is_tracked:
                                 try:
@@ -230,6 +238,9 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                                 except Exception as e:
                                     logger.warning(f"Failed to process trade for {wallet}: {e}")
 
+                        for w, m in accumulated_to_clear:
+                            _rolling_volumes[w][m].clear()
+
                     if whale_wallets:
                         whale_wallets = list(set(whale_wallets))
                         async with pool.acquire() as conn:
@@ -237,6 +248,17 @@ async def run_trade_tracker(pool: asyncpg.Pool):
 
                 write_last_block(tip)
                 last_block = str(tip)
+
+                # Periodically prune feed events older than 3 days
+                try:
+                    now_ts = time.time()
+                    if not hasattr(run_trade_tracker, "_last_prune") or (now_ts - getattr(run_trade_tracker, "_last_prune", 0)) > 21600:
+                        setattr(run_trade_tracker, "_last_prune", now_ts)
+                        async with pool.acquire() as conn:
+                            deleted = await conn.execute("DELETE FROM wallet_activity_v2 WHERE event_at < NOW() - INTERVAL '3 days'")
+                            logger.info(f"Auto-pruned 3-day old feed activity: {deleted}")
+                except Exception as pe:
+                    logger.debug(f"Prune error: {pe}")
 
             except Exception as e:
                 logger.error(f"Trade tracker error: {e}", exc_info=True)
