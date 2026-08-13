@@ -61,16 +61,18 @@ async def run_last_trade_sweeper(db_url: str = DB_URL):
             while True:
                 try:
                     async with pool.acquire() as conn:
-                        # Fetch batch of non-dormant wallets or wallets checked longest ago
+                        # Only select wallets where last_trade_swept_at is NULL or older than 3 hours
                         rows = await conn.fetch("""
                             SELECT address, last_trade_at
                             FROM wallets_v2
-                            WHERE is_dormant = FALSE OR last_trade_at IS NULL
-                            ORDER BY updated_at ASC NULLS FIRST
+                            WHERE is_dormant = FALSE
+                              AND (last_trade_swept_at IS NULL OR last_trade_swept_at < NOW() - INTERVAL '3 hours')
+                            ORDER BY last_trade_swept_at ASC NULLS FIRST
                             LIMIT $1
                         """, BATCH_SIZE)
 
                     if not rows:
+                        logger.info("Worker 10: All active wallets swept within the last 3 hours. Sleeping...")
                         await asyncio.sleep(SLEEP_INTERVAL)
                         continue
 
@@ -93,18 +95,18 @@ async def run_last_trade_sweeper(db_url: str = DB_URL):
                                         UPDATE wallets_v2
                                         SET last_trade_at = $2,
                                             is_dormant = CASE WHEN $2 < NOW() - INTERVAL '30 days' THEN TRUE ELSE FALSE END,
+                                            last_trade_swept_at = NOW(),
                                             updated_at = NOW()
                                         WHERE address = $1
                                     """, addr, new_dt)
                                     updated_count += 1
                                 else:
-                                    # Stamp updated_at so we rotate through all wallets
-                                    await conn.execute("UPDATE wallets_v2 SET updated_at = NOW() WHERE address = $1", addr)
+                                    await conn.execute("UPDATE wallets_v2 SET last_trade_swept_at = NOW(), updated_at = NOW() WHERE address = $1", addr)
                             else:
-                                await conn.execute("UPDATE wallets_v2 SET updated_at = NOW() WHERE address = $1", addr)
+                                await conn.execute("UPDATE wallets_v2 SET last_trade_swept_at = NOW(), updated_at = NOW() WHERE address = $1", addr)
 
                     await asyncio.gather(*[_process_one(w) for w in wallets], return_exceptions=True)
-                    logger.info(f"Swept {len(wallets)} wallets — updated last_trade_at for {updated_count} wallets.")
+                    logger.info(f"Worker 10: Swept {len(wallets)} wallets (>3h since last sweep) — updated last_trade_at for {updated_count} wallets.")
 
                 except Exception as e:
                     logger.error(f"Error in last_trade_sweeper loop: {e}")
