@@ -32,6 +32,15 @@ SYSTEM_RECIPIENTS = {
 }
 
 
+def _parse_block_ts(ts_raw) -> datetime:
+    """Parse Alchemy blockTimestamp — may be hex string, int, or None."""
+    if isinstance(ts_raw, str) and ts_raw.startswith("0x"):
+        return datetime.fromtimestamp(int(ts_raw, 16), tz=timezone.utc)
+    if isinstance(ts_raw, (int, float)) and ts_raw > 0:
+        return datetime.fromtimestamp(float(ts_raw), tz=timezone.utc)
+    return datetime.now(timezone.utc)
+
+
 def read_last_block() -> int | None:
     if os.path.exists(LAST_BLOCK_FILE):
         try:
@@ -105,7 +114,7 @@ async def fetch_onramp_wraps(session: aiohttp.ClientSession, last_block: int | N
                         "value": val,
                         "hash": t.get("hash", ""),
                         "blockNum": blk,
-                        "timestamp": ts_str,
+                        "timestamp": _parse_block_ts(ts_str),
                     })
 
             page_key = result.get("pageKey")
@@ -173,87 +182,82 @@ async def add_to_global(conn: asyncpg.Connection, address: str):
         return 1
 
 
-async def run_deposit_tracker():
+async def run_deposit_tracker(pool: asyncpg.Pool | None = None):
     logger.info("Starting Deposit Tracker Worker...")
     last_block = read_last_block()
 
-    while True:
-        try:
-            conn = await asyncpg.connect(DB_URL)
-            try:
-                async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
+    own_pool = False
+    if pool is None:
+        pool = await asyncpg.create_pool(DB_URL, min_size=1, max_size=3)
+        own_pool = True
 
-                    if last_block is None:
-                        latest_block = int(await get_latest_block_etherscan(session))
-                        last_block = max(0, latest_block - INITIAL_LOOKBACK_BLOCKS)
-                        logger.info(f"Initializing deposit tracker from block {last_block}")
+    try:
+        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
+            while True:
+                try:
+                    async with pool.acquire() as conn:
+                        if last_block is None:
+                            latest_block = int(await get_latest_block_etherscan(session))
+                            last_block = max(0, latest_block - INITIAL_LOOKBACK_BLOCKS)
+                            logger.info(f"Initializing deposit tracker from block {last_block}")
 
-                    transfers = await fetch_onramp_wraps(session, last_block)
+                        transfers = await fetch_onramp_wraps(session, last_block)
 
-                    if transfers:
-                        highest_block = max(t["blockNum"] for t in transfers)
-                        if last_block is None or highest_block > last_block:
-                            last_block = highest_block
-                            write_last_block(last_block)
+                        if transfers:
+                            highest_block = max(t["blockNum"] for t in transfers)
+                            if last_block is None or highest_block > last_block:
+                                last_block = highest_block
+                                write_last_block(last_block)
 
-                        logger.info(f"Found {len(transfers)} large pUSD deposits (>${MIN_DEPOSIT:,}).")
+                            logger.info(f"Found {len(transfers)} large pUSD deposits (>${MIN_DEPOSIT:,}).")
 
-                        new_deposits = 0
-                        for tx in transfers:
-                            addr = tx["from"]
-                            if not addr:
-                                continue
+                            new_deposits = 0
+                            for tx in transfers:
+                                addr = tx["from"]
+                                if not addr:
+                                    continue
 
-                            # Queue the wallet FIRST — wallet_activity_v2 has an
-                            # FK to wallets_v2, so the row must exist before any
-                            # activity insert for a brand-new address.
-                            await conn.execute("""
-                                INSERT INTO wallets_v2 (address, tier, is_dormant, added_at, updated_at, next_check_at, tier_reason)
-                                VALUES ($1, 'UNCLASSIFIED', FALSE, NOW(), NOW(), NOW(), 'deposit_tracker')
-                                ON CONFLICT (address) DO UPDATE SET next_check_at = NOW()
-                            """, addr)
-                            await conn.execute("""
-                                INSERT INTO wallet_sources_v2 (address, source, source_detail, spotted_at)
-                                VALUES ($1, 'deposit', 'deposit_tracker discovery queue', NOW())
-                                ON CONFLICT (address, source) DO NOTHING
-                            """, addr)
+                                # Queue the wallet FIRST — wallet_activity_v2 has an
+                                # FK to wallets_v2, so the row must exist before any
+                                # activity insert for a brand-new address.
+                                await conn.execute("""
+                                    INSERT INTO wallets_v2 (address, username, tier, is_dormant, added_at)
+                                    VALUES ($1, '', 'UNCLASSIFIED', FALSE, NOW())
+                                    ON CONFLICT (address) DO UPDATE SET updated_at = NOW()
+                                """, addr)
 
-                            if tx["hash"]:
-                                deposited_at = None
-                                if tx.get("timestamp"):
-                                    ts = tx["timestamp"]
-                                    if ts.endswith("Z"):
-                                        ts = ts[:-1] + "+00:00"
-                                    deposited_at = datetime.fromisoformat(ts)
-                                else:
-                                    deposited_at = datetime.now(timezone.utc)
-                                    
+                                await conn.execute("""
+                                    INSERT INTO wallet_sources_v2 (address, source, source_detail, spotted_at)
+                                    VALUES ($1, 'deposit', 'pUSD deposit', NOW())
+                                    ON CONFLICT (address, source) DO NOTHING
+                                """, addr)
+
                                 exists = await conn.fetchval("SELECT id FROM wallet_activity_v2 WHERE tx_hash = $1 AND event_type = 'DEPOSIT'", tx["hash"])
                                 if not exists:
                                     await conn.execute("""
                                         INSERT INTO wallet_activity_v2 (address, event_type, amount_usdc, tx_hash, event_at, created_at)
                                         VALUES ($1, 'DEPOSIT', $2, $3, $4, NOW())
-                                    """, addr, tx["value"], tx["hash"], deposited_at)
+                                    """, addr, tx["value"], tx["hash"], tx["timestamp"])
                                     new_deposits += 1
-
 
                                 # Deposit >= $5k → add to global list
                                 track_count = await add_to_global(conn, addr)
                                 if track_count > 1:
                                     logger.info(f"Wallet re-detected: {addr[:10]}... | deposit ${tx['value']:,.0f}")
 
-                        logger.info(f"Globally recorded {new_deposits} new deposits. Queued {len(transfers)} wallets for evaluation.")
-                    else:
-                        latest_block = int(await get_latest_block_etherscan(session))
-                        if latest_block > last_block:
-                            last_block = latest_block
-                            write_last_block(last_block)
-            finally:
-                await conn.close()
-        except Exception as e:
-            logger.error(f"Deposit Tracker Error: {e}")
+                            logger.info(f"Globally recorded {new_deposits} new deposits. Queued {len(transfers)} wallets for evaluation.")
+                        else:
+                            latest_block = int(await get_latest_block_etherscan(session))
+                            if latest_block > last_block:
+                                last_block = latest_block
+                                write_last_block(last_block)
+                except Exception as e:
+                    logger.error(f"Deposit Tracker Error: {e}")
 
-        await asyncio.sleep(POLL_INTERVAL)
+                await asyncio.sleep(POLL_INTERVAL)
+    finally:
+        if own_pool and pool:
+            await pool.close()
 
 
 if __name__ == "__main__":
