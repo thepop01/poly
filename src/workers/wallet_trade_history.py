@@ -22,6 +22,8 @@ from typing import Optional
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
+from src.utils.category_classifier import classify_tags, flatten_subcategory
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -81,34 +83,42 @@ async def fetch_combo_activity(
                             
                         cid = a.get("conditionId") or ""
                         event_type = (a.get("type") or "").upper()
+                        title = a.get("title", "")
+                        
+                        if title:
+                            raw_c, raw_s = classify_tags([title])
+                            cat = raw_c.title()
+                            subcat = (flatten_subcategory(raw_c, raw_s) or raw_c).title()
+                        else:
+                            cat, subcat = "Sports", "Sports"
                         
                         if event_type in ("REDEEM", "REDEMPTION") and cid and cid not in seen_closed:
                             seen_closed.add(cid)
                             closed_combos.append({
                                 "conditionId": cid,
                                 "asset": a.get("asset", ""),
-                                "title": a.get("title", ""),
+                                "title": title,
                                 "totalBought": _parse(a.get("usdcSize")),
                                 "avgPrice": _parse(a.get("price")),
                                 "realizedPnl": _parse(a.get("usdcSize")),
                                 "isCombo": True,
-                                "category": "Sports",
-                                "subcategory": "Sports",
+                                "category": cat,
+                                "subcategory": subcat,
                             })
                         elif event_type in ("TRADE", "BUY") and cid and cid not in redeemed_cids and cid not in seen_open:
                             seen_open.add(cid)
                             open_combos.append({
                                 "conditionId": cid,
                                 "asset": a.get("asset", ""),
-                                "title": a.get("title", ""),
+                                "title": title,
                                 "size": _parse(a.get("size")),
                                 "avgPrice": _parse(a.get("price")),
                                 "currentValue": _parse(a.get("usdcSize")),
                                 "realizedPnl": 0.0,
                                 "cashPnl": 0.0,
                                 "isCombo": True,
-                                "category": "Sports",
-                                "subcategory": "Sports",
+                                "category": cat,
+                                "subcategory": subcat,
                             })
     except Exception as e:
         logger.debug(f"Combo activity fetch error for {address}: {e}")
