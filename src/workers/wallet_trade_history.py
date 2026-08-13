@@ -50,11 +50,16 @@ def canonical_source(queue_source: str) -> str:
     return "manual"
 
 
-async def fetch_combo_activity(session: aiohttp.ClientSession, address: str) -> tuple[list[dict], list[dict]]:
-    """Fetch open and closed combo parlay positions from Polymarket activity API."""
+async def fetch_combo_activity(
+    session: aiohttp.ClientSession, 
+    address: str, 
+    min_ts: Optional[int] = None
+) -> tuple[list[dict], list[dict]]:
+    """Fetch open and closed combo parlay positions from Polymarket activity API with optional incremental timestamp filtering."""
     open_combos = []
     closed_combos = []
-    url = f"https://data-api.polymarket.com/activity?user={address}&limit=500"
+    ts_filter = f"&startTs={min_ts}" if min_ts else ""
+    url = f"https://data-api.polymarket.com/activity?user={address}&limit=500{ts_filter}"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 200:
