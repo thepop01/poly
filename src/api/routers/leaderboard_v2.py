@@ -3,14 +3,14 @@
 from typing import Any, Optional
 from fastapi import APIRouter, Request, HTTPException
 import time
-import logging
+from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v2/leaderboard", tags=["leaderboard-v2"])
 
-_cache: dict[str, dict] = {}
-CACHE_TTL = 60
+_cache: TTLCache = TTLCache(maxsize=300, ttl=300)
+CACHE_TTL = 300
 
 VALID_CATEGORIES = {
     "OVERALL", "POLITICS", "SPORTS", "ESPORTS", "CRYPTO",
@@ -94,18 +94,19 @@ async def get_wallets_tabbed(
         except Exception:
             window_val = 0
 
-    is_overall_all_time = cat_upper == "OVERALL" and window_val == 0
+    is_overall = cat_upper == "OVERALL"
 
     direction = "ASC" if sort_order.lower() == "asc" else "DESC"
     where = [TAB_FILTERS[tab]]
     params: list[Any] = []
 
-    if is_overall_all_time:
-        order_col = WALLET_SORT_COLUMNS.get(sort_by, WALLET_SORT_COLUMNS["pnl"])
+    if is_overall:
         if pnl_window and pnl_window in ("pnl_100", "pnl_200", "pnl_300", "pnl_500", "pnl_750", "pnl_1000", "pnl_1500", "pnl_2000", "pnl_3500", "pnl_5000"):
             pnl_select = f"COALESCE(m.{pnl_window}, m.total_pnl)"
+            order_col = f"COALESCE(m.{pnl_window}, m.total_pnl)" if sort_by == "pnl" else WALLET_SORT_COLUMNS.get(sort_by, WALLET_SORT_COLUMNS["pnl"])
         else:
             pnl_select = "COALESCE(m.pm_pnl, m.total_pnl)"
+            order_col = WALLET_SORT_COLUMNS.get(sort_by, WALLET_SORT_COLUMNS["pnl"])
 
         if source in WALLET_SOURCES:
             params.append(source)
@@ -126,16 +127,22 @@ async def get_wallets_tabbed(
                    COALESCE(m.avg_buy_price, 0) as avg_buy_price,
                    COALESCE(m.buys_below_15c, 0) as buys_below_15c,
                    COALESCE(m.wins_below_15c, 0) as wins_below_15c,
+                   COALESCE(m.avg_sell_below_15c, 0) as avg_sell_below_15c,
                    COALESCE(m.buys_15_30c, 0) as buys_15_30c,
                    COALESCE(m.wins_15_30c, 0) as wins_15_30c,
+                   COALESCE(m.avg_sell_15_30c, 0) as avg_sell_15_30c,
                    COALESCE(m.buys_30_45c, 0) as buys_30_45c,
                    COALESCE(m.wins_30_45c, 0) as wins_30_45c,
+                   COALESCE(m.avg_sell_30_45c, 0) as avg_sell_30_45c,
                    COALESCE(m.buys_45_60c, 0) as buys_45_60c,
                    COALESCE(m.wins_45_60c, 0) as wins_45_60c,
+                   COALESCE(m.avg_sell_45_60c, 0) as avg_sell_45_60c,
                    COALESCE(m.buys_60_75c, 0) as buys_60_75c,
                    COALESCE(m.wins_60_75c, 0) as wins_60_75c,
+                   COALESCE(m.avg_sell_60_75c, 0) as avg_sell_60_75c,
                    COALESCE(m.buys_above_75c, 0) as buys_above_75c,
                    COALESCE(m.wins_above_75c, 0) as wins_above_75c,
+                   COALESCE(m.avg_sell_above_75c, 0) as avg_sell_above_75c,
                    (SELECT array_agg(s.source ORDER BY s.spotted_at)
                       FROM wallet_sources_v2 s WHERE s.address = w.address) AS sources,
                    (SELECT array_agg(c.category)
@@ -151,14 +158,19 @@ async def get_wallets_tabbed(
         """
     else:
         params.append(cat_upper)
-        params.append(window_val)
-        cat_param_idx = len(params) - 1
-        win_param_idx = len(params)
+        cat_param_idx = len(params)
+
+        if subcategory:
+            params.append(subcategory)
+            subcat_param_idx = len(params)
+            subcat_clause = f"AND c.subcategory = ${subcat_param_idx}"
+        else:
+            subcat_clause = "AND c.subcategory = ''"
 
         order_col_map = {
             "pnl": "c.pnl",
             "volume": "c.volume",
-            "roi": "c.roi_pct",
+            "roi": "m.roi_pct",
             "win_rate": "c.win_rate",
             "winning_count": "c.winning_count",
             "resolved_count": "c.resolved_count",
@@ -188,11 +200,6 @@ async def get_wallets_tabbed(
         if search:
             params.append(f"%{search}%")
             where.append(f"(w.address ILIKE ${len(params)} OR w.username ILIKE ${len(params)})")
-        if subcategory:
-            params.append(subcategory)
-            where.append(
-                f"EXISTS (SELECT 1 FROM category_stats_v2 sub WHERE sub.address = w.address AND sub.category = ${cat_param_idx} AND sub.subcategory = ${len(params)})"
-            )
 
         params.extend([limit, offset])
 
@@ -201,24 +208,30 @@ async def get_wallets_tabbed(
                    w.last_trade_at, w.added_at,
                    c.pnl AS pnl,
                    c.volume AS volume,
-                   c.roi_pct, c.win_rate, c.resolved_count, c.winning_count, m.balance, m.position_value, m.deposits, m.withdrawals,
+                   m.roi_pct, c.win_rate, c.resolved_count, c.winning_count, m.balance, m.position_value, m.deposits, m.withdrawals,
                    COALESCE(m.avg_buy_price, 0) as avg_buy_price,
                    COALESCE(m.buys_below_15c, 0) as buys_below_15c,
                    COALESCE(m.wins_below_15c, 0) as wins_below_15c,
+                   COALESCE(m.avg_sell_below_15c, 0) as avg_sell_below_15c,
                    COALESCE(m.buys_15_30c, 0) as buys_15_30c,
                    COALESCE(m.wins_15_30c, 0) as wins_15_30c,
+                   COALESCE(m.avg_sell_15_30c, 0) as avg_sell_15_30c,
                    COALESCE(m.buys_30_45c, 0) as buys_30_45c,
                    COALESCE(m.wins_30_45c, 0) as wins_30_45c,
+                   COALESCE(m.avg_sell_30_45c, 0) as avg_sell_30_45c,
                    COALESCE(m.buys_45_60c, 0) as buys_45_60c,
                    COALESCE(m.wins_45_60c, 0) as wins_45_60c,
+                   COALESCE(m.avg_sell_45_60c, 0) as avg_sell_45_60c,
                    COALESCE(m.buys_60_75c, 0) as buys_60_75c,
                    COALESCE(m.wins_60_75c, 0) as wins_60_75c,
+                   COALESCE(m.avg_sell_60_75c, 0) as avg_sell_60_75c,
                    COALESCE(m.buys_above_75c, 0) as buys_above_75c,
                    COALESCE(m.wins_above_75c, 0) as wins_above_75c,
+                   COALESCE(m.avg_sell_above_75c, 0) as avg_sell_above_75c,
                    (SELECT array_agg(s.source ORDER BY s.spotted_at)
                       FROM wallet_sources_v2 s WHERE s.address = w.address) AS sources,
-                   (SELECT array_agg(c.category)
-                      FROM (SELECT category FROM category_stats_v2 WHERE address = w.address AND window_size = 0 AND category != 'OTHER' ORDER BY volume DESC LIMIT 3) c
+                   (SELECT array_agg(subc.category)
+                      FROM (SELECT category FROM category_stats_v2 WHERE address = w.address AND window_size = 0 AND category != 'OTHER' ORDER BY volume DESC LIMIT 3) subc
                    ) AS categories,
                    (SELECT COUNT(*)::int FROM user_watchlists uw WHERE LOWER(uw.wallet_address) = LOWER(w.address)) AS favorite_count,
                    COUNT(*) OVER() AS total_count
@@ -226,8 +239,8 @@ async def get_wallets_tabbed(
             LEFT JOIN wallet_metrics_v2 m ON m.address = w.address
             JOIN category_stats_v2 c ON w.address = c.address 
                 AND c.category = ${cat_param_idx} 
-                AND c.subcategory = '' 
-                AND c.window_size = ${win_param_idx}
+                {subcat_clause} 
+                AND c.window_size = 0
             WHERE {' AND '.join(where)}
             ORDER BY {order_col} {direction} NULLS LAST
             LIMIT ${len(params) - 1} OFFSET ${len(params)}
