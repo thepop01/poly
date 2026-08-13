@@ -33,6 +33,7 @@ from src.workers.trade_tracker import run_trade_tracker
 from src.workers.redemption_tracker import run_redemption_tracker
 from src.workers.deposit_tracker import run_deposit_tracker
 from src.workers.wallet_trade_history import run_discovery
+from src.workers.last_trade_sweeper import run_last_trade_sweeper
 
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
 
@@ -96,7 +97,7 @@ async def supervise_task(task_func, name: str, shutdown_event: asyncio.Event):
 
 
 async def main():
-    logger.info("=== INITIALIZING MASTER ORCHESTRATOR (9 BACKGROUND WORKERS) ===")
+    logger.info("=== INITIALIZING MASTER ORCHESTRATOR (10 BACKGROUND WORKERS) ===")
     shutdown_event = asyncio.Event()
 
     def _signal_handler():
@@ -120,6 +121,7 @@ async def main():
         (_wrapped_redemption_tracker,   "Worker 7: Real-Time Payout Redemption Tracker"),
         (run_deposit_tracker,           "Worker 8: On-Ramp Whale Deposit Tracker"),
         (_wrapped_discovery,            "Worker 9: Wallet Discovery Vetting Gate"),
+        (run_last_trade_sweeper,        "Worker 10: Last Trade Activity Sweeper"),
     ]
 
     tasks = []
