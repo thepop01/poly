@@ -11,6 +11,7 @@ import { TypeBadge } from "@/components/ui/TypeBadge";
 import { TierBadge } from "@/components/ui/TierBadge";
 import { Avatar } from "@/components/ui/Avatar";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { Pagination } from "@/components/wallets/Pagination";
 
 type TabKey = "all" | "trades" | "deposits";
 
@@ -139,13 +140,29 @@ export default function AlphaFeedPage() {
 
   return (
     <div className="max-w-[1400px] mx-auto">
+      {/* Header Info Banner */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-6">
+        <div>
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">Activity Feed</h1>
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium bg-emerald-500/10 text-emerald-400 px-2.5 py-1 rounded-full border border-emerald-500/20">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              Last 3 Days
+            </span>
+          </div>
+          <p className="text-sm text-muted-foreground mt-1">
+            Real-time stream of smart money trades & large deposits recorded within the last 3 days
+          </p>
+        </div>
+      </div>
+
       {/* Stat cards */}
       <StatCardRow>
         <StatCard
           label="Live events"
           icon={<Radio size={16} />}
           value={summary?.live_events ?? "—"}
-          subtitle="Trades + deposits over $5K"
+          subtitle="Trades & deposits (3-day window)"
         />
         <StatCard
           label="Large trades"
@@ -321,22 +338,14 @@ export default function AlphaFeedPage() {
       </div>
 
       {/* Pagination */}
-      <div className="flex justify-center items-center gap-2 py-4">
-        <button
-          onClick={() => setPage((p) => Math.max(1, p - 1))}
-          disabled={page === 1}
-          className="px-3 py-1 bg-surface border border-border hover:bg-surface-2 transition-colors rounded-lg text-xs text-foreground disabled:opacity-40 cursor-pointer"
-        >
-          Previous
-        </button>
-        <span className="text-xs text-subtle mx-2">Page {page} of {totalPages}</span>
-        <button
-          onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-          disabled={page >= totalPages}
-          className="px-3 py-1 bg-surface border border-border hover:bg-surface-2 transition-colors rounded-lg text-xs text-foreground disabled:opacity-40 cursor-pointer"
-        >
-          Next
-        </button>
+      <div className="mt-4 rounded-lg overflow-hidden border border-border">
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          totalCount={totalCount}
+          unitLabel="events"
+          onPageChange={setPage}
+        />
       </div>
     </div>
   );
