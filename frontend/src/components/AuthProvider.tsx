@@ -40,14 +40,14 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
     const urlToken = searchParams.get("token");
     if (urlToken) {
       setToken(urlToken);
-      localStorage.setItem("poly_auth_token", urlToken);
+      sessionStorage.setItem("poly_auth_token", urlToken);
 
       // Clean up URL without triggering navigation
       const newUrl = window.location.pathname;
       window.history.replaceState({}, document.title, newUrl);
     } else {
-      // Try to get from local storage
-      const storedToken = localStorage.getItem("poly_auth_token");
+      // Try to get from session storage
+      const storedToken = sessionStorage.getItem("poly_auth_token");
       if (storedToken) {
         setToken(storedToken);
       } else {
@@ -58,7 +58,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
           .then((data) => {
             if (data?.access_token) {
               setToken(data.access_token);
-              localStorage.setItem("poly_auth_token", data.access_token);
+              sessionStorage.setItem("poly_auth_token", data.access_token);
             }
           })
           .catch(() => {});
@@ -68,7 +68,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
 
   const logout = () => {
     setToken(null);
-    localStorage.removeItem("poly_auth_token");
+    sessionStorage.removeItem("poly_auth_token");
     router.refresh();
   };
 
