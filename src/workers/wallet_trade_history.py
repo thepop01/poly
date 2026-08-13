@@ -18,6 +18,7 @@ import asyncpg
 import aiohttp
 import os
 import logging
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
