@@ -1,8 +1,9 @@
 import re
 from typing import Any, List
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel
 import logging
+from src.api.routers.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,8 @@ class CustomWalletsPayload(BaseModel):
 @router.post("")
 async def add_custom_wallets(
     request: Request,
-    payload: CustomWalletsPayload
+    payload: CustomWalletsPayload,
+    _user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Add a list of custom wallets to the database."""
     pool = getattr(request.app.state, "pool", None)

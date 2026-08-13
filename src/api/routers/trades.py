@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
+from src.api.routers.auth import get_current_user
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -56,7 +57,7 @@ async def get_recent_trades(request: Request, limit: int = 50, min_size: Optiona
 from fastapi.responses import Response
 
 @router.get("/export")
-async def export_trades(request: Request, market_id: Optional[str] = None):
+async def export_trades(request: Request, market_id: Optional[str] = None, _user: dict = Depends(get_current_user)):
     pool = request.app.state.pool
     if not pool:
         raise HTTPException(status_code=503, detail="Database pool not initialized")
