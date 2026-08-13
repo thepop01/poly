@@ -14,8 +14,8 @@ def apply_fill(position_state: dict, trade: dict) -> dict:
     }
     
     side = trade.get("side", "BUY")
-    usd_volume = float(trade.get("usd_volume", 0.0))
-    token_size = float(trade.get("token_size", 0.0))
+    usd_volume = float(trade.get("usd_volume", 0.0) or 0.0)
+    token_size = float(trade.get("size", 0.0) or trade.get("token_size", 0.0) or 0.0)
     
     if side == "BUY":
         state["total_bought_usd"] += usd_volume
