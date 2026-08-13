@@ -36,16 +36,24 @@ def _parse(val) -> float:
 
 
 def _parse_end(dt_str) -> Optional[object]:
+    """Parse a market endDate string, capping at today to avoid future 2027+ phantom dates.
+    Polymarket sets endDate as a market deadline (e.g. 2027-12-31) before the market resolves.
+    We must never use a future endDate as the wallet's last active timestamp."""
     if not dt_str:
         return None
     try:
         from datetime import datetime, timezone
+        now = datetime.now(tz=timezone.utc)
         if isinstance(dt_str, (int, float)):
             if dt_str <= 86400:
                 return None
-            return datetime.fromtimestamp(dt_str, tz=timezone.utc)
-        dt = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+            dt = datetime.fromtimestamp(dt_str, tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
         if dt.year <= 1970:
+            return None
+        # Reject future dates — endDate is a deadline, not a settlement date
+        if dt > now:
             return None
         return dt
     except Exception:
@@ -166,6 +174,13 @@ async def process_wallet_backfill(
     total_pnl    = website["pnl"]    if website else None
     total_volume = website["volume"] if website else None
     pos_val      = sum(_parse(p.get("currentValue", 0)) for p in positions)
+
+    # Fallback: if the wallet isn't on the public leaderboard (API returns []),
+    # compute PnL and volume directly from closed positions so it's never None.
+    if (total_pnl is None or total_pnl == 0) and closed_positions:
+        total_pnl = sum(_parse(cp.get("realizedPnl")) for cp in closed_positions) or None
+    if (total_volume is None or total_volume == 0) and closed_positions:
+        total_volume = sum(_parse(cp.get("totalBought")) for cp in closed_positions) or None
 
     resolved, wins = 0, 0
     cat_volume: dict[str, float] = {}
@@ -432,10 +447,14 @@ async def process_wallet_backfill(
          window_pnls["pnl_5000"], is_zero_activity)
 
     # Calculate latest active date from closed positions
+    # Use endDate only when it's in the past (real resolution) — never future deadlines
+    from datetime import datetime, timezone as _tz
+    _now = datetime.now(tz=_tz.utc)
     last_active_dt = None
     for cp in closed_positions:
         end = _parse_end(cp.get("endDate"))
-        if end and (last_active_dt is None or end > last_active_dt):
+        # Extra guard: _parse_end already filters futures, but be defensive
+        if end and end <= _now and (last_active_dt is None or end > last_active_dt):
             last_active_dt = end
 
     if last_active_dt:
