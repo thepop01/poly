@@ -35,20 +35,17 @@ async def get_smart_money_alerts(
         wm.position_value as wallet_position_value
     FROM wallet_activity_v2 a
     LEFT JOIN markets_v2 m ON a.condition_id = m.condition_id
-    JOIN wallets_v2 w ON a.address = w.address
-    JOIN wallet_metrics_v2 wm ON a.address = wm.address
-    WHERE (w.tier = 'CURATED' OR wm.total_volume >= 10000)
-    AND a.amount_usdc >= 100
+    LEFT JOIN wallets_v2 w ON a.address = w.address
+    LEFT JOIN wallet_metrics_v2 wm ON a.address = wm.address
+    WHERE a.amount_usdc >= 10 AND a.event_at >= NOW() - INTERVAL '3 days'
     """
     
-    count_query = """
+    # Lightweight count query — only join markets_v2 if category/subcategory filter is set
+    count_joins = "LEFT JOIN markets_v2 m ON a.condition_id = m.condition_id\n" if (category or subcategory) else ""
+    count_query = f"""
     SELECT COUNT(*) 
     FROM wallet_activity_v2 a
-    LEFT JOIN markets_v2 m ON a.condition_id = m.condition_id
-    JOIN wallets_v2 w ON a.address = w.address
-    JOIN wallet_metrics_v2 wm ON a.address = wm.address
-    WHERE (w.tier = 'CURATED' OR wm.total_volume >= 10000)
-    AND a.amount_usdc >= 100
+    {count_joins}WHERE a.amount_usdc >= 10 AND a.event_at >= NOW() - INTERVAL '3 days'
     """
     
     args: list[Any] = []
@@ -57,12 +54,8 @@ async def get_smart_money_alerts(
         mapped_type = alert_type.upper()
         if mapped_type == "LARGE_DEPOSIT":
             mapped_type = "DEPOSIT"
-            query += " AND a.amount_usdc >= 10000"
-            count_query += " AND a.amount_usdc >= 10000"
         elif mapped_type == "LARGE_TRADE":
             mapped_type = "TRADE"
-            query += " AND a.amount_usdc >= 1000"
-            count_query += " AND a.amount_usdc >= 1000"
             
         args.append(mapped_type)
         query += f" AND a.event_type = ${len(args)}"
@@ -84,14 +77,14 @@ async def get_smart_money_alerts(
             query += " AND a.amount_usdc >= 100000"
             count_query += " AND a.amount_usdc >= 100000"
         elif t in ("TIER 3", "50K", "$50K+"):
-            query += " AND a.amount_usdc >= 50000 AND a.amount_usdc < 100000"
-            count_query += " AND a.amount_usdc >= 50000 AND a.amount_usdc < 100000"
+            query += " AND a.amount_usdc >= 50000"
+            count_query += " AND a.amount_usdc >= 50000"
         elif t in ("TIER 2", "20K", "$20K+"):
-            query += " AND a.amount_usdc >= 20000 AND a.amount_usdc < 50000"
-            count_query += " AND a.amount_usdc >= 20000 AND a.amount_usdc < 50000"
+            query += " AND a.amount_usdc >= 20000"
+            count_query += " AND a.amount_usdc >= 20000"
         elif t in ("TIER 1", "5K", "$5K+"):
-            query += " AND a.amount_usdc >= 100 AND a.amount_usdc < 20000"
-            count_query += " AND a.amount_usdc >= 100 AND a.amount_usdc < 20000"
+            query += " AND a.amount_usdc >= 5000"
+            count_query += " AND a.amount_usdc >= 5000"
         
     query += f" ORDER BY a.event_at DESC LIMIT ${len(args) + 1} OFFSET ${len(args) + 2}"
     args_with_pagination = args + [limit, offset]
@@ -108,14 +101,13 @@ async def get_smart_money_alerts(
                 "balance": alert.pop("wallet_balance", None),
                 "position_value": alert.pop("wallet_position_value", None)
             }
-            if wallet_stats["balance"] is not None:
-                wallet_stats["balance"] = float(wallet_stats["balance"])
-            if wallet_stats["position_value"] is not None:
-                wallet_stats["position_value"] = float(wallet_stats["position_value"])
             alert["wallet_stats"] = wallet_stats
             alerts.append(alert)
             
-    return {"alerts": alerts, "total_count": total_count}
+        return {
+            "alerts": alerts,
+            "total_count": total_count
+        }
 
 
 @router.get("/summary")
@@ -125,27 +117,20 @@ async def get_alpha_calls_summary(request: Request) -> dict[str, Any]:
     if not pool:
         raise HTTPException(status_code=500, detail="Database pool not initialized")
 
-    # Same universe as the feed: curated / might-cook wallets or >= $10k volume.
-    base = """
-    FROM wallet_activity_v2 a
-    JOIN wallets_v2 w ON a.address = w.address
-    JOIN wallet_metrics_v2 wm ON a.address = wm.address
-    WHERE (w.tier = 'CURATED' OR wm.total_volume >= 10000)
-    """
-
-    counts_query = f"""
+    counts_query = """
     SELECT
-        COUNT(*) FILTER (WHERE a.event_type = 'TRADE'   AND a.amount_usdc >= 1000)  AS trades,
-        COUNT(*) FILTER (WHERE a.event_type = 'DEPOSIT' AND a.amount_usdc >= 10000) AS deposits,
-        COALESCE(SUM(a.amount_usdc) FILTER (WHERE a.event_type = 'DEPOSIT' AND a.amount_usdc >= 10000), 0) AS deposit_inflow
-    {base}
+        COUNT(*) FILTER (WHERE event_type = 'TRADE'   AND amount_usdc >= 100)  AS trades,
+        COUNT(*) FILTER (WHERE event_type = 'DEPOSIT' AND amount_usdc >= 1000) AS deposits,
+        COALESCE(SUM(amount_usdc) FILTER (WHERE event_type = 'DEPOSIT' AND amount_usdc >= 1000), 0) AS deposit_inflow
+    FROM wallet_activity_v2
+    WHERE amount_usdc >= 100 AND event_at >= NOW() - INTERVAL '3 days'
     """
 
-    biggest_query = f"""
+    biggest_query = """
     SELECT a.amount_usdc, a.address, w.username AS wallet_name
-    {base}
-      AND ((a.event_type = 'TRADE' AND a.amount_usdc >= 1000)
-        OR (a.event_type = 'DEPOSIT' AND a.amount_usdc >= 10000))
+    FROM wallet_activity_v2 a
+    LEFT JOIN wallets_v2 w ON a.address = w.address
+    WHERE a.amount_usdc >= 100 AND a.event_at >= NOW() - INTERVAL '3 days'
     ORDER BY a.amount_usdc DESC
     LIMIT 1
     """
@@ -195,10 +180,10 @@ async def get_tracked_wallet_alerts(
         wm.balance as wallet_balance,
         wm.position_value as wallet_position_value
     FROM wallet_activity_v2 a
-    JOIN user_watchlists uw ON LOWER(a.address) = LOWER(uw.wallet_address)
+    JOIN user_watchlists uw ON a.address = uw.wallet_address
     LEFT JOIN markets_v2 m ON a.condition_id = m.condition_id
-    JOIN wallets_v2 w ON LOWER(a.address) = LOWER(w.address)
-    JOIN wallet_metrics_v2 wm ON LOWER(a.address) = LOWER(wm.address)
+    JOIN wallets_v2 w ON a.address = w.address
+    JOIN wallet_metrics_v2 wm ON a.address = wm.address
     WHERE uw.user_id = $1::uuid
     ORDER BY a.event_at DESC
     LIMIT $2
