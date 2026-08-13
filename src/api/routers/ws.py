@@ -6,8 +6,11 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import List, Dict
 
+from src.api.routers.auth import JWT_SECRET
+
 router = APIRouter(prefix="/ws", tags=["websocket"])
 logger = logging.getLogger("ws")
+ALLOWED_ORIGINS = set(os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(","))
 
 class ConnectionManager:
     def __init__(self):
@@ -19,6 +22,7 @@ class ConnectionManager:
         if user_id not in self.active_connections:
             self.active_connections[user_id] = []
         self.active_connections[user_id].append(websocket)
+        logger.info(f"WebSocket connected for user {user_id}")
 
     def disconnect(self, websocket: WebSocket, user_id: str):
         if user_id in self.active_connections:
@@ -26,6 +30,7 @@ class ConnectionManager:
                 self.active_connections[user_id].remove(websocket)
             if not self.active_connections[user_id]:
                 del self.active_connections[user_id]
+        logger.info(f"WebSocket disconnected for user {user_id}")
 
     async def broadcast_to_all(self, message: dict):
         for user_id, connections in list(self.active_connections.items()):
@@ -35,7 +40,7 @@ class ConnectionManager:
                 except Exception:
                     self.disconnect(connection, user_id)
 
-    async def broadcast_to_user(self, user_id: str, message: dict):
+    async def send_personal_message(self, message: dict, user_id: str):
         if user_id in self.active_connections:
             for connection in list(self.active_connections[user_id]):
                 try:
@@ -47,12 +52,17 @@ manager = ConnectionManager()
 
 @router.websocket("")
 async def websocket_endpoint(websocket: WebSocket, token: str | None = None):
+    origin = websocket.headers.get("origin", "")
+    if origin and origin not in ALLOWED_ORIGINS:
+        await websocket.close(code=1008)
+        return
+
     if not token:
         await websocket.close(code=1008)
         return
         
     try:
-        payload = jwt.decode(token, os.getenv("JWT_SECRET", "super-secret"), algorithms=["HS256"])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         user_id = payload.get("sub")
         if not user_id:
             await websocket.close(code=1008)
