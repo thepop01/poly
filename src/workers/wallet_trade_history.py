@@ -50,8 +50,68 @@ def canonical_source(queue_source: str) -> str:
     return "manual"
 
 
+async def fetch_combo_activity(session: aiohttp.ClientSession, address: str) -> tuple[list[dict], list[dict]]:
+    """Fetch open and closed combo parlay positions from Polymarket activity API."""
+    open_combos = []
+    closed_combos = []
+    url = f"https://data-api.polymarket.com/activity?user={address}&limit=500"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if isinstance(data, list):
+                    redeemed_cids = {
+                        a.get("conditionId") for a in data 
+                        if a.get("type") in ("REDEEM", "REDEMPTION") and a.get("conditionId")
+                    }
+                    
+                    seen_open = set()
+                    seen_closed = set()
+                    
+                    for a in data:
+                        is_combo = a.get("isCombo") or "AND" in (a.get("title") or "")
+                        if not is_combo:
+                            continue
+                            
+                        cid = a.get("conditionId") or ""
+                        event_type = (a.get("type") or "").upper()
+                        
+                        if event_type in ("REDEEM", "REDEMPTION") and cid and cid not in seen_closed:
+                            seen_closed.add(cid)
+                            closed_combos.append({
+                                "conditionId": cid,
+                                "asset": a.get("asset", ""),
+                                "title": a.get("title", ""),
+                                "totalBought": _parse(a.get("usdcSize")),
+                                "avgPrice": _parse(a.get("price")),
+                                "realizedPnl": _parse(a.get("usdcSize")),
+                                "isCombo": True,
+                                "category": "Sports",
+                                "subcategory": "Sports",
+                            })
+                        elif event_type in ("TRADE", "BUY") and cid and cid not in redeemed_cids and cid not in seen_open:
+                            seen_open.add(cid)
+                            open_combos.append({
+                                "conditionId": cid,
+                                "asset": a.get("asset", ""),
+                                "title": a.get("title", ""),
+                                "size": _parse(a.get("size")),
+                                "avgPrice": _parse(a.get("price")),
+                                "currentValue": _parse(a.get("usdcSize")),
+                                "realizedPnl": 0.0,
+                                "cashPnl": 0.0,
+                                "isCombo": True,
+                                "category": "Sports",
+                                "subcategory": "Sports",
+                            })
+    except Exception as e:
+        logger.debug(f"Combo activity fetch error for {address}: {e}")
+        
+    return open_combos, closed_combos
+
+
 async def fetch_positions(session: aiohttp.ClientSession, address: str) -> list[dict]:
-    """Fetch all positions for a wallet from Polymarket Data API with pagination."""
+    """Fetch all positions for a wallet from Polymarket Data API with pagination, including Open Combo Parlays."""
     all_positions = []
     offset = 0
     limit = 500
@@ -76,16 +136,19 @@ async def fetch_positions(session: aiohttp.ClientSession, address: str) -> list[
             logger.warning(f"Failed to fetch positions for {address} at offset {offset}: {e}")
             break
 
+    # Merge Open Combo Parlay Positions
+    open_combos, _ = await fetch_combo_activity(session, address)
+    if open_combos:
+        existing_cids = {p.get("conditionId") for p in all_positions if p.get("conditionId")}
+        for combo in open_combos:
+            if combo["conditionId"] not in existing_cids:
+                all_positions.append(combo)
+
     return all_positions
 
 
 async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -> list[dict]:
-    """Fetch resolved/closed positions for a wallet. Hard cap: 5,000 positions.
-
-    The Polymarket /closed-positions API does not serve beyond 5,000 results;
-    we match that limit explicitly so no wallet ever exceeds it, regardless of
-    whether the wallet is curated or not. No on-chain bypass is used.
-    """
+    """Fetch resolved/closed positions for a wallet, including Closed Combo Parlays. Hard cap: 5,000 positions."""
     MAX_CLOSED = 5000
     all_closed = []
     offset = 0
@@ -110,6 +173,14 @@ async def fetch_closed_positions(session: aiohttp.ClientSession, address: str) -
             logger.warning(f"Failed to fetch closed positions for {address} at offset {offset}: {e}")
             offset += limit
             await asyncio.sleep(1)
+
+    # Merge Closed Combo Parlay Positions
+    _, closed_combos = await fetch_combo_activity(session, address)
+    if closed_combos:
+        existing_cids = {p.get("conditionId") for p in all_closed if p.get("conditionId")}
+        for combo in closed_combos:
+            if combo["conditionId"] not in existing_cids:
+                all_closed.append(combo)
 
     return all_closed[:MAX_CLOSED]
 
@@ -328,29 +399,36 @@ async def process_batch(conn: asyncpg.Connection, session: aiohttp.ClientSession
         """, address, balance, position_value, website_pnl, website_volume, website_rank)
 
 
-async def run_discovery(db_url: str = DB_URL):
+async def run_discovery(pool: asyncpg.Pool | None = None, db_url: str = DB_URL):
     """Main entry point for the discovery worker."""
     logger.info("Starting wallet discovery worker...")
-    conn = await asyncpg.connect(db_url)
+    
+    own_pool = False
+    if pool is None:
+        pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
+        own_pool = True
 
-    # The v2 discovery queue: UNCLASSIFIED wallets awaiting vetting
-    rows = await conn.fetch(
-        """
-        SELECT address, tier_reason AS source FROM wallets_v2
-        WHERE tier = 'UNCLASSIFIED'
-          AND (next_check_at IS NULL OR next_check_at <= NOW())
-        ORDER BY added_at ASC LIMIT $1
-        """,
-        BATCH_SIZE
-    )
-    wallets = [{"address": r["address"], "source": r["source"]} for r in rows]
-    logger.info(f"Found {len(wallets)} wallets to evaluate.")
+    try:
+        async with pool.acquire() as conn:
+            # The v2 discovery queue: UNCLASSIFIED wallets awaiting vetting
+            rows = await conn.fetch(
+                """
+                SELECT address, tier_reason AS source FROM wallets_v2
+                WHERE tier = 'UNCLASSIFIED'
+                  AND (next_check_at IS NULL OR next_check_at <= NOW())
+                ORDER BY added_at ASC LIMIT $1
+                """,
+                BATCH_SIZE
+            )
+            wallets = [{"address": r["address"], "source": r["source"]} for r in rows]
+            logger.info(f"Found {len(wallets)} wallets to evaluate.")
 
-    if wallets:
-        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-            await process_batch(conn, session, wallets)
-
-    await conn.close()
+            if wallets:
+                async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
+                    await process_batch(conn, session, wallets)
+    finally:
+        if own_pool and pool:
+            await pool.close()
     logger.info("Discovery worker finished.")
 
 
