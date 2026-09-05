@@ -184,4 +184,36 @@ describe("PanelCanvas", () => {
     expect(await screen.findByText(/nearby scopes/i)).toBeInTheDocument();
     expect(screen.getByText(/cricket.*11,995 wallets/i)).toBeInTheDocument();
   });
+
+  it("brings clicked table to the upper layer (highest z-index) when multiple tables exist", async () => {
+    const onState = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <PanelCanvas
+        panels={[
+          panel("w", "wallet_table"),
+          panel("m", "market_table"),
+        ]}
+        onPanelState={onState}
+      />,
+    );
+    const panelW = await screen.findByTestId("panel-w");
+    const panelM = await screen.findByTestId("panel-m");
+    const containerW = panelW.parentElement!;
+    const containerM = panelM.parentElement!;
+
+    // Click panel-m -> it should have higher z-index and active class
+    await user.click(panelM);
+    const zM1 = Number(containerM.style.zIndex);
+    const zW1 = Number(containerW.style.zIndex);
+    expect(zM1).toBeGreaterThan(zW1);
+    expect(panelM).toHaveClass("research-panel-active");
+
+    // Click panel-w -> panel-w must now overlap panel-m in upper layer
+    await user.click(panelW);
+    const zM2 = Number(containerM.style.zIndex);
+    const zW2 = Number(containerW.style.zIndex);
+    expect(zW2).toBeGreaterThan(zM2);
+    expect(panelW).toHaveClass("research-panel-active");
+  });
 });

@@ -14,6 +14,10 @@ const RAIL_KEY = "pt-research-rail-width";
 const RAIL_MIN = 280;
 const RAIL_MAX = 560;
 
+const TERMINAL_HEIGHT_KEY = "pt-research-terminal-height";
+const TERMINAL_MIN_HEIGHT = 180;
+const TERMINAL_MAX_HEIGHT = 750;
+
 function initialRailWidth(): number {
   if (typeof window === "undefined") return 350;
   const raw = Number(window.localStorage.getItem(RAIL_KEY));
@@ -23,14 +27,26 @@ function initialRailWidth(): number {
   return 350;
 }
 
+function initialTerminalHeight(): number {
+  if (typeof window === "undefined") return 360;
+  const raw = Number(window.localStorage.getItem(TERMINAL_HEIGHT_KEY));
+  if (Number.isFinite(raw) && raw >= TERMINAL_MIN_HEIGHT && raw <= TERMINAL_MAX_HEIGHT) {
+    return raw;
+  }
+  return 360;
+}
+
 export default function ResearchHub() {
   const hub = useResearchHub();
   const [railWidth, setRailWidth] = useState(initialRailWidth);
+  const [terminalHeight, setTerminalHeight] = useState(initialTerminalHeight);
+  const [isDraggingTerminal, setIsDraggingTerminal] = useState(false);
   const [mobileView, setMobileView] = useState<"chat" | "results">("chat");
   const [tradingPanelVisible, setTradingPanelVisible] = useState(true);
   const [tradingTerminalOpen, setTradingTerminalOpen] = useState(true);
   const [selectedPosition, setSelectedPosition] = useState<ResearchPosition | null>(null);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
+  const terminalDragState = useRef<{ startY: number; startHeight: number } | null>(null);
   const activeChat = hub.chats.find((c) => c.chat_id === hub.activeChatId) ?? null;
   const activeId = activeChat?.chat_id ?? null;
 
@@ -43,6 +59,13 @@ export default function ResearchHub() {
   const clampRail = (width: number) => {
     const clamped = Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(width)));
     window.localStorage.setItem(RAIL_KEY, String(clamped));
+    return clamped;
+  };
+
+  const clampTerminalHeight = (h: number) => {
+    const maxH = typeof window !== "undefined" ? Math.max(TERMINAL_MIN_HEIGHT, window.innerHeight - 120) : TERMINAL_MAX_HEIGHT;
+    const clamped = Math.min(maxH, Math.max(TERMINAL_MIN_HEIGHT, Math.round(h)));
+    window.localStorage.setItem(TERMINAL_HEIGHT_KEY, String(clamped));
     return clamped;
   };
 
@@ -177,10 +200,62 @@ export default function ResearchHub() {
         </section>
       </div>
 
+      {/* ── Horizontal Splitter: Resize Trading / Wallet Terminal Height ── */}
+      {tradingTerminalOpen && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize wallet terminal height"
+          aria-valuenow={terminalHeight}
+          aria-valuemin={TERMINAL_MIN_HEIGHT}
+          aria-valuemax={TERMINAL_MAX_HEIGHT}
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+              e.preventDefault();
+              setTerminalHeight((h) => clampTerminalHeight(h + (e.key === "ArrowUp" ? 24 : -24)));
+            }
+          }}
+          onPointerDown={(e) => {
+            (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+            setIsDraggingTerminal(true);
+            terminalDragState.current = { startY: e.clientY, startHeight: terminalHeight };
+          }}
+          onPointerMove={(e) => {
+            const drag = terminalDragState.current;
+            if (!drag || e.buttons === 0) return;
+            setTerminalHeight(clampTerminalHeight(drag.startHeight - (e.clientY - drag.startY)));
+          }}
+          onPointerUp={(e) => {
+            (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+            terminalDragState.current = null;
+            setIsDraggingTerminal(false);
+          }}
+          onPointerCancel={(e) => {
+            (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+            terminalDragState.current = null;
+            setIsDraggingTerminal(false);
+          }}
+          className={`research-horizontal-splitter ${isDraggingTerminal ? "research-splitter-active" : ""}`}
+        >
+          <div className="research-horizontal-splitter-grip" />
+        </div>
+      )}
+
       {/* ── Lower Section: Trading Terminal (Positions Bar + Buy/Sell Ticket) ── */}
       <section
         aria-label="Trading terminal"
-        className={`trading-terminal ${tradingTerminalOpen ? "trading-terminal-open" : "trading-terminal-closed"}`}
+        className={`trading-terminal ${tradingTerminalOpen ? "trading-terminal-open" : "trading-terminal-closed"} ${isDraggingTerminal ? "trading-terminal-resizing" : ""}`}
+        style={
+          tradingTerminalOpen
+            ? {
+                height: terminalHeight,
+                minHeight: terminalHeight,
+                maxHeight: terminalHeight,
+                transition: isDraggingTerminal ? "none" : undefined,
+              }
+            : undefined
+        }
       >
         {/* Left: Positions dock */}
         <div className="trading-terminal-positions">

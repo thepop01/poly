@@ -19,6 +19,9 @@ import {
 interface PanelFrameProps {
   panel: ResearchPanel;
   colSpan?: number;
+  isActive?: boolean;
+  onBringToFront?: () => void;
+  onStartMove?: (e: React.PointerEvent) => void;
   onResizeSpan?: (span: number) => void;
   onToggleSpan?: () => void;
   onMove?: (direction: "prev" | "next") => void;
@@ -74,6 +77,9 @@ function isLive(panel: ResearchPanel): boolean {
 export default function PanelFrame({
   panel,
   colSpan,
+  isActive,
+  onBringToFront,
+  onStartMove,
   onResizeSpan,
   onToggleSpan,
   onMove,
@@ -105,7 +111,8 @@ export default function PanelFrame({
       aria-label={panel.title}
       data-testid={`panel-${panel.panel_id}`}
       data-panel-type={panel.panel_type}
-      className={`research-panel${minimized ? " research-panel-minimized" : ""} ${maximized ? "research-panel-maximized" : ""} ${isDragging ? "opacity-50" : ""}`}
+      onPointerDown={() => onBringToFront?.()}
+      className={`research-panel ${isActive ? "research-panel-active" : ""}${minimized ? " research-panel-minimized" : ""} ${maximized ? "research-panel-maximized" : ""} ${isDragging ? "opacity-50" : ""}`}
       hidden={hidden}
     >
       {/* Colored accent strip at top */}
@@ -115,7 +122,14 @@ export default function PanelFrame({
         aria-hidden="true"
       />
 
-      <header className="research-panel-header">
+      <header
+        className={`research-panel-header ${!maximized ? "cursor-grab active:cursor-grabbing select-none" : ""}`}
+        onPointerDown={(e) => {
+          if (!maximized && onStartMove) {
+            onStartMove(e);
+          }
+        }}
+      >
         {/* Left: Move grip & arrows + icon chip + title + meta */}
         <div className="flex items-center gap-2 min-w-0">
           {onMove && !maximized && (
@@ -123,15 +137,22 @@ export default function PanelFrame({
               <div
                 draggable
                 onDragStart={onDragStart}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  if (!maximized && onStartMove) {
+                    onStartMove(e);
+                  }
+                }}
                 className="cursor-grab active:cursor-grabbing p-0.5 hover:text-foreground transition-colors"
-                title="Drag to reorder panel"
-                aria-label="Drag to reorder"
+                title="Drag to reposition table freely"
+                aria-label="Drag to reposition table"
               >
                 <GripVertical size={13} />
               </div>
               <button
                 type="button"
                 disabled={!canMovePrev}
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={() => onMove("prev")}
                 aria-label={`Move ${panel.title} left`}
                 title="Move left / before"
@@ -142,6 +163,7 @@ export default function PanelFrame({
               <button
                 type="button"
                 disabled={!canMoveNext}
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={() => onMove("next")}
                 aria-label={`Move ${panel.title} right`}
                 title="Move right / after"
@@ -190,6 +212,7 @@ export default function PanelFrame({
                 <button
                   key={opt.span}
                   type="button"
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={() => handleSpanClick(opt.span)}
                   aria-label={`Set ${panel.title} width to ${opt.label}`}
                   title={`Resize width to ${opt.label} (${opt.span} cols)`}
@@ -210,6 +233,7 @@ export default function PanelFrame({
             {/* Minimize / Restore */}
             <button
               type="button"
+              onPointerDown={(e) => e.stopPropagation()}
               aria-label={minimized ? `Restore ${panel.title}` : `Minimize ${panel.title}`}
               title={minimized ? "Restore panel" : "Minimize panel"}
               onClick={() => onState(panel.panel_id, minimized ? "normal" : "minimized")}
@@ -221,6 +245,7 @@ export default function PanelFrame({
             {/* Maximize / Restore size */}
             <button
               type="button"
+              onPointerDown={(e) => e.stopPropagation()}
               aria-label={maximized ? `Restore ${panel.title} size` : `Maximize ${panel.title}`}
               title={maximized ? "Restore size" : "Maximize panel"}
               onClick={() => onState(panel.panel_id, maximized ? "normal" : "maximized")}
@@ -232,6 +257,7 @@ export default function PanelFrame({
             {/* Close */}
             <button
               type="button"
+              onPointerDown={(e) => e.stopPropagation()}
               aria-label={`Close ${panel.title}`}
               title="Close panel"
               onClick={() => onState(panel.panel_id, "closed")}
