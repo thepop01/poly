@@ -1,12 +1,31 @@
 "use client";
 
 import type { ResearchPanel } from "@/types/research";
-import { Minimize2, Maximize2, X, RotateCcw, Table2, BarChart2, Users, Layers, Columns2 } from "lucide-react";
+import {
+  Minus,
+  Square,
+  Minimize2,
+  X,
+  ChevronDown,
+  Table2,
+  BarChart2,
+  Users,
+  Layers,
+  ArrowLeft,
+  ArrowRight,
+  GripVertical,
+} from "lucide-react";
 
 interface PanelFrameProps {
   panel: ResearchPanel;
   colSpan?: number;
+  onResizeSpan?: (span: number) => void;
   onToggleSpan?: () => void;
+  onMove?: (direction: "prev" | "next") => void;
+  canMovePrev?: boolean;
+  canMoveNext?: boolean;
+  onDragStart?: () => void;
+  isDragging?: boolean;
   hidden?: boolean;
   onState: (panelId: string, state: ResearchPanel["state"]) => void;
   children: React.ReactNode;
@@ -55,7 +74,13 @@ function isLive(panel: ResearchPanel): boolean {
 export default function PanelFrame({
   panel,
   colSpan,
+  onResizeSpan,
   onToggleSpan,
+  onMove,
+  canMovePrev,
+  canMoveNext,
+  onDragStart,
+  isDragging,
   hidden,
   onState,
   children,
@@ -67,12 +92,20 @@ export default function PanelFrame({
   const minimized = panel.state === "minimized";
   const maximized = panel.state === "maximized";
 
+  const handleSpanClick = (span: number) => {
+    if (onResizeSpan) {
+      onResizeSpan(span);
+    } else if (onToggleSpan) {
+      onToggleSpan();
+    }
+  };
+
   return (
     <article
       aria-label={panel.title}
       data-testid={`panel-${panel.panel_id}`}
       data-panel-type={panel.panel_type}
-      className={`research-panel${minimized ? " research-panel-minimized" : ""} ${maximized ? "research-panel-maximized" : ""}`}
+      className={`research-panel${minimized ? " research-panel-minimized" : ""} ${maximized ? "research-panel-maximized" : ""} ${isDragging ? "opacity-50" : ""}`}
       hidden={hidden}
     >
       {/* Colored accent strip at top */}
@@ -83,10 +116,44 @@ export default function PanelFrame({
       />
 
       <header className="research-panel-header">
-        {/* Left: icon chip + title + meta */}
+        {/* Left: Move grip & arrows + icon chip + title + meta */}
         <div className="flex items-center gap-2 min-w-0">
+          {onMove && !maximized && (
+            <div className="flex items-center gap-0.5 text-subtle flex-shrink-0">
+              <div
+                draggable
+                onDragStart={onDragStart}
+                className="cursor-grab active:cursor-grabbing p-0.5 hover:text-foreground transition-colors"
+                title="Drag to reorder panel"
+                aria-label="Drag to reorder"
+              >
+                <GripVertical size={13} />
+              </div>
+              <button
+                type="button"
+                disabled={!canMovePrev}
+                onClick={() => onMove("prev")}
+                aria-label={`Move ${panel.title} left`}
+                title="Move left / before"
+                className="research-panel-move-btn disabled:opacity-20 disabled:cursor-not-allowed"
+              >
+                <ArrowLeft size={11} />
+              </button>
+              <button
+                type="button"
+                disabled={!canMoveNext}
+                onClick={() => onMove("next")}
+                aria-label={`Move ${panel.title} right`}
+                title="Move right / after"
+                className="research-panel-move-btn disabled:opacity-20 disabled:cursor-not-allowed"
+              >
+                <ArrowRight size={11} />
+              </button>
+            </div>
+          )}
+
           <div
-            className="research-panel-type-icon"
+            className="research-panel-type-icon flex-shrink-0"
             style={{ color: typeConfig.accent, backgroundColor: `${typeConfig.accent}18` }}
           >
             <TypeIcon size={12} />
@@ -97,8 +164,8 @@ export default function PanelFrame({
           </div>
         </div>
 
-        {/* Right: live badge + controls */}
-        <div className="flex flex-shrink-0 items-center gap-1.5">
+        {/* Right: live badge + width presets + window controls */}
+        <div className="flex flex-shrink-0 items-center gap-2">
           {/* Live / Snapshot badge */}
           {live ? (
             <span className="research-panel-live-badge">
@@ -111,75 +178,68 @@ export default function PanelFrame({
             </span>
           )}
 
-          {/* Minimize / Restore */}
-          {minimized ? (
-            <button
-              type="button"
-              aria-label={`Restore ${panel.title}`}
-              title="Restore"
-              onClick={() => onState(panel.panel_id, "normal")}
-              className="research-panel-btn"
-            >
-              <RotateCcw size={12} />
-            </button>
-          ) : (
-            <button
-              type="button"
-              aria-label={`Minimize ${panel.title}`}
-              title="Minimize"
-              onClick={() => onState(panel.panel_id, "minimized")}
-              className="research-panel-btn"
-            >
-              <Minimize2 size={12} />
-            </button>
+          {/* Width Resizing Presets */}
+          {!maximized && !minimized && (
+            <div className="flex items-center bg-surface-2 border border-border rounded-md p-0.5 text-[10px] font-mono">
+              {[
+                { span: 6, label: "50%" },
+                { span: 12, label: "100%" },
+                { span: 4, label: "33%" },
+                { span: 8, label: "66%" },
+              ].map((opt) => (
+                <button
+                  key={opt.span}
+                  type="button"
+                  onClick={() => handleSpanClick(opt.span)}
+                  aria-label={`Set ${panel.title} width to ${opt.label}`}
+                  title={`Resize width to ${opt.label} (${opt.span} cols)`}
+                  className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                    colSpan === opt.span
+                      ? "bg-primary text-white font-semibold shadow-xs"
+                      : "text-subtle hover:text-foreground hover:bg-surface-3"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
           )}
 
-          {/* Half / Full width toggle */}
-          {onToggleSpan && !maximized && !minimized && (
+          {/* Window controls (Minimize [-], Maximize [□], Close [×]) */}
+          <div className="flex items-center gap-1 border-l border-border pl-1.5">
+            {/* Minimize / Restore */}
             <button
               type="button"
-              aria-label={colSpan === 12 ? `Split ${panel.title} to half width` : `Expand ${panel.title} to full width`}
-              title={colSpan === 12 ? "Half width (side-by-side)" : "Full width"}
-              onClick={onToggleSpan}
+              aria-label={minimized ? `Restore ${panel.title}` : `Minimize ${panel.title}`}
+              title={minimized ? "Restore panel" : "Minimize panel"}
+              onClick={() => onState(panel.panel_id, minimized ? "normal" : "minimized")}
               className="research-panel-btn"
             >
-              <Columns2 size={12} className={colSpan === 6 ? "text-primary" : ""} />
+              {minimized ? <ChevronDown size={12} /> : <Minus size={12} />}
             </button>
-          )}
 
-          {/* Maximize / Restore size */}
-          {maximized ? (
+            {/* Maximize / Restore size */}
             <button
               type="button"
-              aria-label={`Restore ${panel.title} size`}
-              title="Restore size"
-              onClick={() => onState(panel.panel_id, "normal")}
+              aria-label={maximized ? `Restore ${panel.title} size` : `Maximize ${panel.title}`}
+              title={maximized ? "Restore size" : "Maximize panel"}
+              onClick={() => onState(panel.panel_id, maximized ? "normal" : "maximized")}
               className="research-panel-btn"
             >
-              <Minimize2 size={12} />
+              {maximized ? <Minimize2 size={11} /> : <Square size={11} strokeWidth={1.75} />}
             </button>
-          ) : (
-            <button
-              type="button"
-              aria-label={`Maximize ${panel.title}`}
-              title="Maximize"
-              onClick={() => onState(panel.panel_id, "maximized")}
-              className="research-panel-btn"
-            >
-              <Maximize2 size={12} />
-            </button>
-          )}
 
-          {/* Close */}
-          <button
-            type="button"
-            aria-label={`Close ${panel.title}`}
-            title="Close"
-            onClick={() => onState(panel.panel_id, "closed")}
-            className="research-panel-btn research-panel-btn-close"
-          >
-            <X size={12} />
-          </button>
+            {/* Close */}
+            <button
+              type="button"
+              aria-label={`Close ${panel.title}`}
+              title="Close panel"
+              onClick={() => onState(panel.panel_id, "closed")}
+              className="research-panel-btn research-panel-btn-close"
+            >
+              <X size={12} />
+            </button>
+          </div>
         </div>
       </header>
 

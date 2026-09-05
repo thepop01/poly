@@ -26,16 +26,70 @@ function ordered(panels: ResearchPanel[]): ResearchPanel[] {
 
 export default function PanelCanvas({ panels, onPanelState }: PanelCanvasProps) {
   const [spanOverrides, setSpanOverrides] = useState<Record<string, number>>({});
-  const visible = ordered(panels.filter((p) => p.state !== "closed"));
+  const [orderOverrides, setOrderOverrides] = useState<string[]>([]);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+
+  const unclosed = panels.filter((p) => p.state !== "closed");
   const closed = ordered(panels.filter((p) => p.state === "closed"));
+
+  // Sort visible panels according to orderOverrides if present
+  const defaultSorted = ordered(unclosed);
+  const visible = orderOverrides.length > 0
+    ? [...unclosed].sort((a, b) => {
+        const idxA = orderOverrides.indexOf(a.panel_id);
+        const idxB = orderOverrides.indexOf(b.panel_id);
+        if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+        if (idxA !== -1) return -1;
+        if (idxB !== -1) return 1;
+        return defaultSorted.indexOf(a) - defaultSorted.indexOf(b);
+      })
+    : defaultSorted;
+
   const maximized = visible.find((p) => p.state === "maximized");
   const shown = maximized ? [maximized] : visible;
 
-  const toggleSpan = (panelId: string, currentSpan: number) => {
+  const handleResizeSpan = (panelId: string, span: number) => {
     setSpanOverrides((prev) => ({
       ...prev,
-      [panelId]: currentSpan === 12 ? 6 : 12,
+      [panelId]: span,
     }));
+  };
+
+  const handleMove = (panelId: string, direction: "prev" | "next") => {
+    const currentIds = visible.map((p) => p.panel_id);
+    const index = currentIds.indexOf(panelId);
+    if (index === -1) return;
+    const targetIndex = direction === "prev" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= currentIds.length) return;
+    const nextIds = [...currentIds];
+    const [moved] = nextIds.splice(index, 1);
+    nextIds.splice(targetIndex, 0, moved);
+    setPanelOrderOverrides(nextIds);
+  };
+
+  const setPanelOrderOverrides = (nextIds: string[]) => {
+    setOrderOverrides(nextIds);
+  };
+
+  const handleDragStart = (panelId: string) => {
+    setDraggedId(panelId);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (targetId: string) => {
+    if (!draggedId || draggedId === targetId) return;
+    const currentIds = visible.map((p) => p.panel_id);
+    const fromIndex = currentIds.indexOf(draggedId);
+    const toIndex = currentIds.indexOf(targetId);
+    if (fromIndex === -1 || toIndex === -1) return;
+    const nextIds = [...currentIds];
+    const [moved] = nextIds.splice(fromIndex, 1);
+    nextIds.splice(toIndex, 0, moved);
+    setPanelOrderOverrides(nextIds);
+    setDraggedId(null);
   };
 
   return (
@@ -46,17 +100,28 @@ export default function PanelCanvas({ panels, onPanelState }: PanelCanvasProps) 
         </p>
       ) : (
         <div className="research-panel-grid">
-          {shown.map((panel) => {
+          {shown.map((panel, idx) => {
             const colSpan = spanOverrides[panel.panel_id] ?? (panel.layout.col_span === 12 ? 6 : panel.layout.col_span);
+            const canMovePrev = idx > 0;
+            const canMoveNext = idx < shown.length - 1;
+
             return (
               <div
                 key={panel.panel_id}
-                className={`research-span-${colSpan}`}
+                className={`research-span-${colSpan} transition-all duration-200`}
+                onDragOver={handleDragOver}
+                onDrop={() => handleDrop(panel.panel_id)}
               >
                 <PanelFrame
                   panel={panel}
                   colSpan={colSpan}
-                  onToggleSpan={() => toggleSpan(panel.panel_id, colSpan)}
+                  onResizeSpan={(span) => handleResizeSpan(panel.panel_id, span)}
+                  onToggleSpan={() => handleResizeSpan(panel.panel_id, colSpan === 12 ? 6 : 12)}
+                  onMove={(dir) => handleMove(panel.panel_id, dir)}
+                  canMovePrev={canMovePrev}
+                  canMoveNext={canMoveNext}
+                  onDragStart={() => handleDragStart(panel.panel_id)}
+                  isDragging={draggedId === panel.panel_id}
                   onState={onPanelState}
                 >
                   <PanelRenderer panel={panel} />

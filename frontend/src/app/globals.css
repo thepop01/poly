@@ -621,10 +621,26 @@
   background-color: var(--color-surface-2);
 }
 .research-panel-body {
-  min-height: 0;
-  max-height: 480px;
+  min-height: 160px;
+  max-height: 850px;
   overflow-y: auto;
   overflow-x: auto;
+  resize: vertical;
+}
+.research-panel-move-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  color: var(--color-text-3);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.research-panel-move-btn:hover:not(:disabled) {
+  color: var(--color-text);
+  background-color: var(--color-surface-3);
 }
 .research-panel-minimized .research-panel-header {
   border-bottom: none;
