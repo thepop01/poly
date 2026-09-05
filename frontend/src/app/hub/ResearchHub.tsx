@@ -7,6 +7,7 @@ import EmptyResearchState from "@/components/research/EmptyResearchState";
 import PanelCanvas from "@/components/research/PanelCanvas";
 import TradingPanel from "@/components/research/TradingPanel";
 import PositionsBar from "@/components/research/PositionsBar";
+import type { ResearchPosition } from "@/types/research";
 import { useResearchHub } from "@/hooks/useResearchHub";
 
 const RAIL_KEY = "pt-research-rail-width";
@@ -25,9 +26,16 @@ export default function ResearchHub() {
   const [railWidth, setRailWidth] = useState(initialRailWidth);
   const [mobileView, setMobileView] = useState<"chat" | "results">("chat");
   const [tradingPanelVisible, setTradingPanelVisible] = useState(true);
+  const [selectedPosition, setSelectedPosition] = useState<ResearchPosition | null>(null);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
   const activeChat = hub.chats.find((c) => c.chat_id === hub.activeChatId) ?? null;
   const activeId = activeChat?.chat_id ?? null;
+
+  const [prevChatId, setPrevChatId] = useState<string | null>(activeId);
+  if (prevChatId !== activeId) {
+    setPrevChatId(activeId);
+    setSelectedPosition(null);
+  }
 
   const clampRail = (width: number) => {
     const clamped = Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(width)));
@@ -35,9 +43,8 @@ export default function ResearchHub() {
     return clamped;
   };
 
-  // Collect position rows for the positions bar (wallet table panels have position data)
   const allPanels = activeId ? hub.panelsByChat[activeId] ?? [] : [];
-  const allResults = activeId ? hub.resultsForChat(activeId) : [];
+  const positions = activeId ? hub.positionsForChat(activeId) : [];
 
   return (
     <div className="research-workspace" data-testid="research-workspace">
@@ -155,14 +162,16 @@ export default function ResearchHub() {
 
           {/* Bottom: Positions bar dock */}
           <PositionsBar
-            rows={[]}
+            rows={positions}
             chatTitle={activeChat?.title}
+            selectedPosition={selectedPosition}
+            onSelectPosition={(pos) => setSelectedPosition(pos)}
           />
         </div>
 
         {/* Right: Trading / Position view panel */}
         <TradingPanel
-          positionRows={[]}
+          selectedPosition={selectedPosition ?? undefined}
           visible={tradingPanelVisible}
           onToggle={() => setTradingPanelVisible((v) => !v)}
         />

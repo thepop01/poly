@@ -1,14 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import type { ResultMember } from "@/types/research";
+import type { ResearchPosition } from "@/types/research";
 import { ChevronDown, ChevronUp, Layers } from "lucide-react";
 
 interface PositionsBarProps {
-  /** Position data rows from research results */
-  rows: ResultMember[];
-  /** Active chat title for tab label */
+  rows: ResearchPosition[];
   chatTitle?: string;
+  selectedPosition?: ResearchPosition | null;
+  onSelectPosition?: (position: ResearchPosition) => void;
 }
 
 type BarTab = "positions" | "orders" | "fills" | "taker";
@@ -20,126 +20,194 @@ const BAR_TABS: { key: BarTab; label: string }[] = [
   { key: "taker", label: "Taker Activity" },
 ];
 
-const COL_HEADERS = ["Markets", "Ticker", "Side", "Contracts", "Avg", "Cost", "Payout if right", "Market value", "Day P&L", "Total"];
+const COL_HEADERS = [
+  "Market",
+  "Side",
+  "Contracts",
+  "Avg Price",
+  "Current Value",
+  "Unrealized P&L",
+];
 
-function extractPositionCols(row: ResultMember) {
-  const d = (row.payload ?? {}) as Record<string, unknown>;
-  return {
-    market: String(d.market_slug ?? d.market ?? "—"),
-    ticker: String(d.ticker ?? "—"),
-    side: String(d.outcome ?? d.side ?? "—"),
-    contracts: Number(d.size ?? d.contracts ?? 0),
-    avg: Number(d.avg_price ?? d.avg ?? 0),
-    cost: Number(d.cost ?? 0),
-    payout: Number(d.payout ?? 0),
-    value: Number(d.market_value ?? 0),
-    dayPnl: Number(d.day_pnl ?? 0),
-    total: Number(d.total_pnl ?? 0),
-  };
+function formatCurrency(val: number | null | undefined): string {
+  if (val === null || val === undefined || isNaN(val)) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(val);
 }
 
-export default function PositionsBar({ rows, chatTitle }: PositionsBarProps) {
+function formatNumber(val: number | null | undefined): string {
+  if (val === null || val === undefined || isNaN(val)) return "—";
+  return val.toLocaleString();
+}
+
+export default function PositionsBar({
+  rows,
+  chatTitle,
+  selectedPosition,
+  onSelectPosition,
+}: PositionsBarProps) {
   const [open, setOpen] = useState(true);
   const [activeTab, setActiveTab] = useState<BarTab>("positions");
 
-  const posRows = rows.slice(0, 50);
+  const isSelected = (pos: ResearchPosition) =>
+    Boolean(
+      selectedPosition &&
+      selectedPosition.condition_id === pos.condition_id &&
+      selectedPosition.address === pos.address &&
+      selectedPosition.outcome === pos.outcome
+    );
 
   return (
     <div className={`positions-bar ${open ? "positions-bar-open" : "positions-bar-closed"}`}>
       {/* Bar header strip */}
       <div className="positions-bar-header">
-        {/* Chat ticker chip */}
         {chatTitle && (
           <div className="positions-chat-chip">
             <Layers size={10} className="text-subtle" />
             <span className="truncate max-w-32">{chatTitle}</span>
-            <span className="text-subtle/60">×</span>
           </div>
         )}
 
         {/* Sub-tabs */}
-        <div className="positions-tabs">
-          {BAR_TABS.map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setActiveTab(tab.key)}
-              className={`positions-tab-btn ${activeTab === tab.key ? "active" : ""}`}
-            >
-              {tab.label}
-              {tab.key === "orders" && posRows.length > 0 && (
-                <span className="positions-tab-count">{Math.min(posRows.length, 9)}</span>
-              )}
-            </button>
-          ))}
+        <div className="positions-tabs" role="tablist">
+          {BAR_TABS.map((tab) => {
+            const count = tab.key === "positions" ? rows.length : undefined;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={`positions-tab-btn ${activeTab === tab.key ? "active" : ""}`}
+              >
+                {tab.label}
+                {count !== undefined && count > 0 && (
+                  <span className="positions-tab-count">{count}</span>
+                )}
+              </button>
+            );
+          })}
         </div>
-
-        {/* Sort icon placeholder */}
-        <button type="button" className="ml-auto text-subtle hover:text-foreground transition-colors p-1 rounded" title="Sort columns">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M3 6h18M7 12h10M11 18h2" />
-          </svg>
-        </button>
 
         {/* Collapse toggle */}
         <button
           type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="positions-collapse-btn"
-          title={open ? "Collapse positions" : "Expand positions"}
+          onClick={() => setOpen((o) => !o)}
+          className="positions-collapse-btn ml-auto"
           aria-label={open ? "Collapse positions bar" : "Expand positions bar"}
+          title={open ? "Collapse positions" : "Expand positions"}
         >
           {open ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
         </button>
       </div>
 
-      {/* Table body */}
+      {/* Bar body */}
       {open && (
-        <div className="positions-bar-body">
-          {activeTab !== "positions" ? (
-            <div className="flex items-center justify-center h-20 text-sm text-subtle">
-              No {activeTab} data available
+        <div className="positions-bar-body overflow-x-auto">
+          {activeTab === "positions" && (
+            rows.length === 0 ? (
+              <div className="flex items-center justify-center h-24 text-subtle text-xs">
+                No open positions for wallets in this chat.
+              </div>
+            ) : (
+              <table className="positions-table">
+                <thead>
+                  <tr>
+                    {COL_HEADERS.map((h) => (
+                      <th key={h} className="positions-th">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row, idx) => {
+                    const marketLabel = row.market_title ?? row.condition_id;
+                    const selected = isSelected(row);
+                    const pnlPositive = (row.unrealized_pnl ?? 0) >= 0;
+                    return (
+                      <tr
+                        key={`${row.address}-${row.condition_id}-${row.outcome ?? idx}`}
+                        className={`positions-tr ${selected ? "positions-tr-selected bg-primary/5" : "hover:bg-surface-2/50"}`}
+                      >
+                        <td className="positions-td font-medium max-w-[200px] truncate">
+                          <button
+                            type="button"
+                            onClick={() => onSelectPosition?.(row)}
+                            className="text-left font-medium text-foreground hover:text-primary transition-colors truncate block w-full focus:outline-none"
+                            title={marketLabel}
+                          >
+                            {marketLabel}
+                          </button>
+                        </td>
+                        <td className="positions-td font-semibold text-xs">
+                          {row.outcome ? (
+                            <span
+                              className={
+                                row.outcome.toUpperCase() === "YES"
+                                  ? "text-success"
+                                  : row.outcome.toUpperCase() === "NO"
+                                  ? "text-danger"
+                                  : "text-foreground"
+                              }
+                            >
+                              {row.outcome}
+                            </span>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="positions-td font-mono text-xs text-right">
+                          {formatNumber(row.size)}
+                        </td>
+                        <td className="positions-td font-mono text-xs text-right">
+                          {formatCurrency(row.avg_price)}
+                        </td>
+                        <td className="positions-td font-mono text-xs text-right font-medium">
+                          {formatCurrency(row.current_value)}
+                        </td>
+                        <td
+                          className={`positions-td font-mono text-xs text-right ${
+                            row.unrealized_pnl !== null && row.unrealized_pnl !== undefined
+                              ? pnlPositive
+                                ? "text-success"
+                                : "text-danger"
+                              : ""
+                          }`}
+                        >
+                          {row.unrealized_pnl !== null && row.unrealized_pnl !== undefined
+                            ? `${pnlPositive ? "+" : ""}${formatCurrency(row.unrealized_pnl)}`
+                            : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )
+          )}
+
+          {activeTab === "orders" && (
+            <div className="flex items-center justify-center h-24 text-subtle text-xs">
+              Orders unavailable in research preview.
             </div>
-          ) : posRows.length === 0 ? (
-            <div className="flex items-center justify-center h-20 text-sm text-subtle">
-              Run a wallet or market analysis to populate positions.
+          )}
+
+          {activeTab === "fills" && (
+            <div className="flex items-center justify-center h-24 text-subtle text-xs">
+              Fills history unavailable in research preview.
             </div>
-          ) : (
-            <table className="positions-table">
-              <thead>
-                <tr>
-                  {COL_HEADERS.map((col) => (
-                    <th key={col} className="positions-th">{col}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {posRows.map((row, i) => {
-                  const p = extractPositionCols(row);
-                  const pnlPositive = p.total >= 0;
-                  return (
-                    <tr key={i} className="positions-tr">
-                      <td className="positions-td font-medium truncate max-w-[140px]">{p.market}</td>
-                      <td className="positions-td font-mono text-xs">{p.ticker}</td>
-                      <td className={`positions-td font-semibold text-xs ${p.side.toLowerCase() === "yes" ? "text-success" : "text-danger"}`}>
-                        {p.side}
-                      </td>
-                      <td className="positions-td font-mono text-xs text-right">{p.contracts.toLocaleString()}</td>
-                      <td className="positions-td font-mono text-xs text-right">{p.avg > 0 ? `${(p.avg * 100).toFixed(0)}¢` : "—"}</td>
-                      <td className="positions-td font-mono text-xs text-right">{p.cost > 0 ? `$${p.cost.toFixed(2)}` : "—"}</td>
-                      <td className="positions-td font-mono text-xs text-right">{p.payout > 0 ? `$${p.payout.toFixed(2)}` : "—"}</td>
-                      <td className="positions-td font-mono text-xs text-right">{p.value > 0 ? `$${p.value.toFixed(2)}` : "—"}</td>
-                      <td className={`positions-td font-mono text-xs text-right ${p.dayPnl >= 0 ? "text-success" : "text-danger"}`}>
-                        {p.dayPnl !== 0 ? `${p.dayPnl >= 0 ? "+" : ""}$${p.dayPnl.toFixed(2)}` : "—"}
-                      </td>
-                      <td className={`positions-td font-mono text-xs text-right font-semibold ${pnlPositive ? "text-success" : "text-danger"}`}>
-                        {p.total !== 0 ? `${pnlPositive ? "+" : ""}$${p.total.toFixed(2)}` : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          )}
+
+          {activeTab === "taker" && (
+            <div className="flex items-center justify-center h-24 text-subtle text-xs">
+              Taker activity unavailable in research preview.
+            </div>
           )}
         </div>
       )}
