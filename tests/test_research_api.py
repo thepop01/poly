@@ -231,3 +231,94 @@ async def test_run_starts_are_rate_limited_per_user(api_pool):
     finally:
         async with api_pool.acquire() as conn:
             await conn.execute("DELETE FROM users WHERE user_id = $1::uuid", owner_id)
+
+
+@pytest.mark.asyncio
+async def test_positions_endpoint_auth_and_ownership(api_pool, user_a, user_b):
+    from src.research.repository import ResearchRepository
+    repo = ResearchRepository(api_pool)
+
+    # 1. Unauthenticated -> 401
+    async with _client(None) as client:
+        res = await client.get(f"/api/v2/research/chats/{uuid.uuid4()}/positions")
+        assert res.status_code == 401
+
+    # 2. Create chats for user A and user B
+    async with _client(user_a["token"]) as client_a:
+        chat_a_res = await client_a.post("/api/v2/research/chats", json={"title": "Chat A"})
+        chat_a_id = chat_a_res.json()["chat_id"]
+
+    async with _client(user_b["token"]) as client_b:
+        chat_b_res = await client_b.post("/api/v2/research/chats", json={"title": "Chat B"})
+        chat_b_id = chat_b_res.json()["chat_id"]
+
+    # 3. User B cannot access User A's chat positions -> 404
+    async with _client(user_b["token"]) as client_b:
+        res = await client_b.get(f"/api/v2/research/chats/{chat_a_id}/positions")
+        assert res.status_code == 404
+
+    # 4. Limit validation: limit > 200 or < 1 -> 422, offset < 0 -> 422
+    async with _client(user_a["token"]) as client_a:
+        res = await client_a.get(f"/api/v2/research/chats/{chat_a_id}/positions?limit=201")
+        assert res.status_code == 422
+        res = await client_a.get(f"/api/v2/research/chats/{chat_a_id}/positions?limit=0")
+        assert res.status_code == 422
+        res = await client_a.get(f"/api/v2/research/chats/{chat_a_id}/positions?offset=-1")
+        assert res.status_code == 422
+
+    # 5. Empty chat positions
+    async with _client(user_a["token"]) as client_a:
+        res = await client_a.get(f"/api/v2/research/chats/{chat_a_id}/positions")
+        assert res.status_code == 200
+        data = res.json()
+        assert data == {"positions": [], "offset": 0, "limit": 100}
+
+    # 6. Seed wallet in chat A with position, and wallet in chat B
+    w_a = f"0x{'a'*36}0001"
+    w_b = f"0x{'b'*36}0002"
+    m_cid = f"test-market-{uuid.uuid4().hex[:8]}"
+
+    try:
+        async with api_pool.acquire() as conn:
+            for w in (w_a, w_b):
+                await conn.execute("INSERT INTO wallets_v2 (address, username) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING", w, "w")
+            await conn.execute("INSERT INTO markets_v2 (condition_id, title) VALUES ($1, 'Market Pos Title') ON CONFLICT (condition_id) DO NOTHING", m_cid)
+            await conn.execute(
+                """INSERT INTO wallet_positions_v2 (address, condition_id, outcome, size, avg_price, current_value, unrealized_pnl, is_resolved)
+                   VALUES ($1, $2, 'YES', 10, 0.5, 50.0, 5.0, FALSE),
+                          ($3, $2, 'NO', 20, 0.4, 80.0, -2.0, FALSE)
+                   ON CONFLICT (address, condition_id, outcome) DO NOTHING""",
+                w_a, m_cid, w_b,
+            )
+
+        # Save result sets
+        await repo.save_result_set(
+            user_a["owner_id"], chat_a_id, "wallet_set", "Wallets A", {"tool": "test"},
+            [{"entity_type": "wallet", "entity_key": w_a, "payload": {}}],
+        )
+        await repo.save_result_set(
+            user_b["owner_id"], chat_b_id, "wallet_set", "Wallets B", {"tool": "test"},
+            [{"entity_type": "wallet", "entity_key": w_b, "payload": {}}],
+        )
+
+        async with _client(user_a["token"]) as client_a:
+            res = await client_a.get(f"/api/v2/research/chats/{chat_a_id}/positions")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["offset"] == 0
+            assert data["limit"] == 100
+            assert len(data["positions"]) == 1
+            pos = data["positions"][0]
+            assert pos["address"] == w_a
+            assert pos["condition_id"] == m_cid
+            assert pos["market_title"] == "Market Pos Title"
+            assert pos["outcome"] == "YES"
+            assert pos["size"] == 10.0
+            assert pos["current_value"] == 50.0
+
+    finally:
+        async with api_pool.acquire() as conn:
+            await conn.execute("DELETE FROM wallet_positions_v2 WHERE condition_id = $1", m_cid)
+            await conn.execute("DELETE FROM markets_v2 WHERE condition_id = $1", m_cid)
+            await conn.execute("DELETE FROM wallets_v2 WHERE address = ANY($1)", [w_a, w_b])
+

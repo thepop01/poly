@@ -176,6 +176,37 @@ async def patch_panel(
     return panel.model_dump(mode="json")
 
 
+@router.get("/chats/{chat_id}/results")
+async def list_results(
+    chat_id: UUID,
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    user: dict = Depends(get_current_user),
+):
+    repo = _repo(request)
+    if await repo.get_chat(_uid(user), chat_id) is None:
+        raise HTTPException(status_code=404, detail="chat not found")
+    summaries = await repo.list_result_summaries(_uid(user), chat_id, limit)
+    return {"results": [s.model_dump(mode="json") for s in summaries]}
+
+
+@router.get("/chats/{chat_id}/positions")
+async def list_positions(
+    chat_id: UUID,
+    request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
+    user: dict = Depends(get_current_user),
+):
+    repo = _repo(request)
+    if await repo.get_chat(_uid(user), chat_id) is None:
+        raise HTTPException(status_code=404, detail="chat not found")
+    analytics = ResearchAnalytics(request.app.state.pool)
+    positions = await analytics.list_positions(_uid(user), chat_id, offset, limit)
+    return {"positions": positions, "offset": offset, "limit": limit}
+
+
+
 @router.get("/results/{result_set_id}")
 async def get_result_page(
     result_set_id: UUID,
