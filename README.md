@@ -2,6 +2,18 @@
 
 Real-time analytics dashboard for Polymarket — wallet tracking, smart money alerts, and leaderboard rankings powered by on-chain data.
 
+## Repository layout
+
+- `src/` — maintained backend code; `src/scripts/` contains supported operator commands.
+- `frontend/` — maintained web application.
+- `tests/` — maintained automated test suite.
+- `docs/` — design, operating, and investigation documentation; start with [`docs/rule.md`](docs/rule.md) for the worker runbook.
+- `logs/` — local runtime logs (never committed).
+- `scratch/` — local one-off diagnostics, backtests, exports, reports, and evidence (never committed).
+- `backtest_cache/` and `backtest/_cache/` — local cache only (never committed).
+
+Do not place generated logs, one-off scripts, exports, or working investigation notes at the repository root. Put them in the corresponding `logs/` or `scratch/` subdirectory.
+
 ## Architecture
 
 ```
@@ -31,6 +43,9 @@ The v1 tables (`tracked_wallets`, `wallet_stats`) are legacy-read-only — no wo
 
 | Worker | Interval | Purpose |
 |--------|----------|---------|
+| `live_wallet_listener` | Real-time (WS) | **Method B: Mined Block Logs Listener**: Listens to Polygon WebSockets for `Deposit Wallet Factory` and `Gnosis Safe Proxy Factory` creation events (<1.5s latency). Instantly registers new wallets (`tier='NEW'`) appearing directly under "New Wallets" on the wallet page. Uses Envio HyperSync for restart catch-up. |
+| `polymarket_trade_backfiller` | Continuous | **Polymarket Data API Trade Backfiller**: Concurrently syncs up to 3,500 trades per wallet at ~2,600+ trades/sec across 8 async workers, writing to `wallet_trades_v2` and updating `curated_trade_sync`. |
+| `positions_winrate_backfill` | Continuous | Computes 10 PnL windows (100–5000), Price-bucket win rates (<0.15 to >0.75), Open Positions, and Balances into `wallet_metrics_v2`. |
 | `trade_tracker` | 15s | Watches `OrderFilled` events from 3 CTF Exchange contracts via Etherscan V2. Chunked 200-block requests. $1k+ → `smart_money_trades` + auto-add to `wallets_v2` (source `'trade'`), $5k+ → `LARGE_TRADE` alerts |
 | `deposit_tracker` | 60s | Watches pUSD mints from zero address via Alchemy. $5k+ → `wallet_activity_v2` + `LARGE_DEPOSIT` alerts, auto-add to `wallets_v2` (source `'deposit'`), `might_cook_type` badge if 0 trades |
 | `wallet_trade_history` | 60s | Vets `tier='UNCLASSIFIED'` wallets: fetches positions + balance from Polymarket API, assigns DEAD / LOW_BALANCE / NEW / STANDARD (± dormant). Transient errors leave the wallet queued |
