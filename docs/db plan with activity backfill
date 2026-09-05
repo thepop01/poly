@@ -1,0 +1,474 @@
+Yes. The design is sound with one adjustment: Activity-only markets should enter the canonical position tables only after we can prove an actual remaining position. Activity history alone may describe a position that was already sold or redeemed.
+
+## Final treatment
+
+| Classification | Storage and website behavior |
+|---|---|
+| Exact Activity BUY | Mark `verified`; no extra lifecycle statistics or raw events required |
+| Activity values differ | Store side-by-side DB and Activity aggregates plus evidence metadata; raw relevant events retained temporarily or archived |
+| Same-leg non-trade | Show separately under wallet “Data Integrity”; do not present as an ordinary closed position |
+| DB outcome differs | Store both outcomes side by side with lifecycle aggregates |
+| DB market absent | Mark unsupported; do not delete automatically |
+| Activity market absent from DB | Determine whether it is open, redeemable, already exited, or lifecycle-only; automatically promote only verified positions |
+
+## Phase 1: Schema
+
+### 1. Extend the existing reconciliation table
+
+Extend `wallet_position_activity_reconciliations_v2`; do not create another position table for every classification.
+
+Add the Activity-side lifecycle columns:
+
+```text
+activity_buy_shares
+activity_buy_usdc
+activity_avg_buy_price
+
+activity_sell_shares
+activity_sell_usdc
+activity_avg_sell_price
+
+activity_redeem_shares
+activity_redeem_usdc
+
+activity_split_shares
+activity_split_usdc
+activity_merge_shares
+activity_merge_usdc
+activity_conversion_shares
+activity_conversion_usdc
+
+activity_reward_usdc
+activity_rebate_usdc
+activity_yield_usdc
+
+activity_net_shares
+activity_event_count
+activity_distinct_event_count
+activity_first_event_at
+activity_last_event_at
+
+acquisition_status
+position_recommendation
+baseline_complete
+```
+
+The existing DB columns remain next to these Activity columns.
+
+### 2. Store only relevant raw events
+
+Create `wallet_activity_exception_events_v2` for events belonging to:
+
+- `activity_buy_values_differ`
+- `activity_same_leg_nontrade`
+- `activity_outcome_differs`
+- Activity-only markets requiring reconstruction
+
+Use:
+
+```text
+address
+condition_id
+asset
+outcome
+event_type
+side
+size
+usdc_size
+price
+timestamp
+transaction_hash
+event_hash
+snapshot_id
+```
+
+Unique key:
+
+```text
+(address, event_hash)
+```
+
+Do not put thousands of events into one JSON column.
+
+### 3. Add incremental scan state
+
+Create `wallet_activity_scan_state_v2`:
+
+```text
+address
+baseline_complete
+baseline_start_at
+baseline_end_at
+last_confirmed_timestamp
+last_confirmed_event_hash
+last_scan_at
+last_audit_id
+last_error
+next_retry_at
+```
+
+### 4. Add Parquet archive manifests
+
+Create `wallet_activity_archives_v2`:
+
+```text
+address
+file_path
+sha256
+row_count
+minimum_timestamp
+maximum_timestamp
+schema_version
+compression
+baseline_complete
+created_at
+verified_at
+```
+
+### 5. Extend Activity-only market records
+
+Extend `wallet_activity_only_markets_v2` with:
+
+```text
+activity_status
+net_shares
+buy_cost
+average_buy_price
+current_position_verified
+has_open_position
+is_redeemable
+canonical_position_created
+last_checked_at
+```
+
+Suggested statuses:
+
+```text
+open_confirmed
+provisional_open
+redeemable_confirmed
+fully_exited
+lifecycle_only
+missing_position_api_row
+unknown
+```
+
+## Phase 2: Correct aggregation and classification
+
+Aggregate Activity at:
+
+```text
+wallet + condition_id + outcome
+```
+
+Process all relevant event types:
+
+```text
+TRADE BUY
+TRADE SELL
+REDEEM
+SPLIT
+MERGE
+CONVERSION
+REWARD
+MAKER_REBATE
+TAKER_REBATE
+YIELD
+```
+
+Rewards or rebates without a `condition_id` remain wallet-level and must not be assigned to an arbitrary market.
+
+### Exact Activity BUY
+
+When shares and cost basis match within tolerance:
+
+```text
+comparison_quality = exact_activity_buy
+status = verified
+```
+
+Do not retain its full historical events after aggregation.
+
+### Activity values differ
+
+Side-by-side aggregate columns are sufficient for normal operation. We do not need to retain every event permanently in PostgreSQL.
+
+However, retain:
+
+- event count
+- distinct count
+- first/last timestamp
+- hashes
+- snapshot completeness
+- relevant raw exception events until archive or final decision
+
+This allows us to distinguish:
+
+- multiple legitimate BUYs
+- partial SELLs
+- redemption
+- position API using net rather than gross shares
+- actual incorrect cost basis
+- duplicated events
+
+### Same-leg non-trade
+
+Rename the meaning to:
+
+```text
+lifecycle_without_acquisition
+```
+
+These rows appear in a separate website section. They must not be added to normal closed-position history because SELL/REDEEM values cannot prove the acquisition cost.
+
+We can display:
+
+- market
+- outcome
+- SELL shares and proceeds
+- average sell price
+- REDEEM shares and proceeds
+- first/last event
+- opposite-outcome activity
+- acquisition source: `unknown`
+
+If a later transfer, split, conversion, snapshot, or BUY proves the acquisition, the worker automatically changes its status.
+
+### DB outcome differs
+
+Store the DB and Activity legs side by side. Do not merge outcomes.
+
+For example:
+
+```text
+DB: Yes, 500,000 shares
+Activity: No, 500,000 shares
+```
+
+The matching Activity outcome can remain verified while the unsupported DB outcome remains under review.
+
+### DB market absent
+
+Mark:
+
+```text
+classification = activity_absent
+baseline_complete = true
+```
+
+Check accounting snapshots and on-chain transfers before making it ineligible. Absence from Activity alone is insufficient proof of fabrication.
+
+## Phase 3: Automatically handle Activity-only markets
+
+The worker must first reconstruct the lifecycle:
+
+```text
+net shares =
+    BUY
+  + SPLIT
+  + verified transfer-in
+  - SELL
+  - MERGE
+  - REDEEM
+  - verified transfer-out
+```
+
+Then apply this state machine:
+
+```text
+Activity-only market
+    ├── Found in wallet_positions_v2
+    │      → open_confirmed
+    ├── Found as redeemable in position/accounting snapshot
+    │      → redeemable_confirmed
+    ├── net shares > 0 and market unresolved
+    │      → provisional_open
+    ├── net shares = 0
+    │      → fully_exited or lifecycle_only
+    └── acquisition history incomplete
+           → unknown; do not create canonical position
+```
+
+### Automatic insertion rule
+
+Insert or update `wallet_positions_v2` only when supported by:
+
+- the Polymarket `/positions` response, or
+- an accounting snapshot, or
+- a mathematically complete Activity lifecycle with a verified positive balance
+
+Tag reconstructed rows:
+
+```text
+source = activity_reconstructed
+provisional = true
+reconciliation_id = ...
+```
+
+Do not create a canonical closed position until cost basis and final proceeds are complete.
+
+### Automatic future correction
+
+On every incremental Activity or position sync:
+
+- If the position appears in `/positions`, replace the provisional values with source values.
+- If it becomes redeemable, update the status.
+- If a REDEEM arrives, reduce the balance.
+- If the balance reaches zero, remove it from open positions.
+- Create a closed-position row only when its cost basis and final PnL are provable.
+- Recompute metrics only after the canonical row changes.
+
+## Phase 4: Scan selection
+
+Queue a wallet when:
+
+```text
+absolute_difference >= $10,000
+OR
+(
+    absolute_difference >= $1,000
+    AND percentage_difference >= 10%
+)
+```
+
+Calculate:
+
+```text
+absolute_difference = abs(database_pnl - pm_pnl)
+
+percentage_difference =
+    absolute_difference / max(abs(pm_pnl), 1000)
+```
+
+Priority:
+
+1. Difference ≥ $100,000
+2. Difference ≥ $10,000
+3. Difference ≥ $1,000 and ≥10%
+
+Dormant or incompletely backfilled wallets should not enter the queue until their position baseline is complete.
+
+## Phase 5: Baseline and incremental fetching
+
+### Initial baseline
+
+For a selected wallet:
+
+1. Fetch complete Activity history using recursive timestamp windows.
+2. Confirm every page/window is complete.
+3. Deduplicate by stable event hash.
+4. Build market/outcome lifecycle aggregates.
+5. Store exception events only.
+6. Save the high-watermark.
+7. Apply classifications.
+8. Keep only the newest 500 raw wallet events.
+
+### Incremental scan
+
+Start from:
+
+```text
+last_confirmed_timestamp - 24 hours
+```
+
+Then:
+
+1. Fetch every event until current time.
+2. Do not stop at 500.
+3. Deduplicate using `(address, event_hash)`.
+4. Update affected market aggregates.
+5. Reclassify affected positions.
+6. Run automatic Activity-only state transitions.
+7. Keep only the newest 500 hot events.
+8. Advance the watermark only after the transaction succeeds.
+
+The 500 limit is strictly a retention limit, not a fetch limit.
+
+## Phase 6: Parquet archive
+
+For wallets whose divergence is at least **$100,000**:
+
+1. Complete the baseline.
+2. Reconcile every relevant market.
+3. Write the full raw Activity snapshot to Parquet with ZSTD compression.
+4. Read it back and verify row count.
+5. Verify SHA-256 and timestamp bounds.
+6. Save the manifest in PostgreSQL.
+7. Retain exception events and the newest 500 events in PostgreSQL.
+8. Remove older raw PostgreSQL events only after archive verification.
+
+## Phase 7: Website
+
+Add a `Data Integrity` tab to the wallet page.
+
+Display a summary:
+
+| Classification | Count | DB PnL | Status |
+|---|---:|---:|---|
+| Verified exact | 429 | … | Verified |
+| Values differ | 267 | … | Review |
+| Lifecycle without acquisition | 18 | … | Unverified origin |
+| Outcome mismatch | 5 | … | Contradictory |
+| Activity absent | 14 | … | Unsupported |
+| Activity-only | 38 | — | Open/redeemable/lifecycle |
+
+For each issue, provide an expandable side-by-side view.
+
+`Same-leg non-trade` should appear only in this integrity view, not mixed into normal open or closed positions unless later verified.
+
+## Phase 8: Safety and metrics
+
+The first rollout should be advisory:
+
+- populate evidence
+- classify rows
+- display integrity results
+- do not alter `metrics_eligible`
+
+After backtesting proves a stable exclusion/reconstruction rule:
+
+1. Apply eligibility changes transactionally.
+2. Recompute overall metrics.
+3. Recompute category metrics.
+4. Recompute historical windows.
+5. Assert that all three equal the eligible ledger.
+6. Roll back if any invariant fails.
+
+Never modify a position merely to reduce divergence against `pm_pnl`.
+
+## Phase 9: Tests and rollout
+
+### Required automated tests
+
+- Multiple BUYs correctly aggregate weighted price.
+- BUY + partial SELL produces correct net shares.
+- REDEEM does not become a fake BUY.
+- SPLIT/MERGE/CONVERSION balance correctly.
+- Duplicate event hashes are ignored.
+- Same timestamp events are not skipped.
+- More than 500 new events are all processed before retention.
+- Activity-only open → redeemable → closed transition.
+- Incomplete baseline cannot exclude a DB row.
+- Outcome mismatch never merges Yes and No.
+- Metrics use only `metrics_eligible` canonical rows.
+- Failed Parquet verification preserves PostgreSQL events.
+
+### Backtest order
+
+1. BreakTheBank as the golden wallet.
+2. The second large-divergence wallet.
+3. The wallets in the local investigation roster at `scratch/evidence/divergence pnl list.md`.
+4. A control set of matching wallets.
+5. All threshold-qualified active wallets.
+6. Enable automatic position-state transitions.
+7. Enable proven metrics decisions only after results are reviewed.
+
+### Documentation on implementation
+
+Every implementation phase must update:
+
+- `docs/CHANGELOG.md`
+- `docs/CORE_LOGIC.md`
+- `docs/learner.md`
+
+This plan keeps exact matches lightweight, makes contradictions inspectable, preserves uncertain lifecycle rows without presenting them as real purchases, and allows Activity-only positions to repair themselves automatically when later source evidence arrives.

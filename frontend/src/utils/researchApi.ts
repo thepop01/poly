@@ -1,0 +1,146 @@
+"use client";
+
+import { getAuthToken } from "@/utils/api";
+import type {
+  ResearchChat,
+  ResearchMessage,
+  ResearchPanel,
+  ResultMember,
+  ResultSetSummary,
+  StreamEvent,
+} from "@/types/research";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
+function authHeaders(extra: Record<string, string> = {}): HeadersInit {
+  const token = getAuthToken();
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra,
+  };
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: authHeaders(init.headers as Record<string, string> | undefined),
+  });
+  if (!response.ok) {
+    throw new Error(`Research request failed: ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+export async function listChats(includeArchived = false): Promise<{ chats: ResearchChat[] }> {
+  return request(`/api/v2/research/chats?include_archived=${includeArchived}`);
+}
+
+export async function createChat(title?: string): Promise<ResearchChat> {
+  return request(`/api/v2/research/chats`, {
+    method: "POST",
+    body: JSON.stringify(title ? { title } : {}),
+  });
+}
+
+export async function getChat(chatId: string): Promise<ResearchChat> {
+  return request(`/api/v2/research/chats/${chatId}`);
+}
+
+export async function patchChat(
+  chatId: string,
+  patch: { title?: string; is_archived?: boolean },
+): Promise<ResearchChat> {
+  return request(`/api/v2/research/chats/${chatId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteChat(chatId: string): Promise<{ deleted: string }> {
+  return request(`/api/v2/research/chats/${chatId}`, { method: "DELETE" });
+}
+
+export async function listMessages(
+  chatId: string,
+  afterId = 0,
+  limit = 50,
+): Promise<{ messages: ResearchMessage[] }> {
+  return request(
+    `/api/v2/research/chats/${chatId}/messages?after_id=${afterId}&limit=${limit}`,
+  );
+}
+
+export async function listPanels(chatId: string): Promise<{ panels: ResearchPanel[] }> {
+  return request(`/api/v2/research/chats/${chatId}/panels`);
+}
+
+export async function patchPanel(
+  panelId: string,
+  state: ResearchPanel["state"],
+): Promise<ResearchPanel> {
+  return request(`/api/v2/research/panels/${panelId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ state }),
+  });
+}
+
+export async function getResultPage(
+  resultSetId: string,
+  offset = 0,
+  limit = 100,
+): Promise<{ summary: ResultSetSummary; members: ResultMember[] }> {
+  return request(
+    `/api/v2/research/results/${resultSetId}?offset=${offset}&limit=${limit}`,
+  );
+}
+
+function parseNdjsonLine(line: string): StreamEvent {
+  try {
+    return JSON.parse(line) as StreamEvent;
+  } catch {
+    throw new Error("Research stream contained malformed JSON");
+  }
+}
+
+/** Parse a buffered NDJSON string, emitting complete lines and keeping the tail. */
+export function splitNdjsonBuffer(buffer: string): { events: StreamEvent[]; rest: string } {
+  const lines = buffer.split("\n");
+  const rest = lines.pop() ?? "";
+  const events: StreamEvent[] = [];
+  for (const line of lines) {
+    if (line.trim()) events.push(parseNdjsonLine(line));
+  }
+  return { events, rest };
+}
+
+// Never retry a run POST automatically: a retry can duplicate a user
+// message and result snapshot.
+export async function streamResearchRun(
+  chatId: string,
+  prompt: string,
+  onEvent: (event: StreamEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/v2/research/chats/${chatId}/runs`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ prompt }),
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Research run failed: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const { events, rest } = splitNdjsonBuffer(buffer);
+    buffer = rest;
+    for (const event of events) onEvent(event);
+    if (done) break;
+  }
+  if (buffer.trim()) onEvent(parseNdjsonLine(buffer));
+}
