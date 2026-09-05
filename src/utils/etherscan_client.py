@@ -6,6 +6,7 @@ import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from itertools import cycle
+from typing import Iterator, Optional
 
 from src.utils.category_classifier import classify_tags
 
@@ -26,19 +27,24 @@ def _load_polygonscan_keys() -> list[str]:
         if single and not single.startswith("your_"):
             keys.append(single)
     if not keys:
-        keys.append("N43X2NKRKECA53JPYSXRC2B9H14173ESX9")
+        logger.warning("No POLYGONSCAN_API_KEY configured in environment variables!")
     return keys
 
 _polygonscan_keys: list[str] = []
-_polygonscan_key_cycle = None
+_polygonscan_key_cycle: Iterator[str] | None = None
 
 def _get_next_polygonscan_key() -> str:
     global _polygonscan_keys, _polygonscan_key_cycle
-    if not _polygonscan_keys:
+    if _polygonscan_key_cycle is None:
         _polygonscan_keys = _load_polygonscan_keys()
-        _polygonscan_key_cycle = cycle(_polygonscan_keys)
-        logger.info(f"Loaded {len(_polygonscan_keys)} Polygonscan API key(s) for rotation")
-    return next(_polygonscan_key_cycle)
+        if _polygonscan_keys:
+            _polygonscan_key_cycle = cycle(_polygonscan_keys)
+            logger.info(f"Loaded {len(_polygonscan_keys)} Polygonscan API key(s) for rotation")
+        else:
+            _polygonscan_key_cycle = None
+    if _polygonscan_keys and _polygonscan_key_cycle is not None:
+        return next(_polygonscan_key_cycle)
+    return ""
 CTF_EXCHANGE_V1 = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 CTF_EXCHANGE_V2 = "0xE111180000d2663C0091e4f400237545B87B996B"
 NEG_RISK_CTF_EXCHANGE = "0xe2222d279d744050d28e00520010520000310f59"
@@ -49,7 +55,7 @@ BLOCK_CHUNK_SIZE = 200
 
 _title_cache = {}
 
-async def _fetch_market_meta(session: aiohttp.ClientSession, token_id_decimal: str, condition_id_hex: str = None) -> dict:
+async def _fetch_market_meta(session: aiohttp.ClientSession, token_id_decimal: str, condition_id_hex: str | None = None) -> dict:
     """Fetch market title, category, subcategory and condition_id.
 
     Uses the CLOB API (which is reliable) instead of the Gamma API
@@ -178,7 +184,7 @@ async def get_latest_block_etherscan(session: aiohttp.ClientSession) -> str:
                     return str(int(res, 16))
     except Exception as e:
         logger.warning(f"Failed to fetch latest block: {e}")
-    return "91719000"
+    return None
 
 
 async def _fetch_exchange_logs(session: aiohttp.ClientSession, contract: str, from_block: int, to_block: int) -> list[dict]:
@@ -207,11 +213,18 @@ async def _fetch_exchange_logs(session: aiohttp.ClientSession, contract: str, fr
 
 async def fetch_recent_trades_etherscan(session: aiohttp.ClientSession, from_block: int | str = "latest", to_block: int | str = "latest") -> list[dict]:
     if from_block == "latest":
-        from_block = await get_latest_block_etherscan(session)
-    from_block = int(from_block)
+        fb = await get_latest_block_etherscan(session)
+        if fb is None:
+            return []
+        from_block = int(fb)
+    else:
+        from_block = int(from_block)
 
     if to_block == "latest":
-        to_block = int(await get_latest_block_etherscan(session))
+        tb = await get_latest_block_etherscan(session)
+        if tb is None:
+            return []
+        to_block = int(tb)
     else:
         to_block = int(to_block)
 
@@ -264,9 +277,13 @@ async def _parse_etherscan_logs(session: aiohttp.ClientSession, logs: list[dict]
                 usdc_amount = min(maker_amt, taker_amt) / 1e6
                 token_qty = max(maker_amt, taker_amt) / 1e6
 
+                raw_ts = str(log.get("timeStamp") or "0")
+                ts = int(raw_ts, 16) if raw_ts.startswith("0x") else int(raw_ts)
+
+                raw_bnum = str(log.get("blockNumber") or "0")
+                b_num = int(raw_bnum, 16) if raw_bnum.startswith("0x") else int(raw_bnum)
+
                 tx_hash = log.get("transactionHash", "")
-                ts = int(log.get("timeStamp", 0) or 0, 16) if isinstance(log.get("timeStamp"), str) and log.get("timeStamp").startswith("0x") else int(log.get("timeStamp", 0) or 0)
-                b_num = int(log.get("blockNumber", "0"), 16) if isinstance(log.get("blockNumber"), str) and log.get("blockNumber").startswith("0x") else int(log.get("blockNumber", 0))
 
                 group_key = (tx_hash, token_id_decimal)
 
@@ -355,7 +372,7 @@ async def fetch_historical_trades_polygonscan(session: aiohttp.ClientSession, ad
                     )
 
                     try:
-                        async with session.get(url, timeout=60.0) as r:
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=60.0)) as r:
                             data = await r.json()
 
                             if data.get("status") == "0" and data.get("message") == "NOTOK":
@@ -424,7 +441,8 @@ def _parse_redemption_log(log: dict, topic0: str) -> dict | None:
       - Neg Risk Adapter: conditionId is topics[2] (indexed), `data` is just the payout uint256.
     """
     try:
-        ts = int(log.get("timeStamp", 0) or 0, 16) if isinstance(log.get("timeStamp"), str) and log.get("timeStamp").startswith("0x") else int(log.get("timeStamp", 0) or 0)
+        raw_ts = str(log.get("timeStamp") or "0")
+        ts = int(raw_ts, 16) if raw_ts.startswith("0x") else int(raw_ts)
         tx_hash = log.get("transactionHash", "")
 
         if topic0 == NEG_RISK_PAYOUT_REDEMPTION_TOPIC:
@@ -466,11 +484,18 @@ def _parse_redemption_log(log: dict, topic0: str) -> dict | None:
 
 async def fetch_recent_redemptions_etherscan(session: aiohttp.ClientSession, from_block: int | str = "latest", to_block: int | str = "latest") -> list[dict]:
     if from_block == "latest":
-        from_block = await get_latest_block_etherscan(session)
-    from_block = int(from_block)
+        fb = await get_latest_block_etherscan(session)
+        if fb is None:
+            return []
+        from_block = int(fb)
+    else:
+        from_block = int(from_block)
 
     if to_block == "latest":
-        to_block = int(await get_latest_block_etherscan(session))
+        tb = await get_latest_block_etherscan(session)
+        if tb is None:
+            return []
+        to_block = int(tb)
     else:
         to_block = int(to_block)
 

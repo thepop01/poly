@@ -870,7 +870,7 @@ async def get_curated_wallet_list(
                 FROM wallet_category_stats
                 WHERE address = ANY($1)
                   AND resolved_count >= 5
-                  AND win_rate > 0.70
+                  AND win_rate >= 70
                   AND roi_pct > 30
                 GROUP BY address
             """, addresses)
@@ -881,7 +881,7 @@ async def get_curated_wallet_list(
                 FROM wallet_subcategory_stats
                 WHERE address = ANY($1)
                   AND resolved_count >= 5
-                  AND win_rate > 0.70
+                  AND win_rate >= 70
                   AND roi_pct > 30
                 GROUP BY address
             """, addresses)

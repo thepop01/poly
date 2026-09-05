@@ -39,23 +39,35 @@ export function WalletCell({
     }
   };
 
+  const handleActionClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+  };
+
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1.5 group">
       {username && username.length <= 20 && (
-        <span className="text-muted-fg text-xs font-semibold truncate max-w-[90px]" title={username}>
+        <Link
+          href={`/wallet/${address}`}
+          className="text-muted-fg hover:text-primary text-xs font-semibold truncate max-w-[90px] transition-colors"
+          title={username}
+        >
           {username}
-        </span>
+        </Link>
       )}
       <Link
         href={`/wallet/${address}`}
-        className="hover:text-primary transition-colors font-mono bg-primary/5 px-2 py-0.5 rounded border border-primary/10 whitespace-nowrap text-xs"
+        className="font-mono bg-primary/5 hover:bg-primary/15 px-2 py-0.5 rounded border border-primary/10 hover:border-primary/30 whitespace-nowrap text-xs text-foreground hover:text-primary transition-all duration-150 cursor-pointer shadow-sm hover:shadow-[0_0_8px_rgba(59,130,246,0.2)]"
+        title="View Wallet Profile & Analytics"
       >
         {formatAddress(address)}
       </Link>
       <button
-        onClick={(e) => onCopy(e, address)}
-        className="p-1 hover:bg-surface-2 rounded text-muted-fg hover:text-foreground transition-colors"
-        title="Copy"
+        onClick={(e) => {
+          handleActionClick(e);
+          onCopy(e, address);
+        }}
+        className="p-1 hover:bg-surface-2 rounded text-muted-fg hover:text-foreground transition-colors cursor-pointer"
+        title="Copy Address"
       >
         {copiedAddress === address ? <Check size={11} className="text-green-500" /> : <Copy size={11} />}
       </button>
@@ -63,7 +75,8 @@ export function WalletCell({
         href={`https://polymarket.com/profile/${address}`}
         target="_blank"
         rel="noopener noreferrer"
-        className="p-1 hover:bg-surface-2 rounded text-muted-fg hover:text-primary transition-colors"
+        onClick={handleActionClick}
+        className="p-1 hover:bg-surface-2 rounded text-muted-fg hover:text-primary transition-colors cursor-pointer"
         title="View on Polymarket"
       >
         <Globe size={11} />
@@ -72,8 +85,9 @@ export function WalletCell({
         href={`https://activity.polymarket-tools.com/?address=${address}`}
         target="_blank"
         rel="noopener noreferrer"
-        className="p-1 hover:bg-surface-2 rounded text-muted-fg hover:text-primary transition-colors"
-        title="PolyTools"
+        onClick={handleActionClick}
+        className="p-1 hover:bg-surface-2 rounded text-muted-fg hover:text-primary transition-colors cursor-pointer"
+        title="PolyTools Activity"
       >
         <Info size={11} />
       </a>
@@ -88,3 +102,4 @@ export function WalletCell({
     </div>
   );
 }
+

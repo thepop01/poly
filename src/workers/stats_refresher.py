@@ -29,8 +29,21 @@ POLL_INTERVAL = 300  # run every 5 minutes
 CURATED_MIN_ROI = 30.0
 CURATED_MIN_PNL = 10_000.0
 CURATED_MIN_WIN_RATE = 70.0
+CURATED_MIN_BALANCE = 5_000.0
 
 async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float | None:
+    # 1. Fast path: Polymarket /value API endpoint
+    url = f"https://data-api.polymarket.com/value?user={address}"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=6, connect=3, sock_read=4)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if isinstance(data, list) and data:
+                    return _parse(data[0].get("value", 0.0))
+    except Exception:
+        pass
+
+    # 2. On-chain fallback
     try:
         b = await alchemy_get_token_balances(session, address, [PUSD_CONTRACT])
         if b and b.get("tokenBalances"):
@@ -38,36 +51,48 @@ async def fetch_balance(session: aiohttp.ClientSession, address: str) -> float |
             if val and val != "0x":
                 return int(val, 16) / 10**6
     except Exception as e:
-        logger.warning(f"Failed to fetch balance for {address}: {e}")
-    return None
+        logger.debug(f"Failed to fetch on-chain balance for {address}: {e}")
+    return 0.0
 
 async def sweep_curated_tiers(conn: asyncpg.Connection):
     """Promote qualifying active STANDARD wallets to CURATED; demote curated
     wallets (except source='custom') that no longer qualify.
 
-    Qualification Rule (spec 2026-08-10):
-    PnL > $10,000 AND (ROI > 30% OR Win Rate > 70%)
+    Qualification Rules:
+    1. Win Rate >= 70% (min 3 resolved bets and non-negative PnL)
+    2. ROI >= 30% (with positive PnL)
+    3. PnL >= $10,000 (total_pnl or pm_pnl)
+    4. Balance >= $5,000 (with non-negative PnL)
     """
-    # PROMOTE: active STANDARD wallets meeting the threshold rule.
+    # PROMOTE: active STANDARD wallets meeting any curation rule
     await conn.execute(
-        """
+        f"""
         UPDATE wallets_v2 w
         SET tier = 'CURATED',
-            tier_reason = 'auto: pnl>10k AND (roi>30% OR win_rate>70%)',
+            tier_reason = CASE
+                WHEN COALESCE(m.win_rate, 0) >= {CURATED_MIN_WIN_RATE} AND COALESCE(m.resolved_count, 0) >= 3 THEN 'auto: win_rate >= 70%'
+                WHEN COALESCE(m.roi_pct, 0) >= {CURATED_MIN_ROI} AND COALESCE(m.total_pnl, m.pm_pnl, 0) > 0 THEN 'auto: roi >= 30%'
+                WHEN COALESCE(m.total_pnl, m.pm_pnl, 0) >= {CURATED_MIN_PNL} THEN 'auto: pnl >= $10k'
+                ELSE 'auto: balance >= $5k whale'
+            END,
             curated_at = NOW(),
             updated_at = NOW()
         FROM wallet_metrics_v2 m
         WHERE m.address = w.address
           AND w.tier = 'STANDARD'
           AND w.is_dormant = FALSE
-          AND COALESCE(m.total_pnl, 0) > 10000
-          AND (COALESCE(m.roi_pct, 0) > 30 OR COALESCE(m.win_rate, 0) > 70)
+          AND (
+              (COALESCE(m.win_rate, 0) >= {CURATED_MIN_WIN_RATE} AND COALESCE(m.resolved_count, 0) >= 3 AND COALESCE(m.total_pnl, m.pm_pnl, 0) >= 0)
+              OR (COALESCE(m.roi_pct, 0) >= {CURATED_MIN_ROI} AND COALESCE(m.total_pnl, m.pm_pnl, 0) > 0)
+              OR (COALESCE(m.total_pnl, m.pm_pnl, 0) >= {CURATED_MIN_PNL})
+              OR (COALESCE(m.balance, 0) >= {CURATED_MIN_BALANCE} AND COALESCE(m.total_pnl, m.pm_pnl, 0) >= 0)
+          )
         """
     )
 
-    # DEMOTE: curated wallets that no longer meet either condition -> demote tag.
+    # DEMOTE: curated wallets that fail all conditions (and are not custom-added)
     await conn.execute(
-        """
+        f"""
         UPDATE wallets_v2 w
         SET tier = CASE
                 WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) < 1000 THEN 'LOW_BALANCE'
@@ -78,14 +103,17 @@ async def sweep_curated_tiers(conn: asyncpg.Connection):
                 WHEN w.last_trade_at IS NULL OR w.last_trade_at < NOW() - INTERVAL '30 days' THEN TRUE
                 ELSE FALSE
             END,
-            tier_reason = 'auto: fails pnl>10k AND (roi>30% OR win_rate>70%)',
+            tier_reason = 'auto: fails curation criteria',
             updated_at = NOW()
         FROM wallet_metrics_v2 m
         WHERE m.address = w.address
           AND w.tier = 'CURATED'
-          AND (
-              COALESCE(m.total_pnl, 0) <= 10000
-              OR (COALESCE(m.roi_pct, 0) <= 30 AND COALESCE(m.win_rate, 0) <= 70)
+          AND w.address NOT IN (SELECT address FROM wallet_sources_v2 WHERE source = 'custom')
+          AND NOT (
+              (COALESCE(m.win_rate, 0) >= {CURATED_MIN_WIN_RATE} AND COALESCE(m.resolved_count, 0) >= 3 AND COALESCE(m.total_pnl, m.pm_pnl, 0) >= 0)
+              OR (COALESCE(m.roi_pct, 0) >= {CURATED_MIN_ROI} AND COALESCE(m.total_pnl, m.pm_pnl, 0) > 0)
+              OR (COALESCE(m.total_pnl, m.pm_pnl, 0) >= {CURATED_MIN_PNL})
+              OR (COALESCE(m.balance, 0) >= {CURATED_MIN_BALANCE} AND COALESCE(m.total_pnl, m.pm_pnl, 0) >= 0)
           )
         """
     )
@@ -97,38 +125,22 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
         # Auto-hibernate wallets that haven't traded in 30 days
         hibernate_cutoff = datetime.now(timezone.utc) - timedelta(days=30)
         
-        # 1. Demote dormant CURATED wallets to PREVIOUSLY_CURATED and set is_dormant = TRUE
-        await conn.execute("""
-            UPDATE wallets_v2
-            SET tier = 'PREVIOUSLY_CURATED', is_dormant = TRUE, updated_at = NOW()
-            WHERE tier = 'CURATED' AND (last_trade_at IS NULL OR last_trade_at < $1)
-        """, hibernate_cutoff)
-
-        # 2. Hibernate dormant STANDARD / LOW_BALANCE / NEW wallets
+        # 1. Hibernate wallets that haven't traded in 30 days
         await conn.execute("""
             UPDATE wallets_v2
             SET is_dormant = TRUE, updated_at = NOW()
-            WHERE tier IN ('STANDARD', 'LOW_BALANCE', 'NEW') AND is_dormant = FALSE AND (last_trade_at IS NULL OR last_trade_at < $1)
+            WHERE is_dormant = FALSE AND (last_trade_at IS NULL OR last_trade_at < $1)
         """, hibernate_cutoff)
 
-        # 3. Wake up PREVIOUSLY_CURATED wallets when they trade again -> set to STANDARD (sweep_curated_tiers will re-promote if metrics qualify)
-        await conn.execute("""
-            UPDATE wallets_v2
-            SET tier = 'STANDARD', is_dormant = FALSE, updated_at = NOW()
-            WHERE tier = 'PREVIOUSLY_CURATED'
-              AND last_trade_at >= $1
-        """, hibernate_cutoff)
-
-        # 4. Wake up STANDARD / LOW_BALANCE / NEW wallets when they trade again
+        # 2. Wake up wallets when they trade again (last_trade_at within 30 days)
         await conn.execute("""
             UPDATE wallets_v2
             SET is_dormant = FALSE, updated_at = NOW()
-            WHERE is_dormant = TRUE AND tier != 'PREVIOUSLY_CURATED'
-              AND last_trade_at >= $1
+            WHERE is_dormant = TRUE AND last_trade_at >= $1
         """, hibernate_cutoff)
 
         # Sweep tiers to the canonical model for every wallet with metrics.
-        # CURATED and PREVIOUSLY_CURATED are never auto-demoted to STANDARD/LOW_BALANCE.
+        # CURATED wallets are never auto-demoted to STANDARD/LOW_BALANCE.
         await conn.execute("""
             UPDATE wallets_v2 w
             SET tier = sub.new_tier,
@@ -138,6 +150,7 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
             FROM (
                 SELECT w2.address,
                     CASE
+                        WHEN m.address IS NULL THEN w2.tier
                         WHEN COALESCE(m.balance,0) + COALESCE(m.position_value,0) < 1000 THEN 'LOW_BALANCE'
                         WHEN w2.last_trade_at IS NULL THEN 'NEW'
                         ELSE 'STANDARD'
@@ -148,7 +161,7 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
                     END AS new_is_dormant
                 FROM wallets_v2 w2
                 LEFT JOIN wallet_metrics_v2 m ON w2.address = m.address
-                WHERE w2.tier NOT IN ('CURATED', 'PREVIOUSLY_CURATED')
+                WHERE w2.tier != 'CURATED'
             ) sub
             WHERE w.address = sub.address AND (w.tier IS DISTINCT FROM sub.new_tier OR w.is_dormant IS DISTINCT FROM sub.new_is_dormant)
         """)
@@ -157,9 +170,6 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
         await sweep_curated_tiers(conn)
 
         # Fetch only active wallets stale past the 12-hour window.
-        # Hibernated wallets are NOT refreshed proactively — when they trade,
-        # trade_tracker updates last_trade_at, the dormancy sweep wakes them up
-        # (is_dormant = FALSE), and they re-enter this queue automatically.
         rows = await conn.fetch(
             """
             SELECT w.address
@@ -167,8 +177,8 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
             LEFT JOIN wallet_metrics_v2 m ON w.address = m.address
             WHERE w.is_dormant = FALSE
               AND (w.last_trade_at IS NULL OR w.last_trade_at >= NOW() - INTERVAL '7 days')
-              AND (m.computed_at IS NULL OR m.computed_at < NOW() - INTERVAL '12 hours')
-            ORDER BY m.computed_at ASC NULLS FIRST
+              AND (m.capital_synced_at IS NULL OR m.capital_synced_at < NOW() - INTERVAL '12 hours')
+            ORDER BY m.capital_synced_at ASC NULLS FIRST
             LIMIT $1
             """,
             BATCH_SIZE,
@@ -188,25 +198,9 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
         nonlocal refreshed, errors
         async with sem:
             try:
-                async with pool.acquire() as rconn:
-                    crow = await rconn.fetchrow(
-                        "SELECT deposits, withdrawals, net_capital, peak_capital, last_capital_block FROM wallet_metrics_v2 WHERE address = $1", address
-                    )
-
-                cur_dep = float(crow["deposits"]) if crow and crow["deposits"] is not None else 0.0
-                cur_wdw = float(crow["withdrawals"]) if crow and crow["withdrawals"] is not None else 0.0
-                cur_net = float(crow["net_capital"]) if crow and crow["net_capital"] is not None else 0.0
-                cur_peak = float(crow["peak_capital"]) if crow and crow["peak_capital"] is not None else 0.0
-                last_block = int(crow["last_capital_block"]) if crow and crow["last_capital_block"] is not None else 0
-                from_block = last_block + 1 if last_block > 0 else 0
-
-                deposits, withdrawals, peak_capital, net_capital, max_block = await fetch_capital_metrics(
-                    session, address, from_block=from_block, current_deposits=cur_dep, current_withdrawals=cur_wdw, current_net_capital=cur_net, current_peak_capital=cur_peak
-                )
-
-                positions = await fetch_positions(session, address)
                 balance = await fetch_balance(session, address)
-                next_last_block = max(last_block, max_block or 0)
+                pos_res = await fetch_positions(session, address)
+                positions = pos_res[0] if isinstance(pos_res, tuple) else pos_res
 
                 # Compute position_value from open positions
                 position_value = 0.0
@@ -218,18 +212,13 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
                 async with pool.acquire() as wconn:
                     # Upsert into wallet_metrics_v2
                     await wconn.execute("""
-                        INSERT INTO wallet_metrics_v2 (address, balance, deposits, withdrawals, net_capital, peak_capital, position_value, last_capital_block, computed_at)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                        INSERT INTO wallet_metrics_v2 (address, balance, position_value, capital_synced_at)
+                        VALUES ($1, $2, $3, NOW())
                         ON CONFLICT (address) DO UPDATE SET
                             balance = EXCLUDED.balance,
-                            deposits = COALESCE(EXCLUDED.deposits, wallet_metrics_v2.deposits),
-                            withdrawals = COALESCE(EXCLUDED.withdrawals, wallet_metrics_v2.withdrawals),
-                            net_capital = COALESCE(EXCLUDED.net_capital, wallet_metrics_v2.net_capital),
-                            peak_capital = COALESCE(EXCLUDED.peak_capital, wallet_metrics_v2.peak_capital),
                             position_value = EXCLUDED.position_value,
-                            last_capital_block = EXCLUDED.last_capital_block,
-                            computed_at = NOW()
-                    """, address, balance, deposits, withdrawals, net_capital, peak_capital, position_value, next_last_block)
+                            capital_synced_at = NOW()
+                    """, address, balance, position_value)
 
                     # Reclassify on fresh numbers (canonical model:
                     # LOW_BALANCE / NEW / STANDARD; CURATED never auto-demoted,
@@ -246,7 +235,6 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
                                 WHEN last_trade_at IS NULL OR last_trade_at < NOW() - INTERVAL '30 days' THEN TRUE
                                 ELSE FALSE
                             END,
-                            tier_reason = 'stats_refresher reclassify',
                             updated_at = NOW()
                         WHERE address = $1
                           AND tier NOT IN ('CURATED', 'UNCLASSIFIED')

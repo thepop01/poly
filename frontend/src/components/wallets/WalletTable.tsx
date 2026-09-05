@@ -24,17 +24,37 @@ export interface WalletRow {
   avg_buy_price?: string | number | null;
   buys_below_15c?: string | number | null;
   wins_below_15c?: string | number | null;
+  avg_sell_below_15c?: string | number | null;
   buys_15_30c?: string | number | null;
   wins_15_30c?: string | number | null;
+  avg_sell_15_30c?: string | number | null;
   buys_30_45c?: string | number | null;
   wins_30_45c?: string | number | null;
+  avg_sell_30_45c?: string | number | null;
   buys_45_60c?: string | number | null;
   wins_45_60c?: string | number | null;
+  avg_sell_45_60c?: string | number | null;
   buys_60_75c?: string | number | null;
   wins_60_75c?: string | number | null;
+  avg_sell_60_75c?: string | number | null;
   buys_above_75c?: string | number | null;
   wins_above_75c?: string | number | null;
+  avg_sell_above_75c?: string | number | null;
+  parlay_pnl?: string | number | null;
+  parlay_volume?: string | number | null;
+  parlay_win_rate?: string | number | null;
+  parlay_resolved_count?: string | number | null;
+  parlay_winning_count?: string | number | null;
+  parlay_open_count?: string | number | null;
+  parlay_open_value?: string | number | null;
   favorite_count?: string | number | null;
+  funding_source?: string | null;
+  funded_by?: string | null;
+  transferred_positions_count?: string | number | null;
+  p2p_txn_count?: string | number | null;
+  p2p_txn_value?: string | number | null;
+  fund_transfer_count?: string | number | null;
+  fund_transfer_value?: string | number | null;
 }
 
 export interface ColumnDef {

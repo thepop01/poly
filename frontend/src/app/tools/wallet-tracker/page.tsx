@@ -183,9 +183,9 @@ export default function WalletTrackerPage() {
                         </button>
                       </td>
                       <td className="py-2.5 px-4 font-medium text-foreground flex items-center gap-2">
-                        <Link href={`/wallet/${entry.address}`} className="hover:text-primary transition-colors font-mono bg-primary/5 px-2 py-0.5 rounded border border-primary/10">
+                        <span className="font-mono bg-primary/5 px-2 py-0.5 rounded border border-primary/10">
                           {formatAddress(entry.address)}
-                        </Link>
+                        </span>
                         <button
                           onClick={(e) => handleCopy(e, entry.address)}
                           className="p-1 hover:bg-surface-2 rounded text-muted-fg hover:text-foreground transition-colors"

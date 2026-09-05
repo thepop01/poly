@@ -80,12 +80,9 @@ export function WalletAlertsCard() {
                 <div className="flex items-center gap-2.5 min-w-0">
                   <TypeBadge kind={isDeposit ? "deposit" : "trade"} />
                   <div className="min-w-0">
-                    <Link
-                      href={`/wallet/${item.address}`}
-                      className="text-sm font-medium text-foreground hover:text-primary transition-colors truncate block"
-                    >
+                    <span className="text-sm font-medium text-foreground truncate block">
                       {item.wallet_name || item.address.slice(0, 6) + "..." + item.address.slice(-4)}
-                    </Link>
+                    </span>
                     <div className="text-[11px] text-subtle truncate">
                       {item.market_title || (isDeposit ? "USDC deposit" : "—")}
                     </div>

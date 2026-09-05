@@ -173,66 +173,59 @@ async def store_category_stats(
     return upserted, removed_count
 
 
-
-
-
-async def run_weekly_sync(db_url: str = DB_URL):
+async def run_weekly_sync(pool: asyncpg.Pool | None = None, db_url: str = DB_URL):
     """Main weekly sync entry point."""
     logger.info("Starting Polymarket leaderboard weekly sync...")
-    conn = await asyncpg.connect(db_url)
+
+    own_pool = False
+    if pool is None:
+        pool = await asyncpg.create_pool(db_url, min_size=1, max_size=2)
+        own_pool = True
 
     try:
-        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-            # 1. Fetch top 5000 from ALL
-            logger.info("Fetching top 5000 from ALL leaderboard...")
-            all_entries = await fetch_poly_leaderboard(session, "OVERALL", limit=5000)
-            logger.info(f"Got {len(all_entries)} entries from ALL")
+        async with pool.acquire() as conn:
+            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
+                logger.info("Fetching top 5000 from ALL leaderboard...")
+                all_entries = await fetch_poly_leaderboard(session, "OVERALL", limit=5000)
+                logger.info(f"Got {len(all_entries)} entries from ALL")
 
-            # 2. Fetch top 2000 from SPORTS
-            logger.info("Fetching top 2000 from SPORTS leaderboard...")
-            sports_entries = await fetch_poly_leaderboard(session, "SPORTS", limit=2000)
-            logger.info(f"Got {len(sports_entries)} entries from SPORTS")
+                logger.info("Fetching top 2000 from SPORTS leaderboard...")
+                sports_entries = await fetch_poly_leaderboard(session, "SPORTS", limit=2000)
+                logger.info(f"Got {len(sports_entries)} entries from SPORTS")
 
-            # 3. Fetch top 500 from each category
-            category_entries = {}
-            for cat in CATEGORIES:
-                logger.info(f"Fetching top 500 from {cat} leaderboard...")
-                entries = await fetch_poly_leaderboard(session, cat, limit=500)
-                category_entries[cat] = entries
-                logger.info(f"Got {len(entries)} entries from {cat}")
-                await asyncio.sleep(0.2)
+                category_entries = {}
+                for cat in CATEGORIES:
+                    logger.info(f"Fetching top 500 from {cat} leaderboard...")
+                    entries = await fetch_poly_leaderboard(session, cat, limit=500)
+                    category_entries[cat] = entries
+                    logger.info(f"Got {len(entries)} entries from {cat}")
+                    await asyncio.sleep(0.2)
 
-            # 4. Add all to wallets_v2
-            total_new = 0
-            total_new += await add_wallets_to_tracked(conn, all_entries, "ALL top 5000")
-            total_new += await add_wallets_to_tracked(conn, sports_entries, "SPORTS top 2000")
-            for cat, entries in category_entries.items():
-                total_new += await add_wallets_to_tracked(conn, entries, f"{cat} top 500")
-            logger.info(f"Added {total_new} new wallets to wallets_v2")
+                total_new = 0
+                total_new += await add_wallets_to_tracked(conn, all_entries, "ALL top 5000")
+                total_new += await add_wallets_to_tracked(conn, sports_entries, "SPORTS top 2000")
+                for cat, entries in category_entries.items():
+                    total_new += await add_wallets_to_tracked(conn, entries, f"{cat} top 500")
+                logger.info(f"Added {total_new} new wallets to wallets_v2")
 
-            # 4b. Store per-category PnL/volume in wallet_category_stats
-            #     SPORTS uses the full 2000 entries; other categories use their top 500
-            upserted, removed = await store_category_stats(conn, sports_entries, "SPORTS")
-            logger.info(f"SPORTS: {upserted} upserted, {removed} dropped off")
-            for cat, entries in category_entries.items():
-                if cat == "SPORTS":
-                    continue
-                upserted, removed = await store_category_stats(conn, entries, cat)
-                logger.info(f"{cat}: {upserted} upserted, {removed} dropped off")
-                await asyncio.sleep(0.1)
+                upserted, removed = await store_category_stats(conn, sports_entries, "SPORTS")
+                logger.info(f"SPORTS: {upserted} upserted, {removed} dropped off")
+                for cat, entries in category_entries.items():
+                    if cat == "SPORTS":
+                        continue
+                    upserted, removed = await store_category_stats(conn, entries, cat)
+                    logger.info(f"{cat}: {upserted} upserted, {removed} dropped off")
+                    await asyncio.sleep(0.1)
 
-
-
-            # 6. Set next_check_at = NOW() for new wallets so stats worker picks them up
-            await conn.execute("""
-                UPDATE wallets_v2 SET next_check_at = NOW()
-                WHERE address IN (SELECT address FROM wallet_sources_v2 WHERE source = 'leaderboard')
-                AND next_check_at IS NULL
-                AND added_at > NOW() - INTERVAL '7 days'
-            """)
-
+                await conn.execute("""
+                    UPDATE wallets_v2 SET next_check_at = NOW()
+                    WHERE address IN (SELECT address FROM wallet_sources_v2 WHERE source = 'leaderboard')
+                    AND next_check_at IS NULL
+                    AND added_at > NOW() - INTERVAL '7 days'
+                """)
     finally:
-        await conn.close()
+        if own_pool and pool:
+            await pool.close()
 
     logger.info("Polymarket leaderboard weekly sync complete.")
 

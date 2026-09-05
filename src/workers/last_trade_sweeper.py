@@ -23,9 +23,11 @@ load_dotenv()
 logger = logging.getLogger("last_trade_sweeper")
 
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
-BATCH_SIZE = 50
-CONCURRENCY = 10
-SLEEP_INTERVAL = 30  # Sleep 30s between batch loops
+BATCH_SIZE = int(os.getenv("LAST_ACTIVITY_SWEEP_BATCH_SIZE", "120"))
+# Worker 3 reserves 50 Activity requests.  Keep this recovery worker at 30
+# so the combined process fan-out remains below the 90-request API budget.
+CONCURRENCY = int(os.getenv("LAST_ACTIVITY_SWEEP_CONCURRENCY", "30"))
+SLEEP_INTERVAL = int(os.getenv("LAST_ACTIVITY_SWEEP_INTERVAL_SECONDS", "2"))
 
 
 async def _check_wallet_last_trade(session: aiohttp.ClientSession, address: str) -> float | None:
@@ -61,13 +63,18 @@ async def run_last_trade_sweeper(db_url: str = DB_URL):
             while True:
                 try:
                     async with pool.acquire() as conn:
-                        # Only select wallets where last_trade_swept_at is NULL or older than 3 hours
+                        # Include hibernated wallets.  Excluding them creates
+                        # a deadlock: stale activity makes a wallet dormant,
+                        # then prevents the recovery worker from discovering
+                        # a newer Activity event that would wake it.
                         rows = await conn.fetch("""
                             SELECT address, last_trade_at
                             FROM wallets_v2
-                            WHERE is_dormant = FALSE
-                              AND (last_trade_swept_at IS NULL OR last_trade_swept_at < NOW() - INTERVAL '3 hours')
-                            ORDER BY last_trade_swept_at ASC NULLS FIRST
+                            WHERE last_trade_swept_at IS NULL
+                               OR last_trade_swept_at < NOW() - INTERVAL '3 hours'
+                            ORDER BY last_trade_swept_at ASC NULLS FIRST,
+                                     is_dormant DESC,
+                                     address
                             LIMIT $1
                         """, BATCH_SIZE)
 
@@ -90,7 +97,9 @@ async def run_last_trade_sweeper(db_url: str = DB_URL):
                         async with pool.acquire() as conn:
                             if latest_ts_sec:
                                 new_dt = datetime.fromtimestamp(latest_ts_sec, tz=timezone.utc)
-                                if curr_last_trade is None or new_dt > curr_last_trade:
+                                _now = datetime.now(timezone.utc)
+                                is_corrupt_future = curr_last_trade is not None and curr_last_trade > _now
+                                if new_dt <= _now and (curr_last_trade is None or is_corrupt_future or new_dt > curr_last_trade):
                                     await conn.execute("""
                                         UPDATE wallets_v2
                                         SET last_trade_at = $2,

@@ -28,7 +28,7 @@ import {
   addWalletToTrackerList,
   removeWalletFromTrackerList,
 } from "@/utils/api";
-import { formatCurrency, formatSignedCurrency, formatAddress } from "@/utils/format";
+import { formatCurrency, formatSignedCurrency, formatAddress, formatPercent } from "@/utils/format";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { LikeButton } from "@/components/ui/LikeButton";
 
@@ -311,9 +311,9 @@ export function TrackedWalletsTab() {
                       ) : (
                         walletsInGroup.map((w) => (
                           <div key={w.wallet_address} className="flex items-center justify-between text-xs py-1 px-2 rounded bg-surface-2/50">
-                            <Link href={`/wallet/${w.wallet_address}`} className="font-mono hover:text-primary text-foreground truncate">
+                            <span className="font-mono text-foreground truncate">
                               {w.username || formatAddress(w.wallet_address)}
-                            </Link>
+                            </span>
                             <button
                               onClick={() => handleRemoveWalletFromGroup(g.id, w.wallet_address)}
                               className="text-muted-fg hover:text-rose-500"
@@ -367,9 +367,9 @@ export function TrackedWalletsTab() {
                     <tr key={w.address} className="hover:bg-surface-2/40 transition-colors">
                       <td className="py-3 px-4 text-center font-mono text-xs text-muted-fg">{i + 1}</td>
                       <td className="py-3 px-4">
-                        <Link href={`/wallet/${w.address}`} className="font-mono font-medium text-foreground hover:text-primary transition-colors">
+                        <span className="font-mono font-medium text-foreground">
                           {w.username || formatAddress(w.address)}
-                        </Link>
+                        </span>
                       </td>
                       <td className="py-3 px-4 text-right font-mono font-bold">
                         <span className={w.pnl >= 0 ? "text-green-500" : "text-red-500"}>
@@ -377,7 +377,7 @@ export function TrackedWalletsTab() {
                         </span>
                       </td>
                       <td className="py-3 px-4 text-right font-mono text-muted-fg">
-                        {w.win_rate != null ? `${(w.win_rate * 100).toFixed(0)}%` : "—"}
+                        {formatPercent(w.win_rate, 0)}
                       </td>
                       <td className="py-3 px-4 text-right font-mono text-muted-fg">
                         {w.balance != null ? formatCurrency(w.balance) : "—"}

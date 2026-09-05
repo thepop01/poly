@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import json
 import jwt
 import os
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from src.api.routers.auth import JWT_SECRET
 
 router = APIRouter(prefix="/ws", tags=["websocket"])
 logger = logging.getLogger("ws")
-ALLOWED_ORIGINS = set(os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(","))
+ALLOWED_ORIGINS = {o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if o.strip()}
 
 class ConnectionManager:
     def __init__(self):
@@ -33,18 +34,21 @@ class ConnectionManager:
         logger.info(f"WebSocket disconnected for user {user_id}")
 
     async def broadcast_to_all(self, message: dict):
+        # Safely serialize message to handle datetime/Decimal types
+        text_payload = json.dumps(message, default=str)
         for user_id, connections in list(self.active_connections.items()):
             for connection in list(connections):
                 try:
-                    await connection.send_json(message)
+                    await connection.send_text(text_payload)
                 except Exception:
                     self.disconnect(connection, user_id)
 
     async def send_personal_message(self, message: dict, user_id: str):
+        text_payload = json.dumps(message, default=str)
         if user_id in self.active_connections:
             for connection in list(self.active_connections[user_id]):
                 try:
-                    await connection.send_json(message)
+                    await connection.send_text(text_payload)
                 except Exception:
                     self.disconnect(connection, user_id)
 
@@ -84,7 +88,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = None):
 
 async def start_db_poll_broadcaster(pool):
     """
-    Background task that polls the DB for real-time events and broadcasts them via WebSocket.
+    Background task that polls DB for real-time wallet_activity_v2 events and broadcasts via WebSocket.
     """
     logger.info("Starting WebSocket DB Poller")
     last_polled_time = datetime.now(timezone.utc)
@@ -98,107 +102,37 @@ async def start_db_poll_broadcaster(pool):
                 continue
                 
             async with pool.acquire() as conn:
-                # 1. Fetch new price ticks
-                ticks = await conn.fetch(
-                    "SELECT market_id, price FROM price_ticks WHERE timestamp > $1 ORDER BY timestamp ASC",
-                    last_polled_time
-                )
-                
-                # 2. Fetch new trades
-                trades = await conn.fetch(
+                activity = await conn.fetch(
                     """
-                    SELECT t.trade_id, t.wallet_address, t.market_id, m.title as market_title, t.side, t.price, t.size,
-                           ws.strategy, t.timestamp
-                    FROM trades t
-                    JOIN markets m ON t.market_id = m.market_id
-                    LEFT JOIN wallet_stats ws ON t.wallet_address = ws.address
-                    WHERE t.timestamp > $1
-                    ORDER BY t.timestamp ASC
+                    SELECT id, address, event_type, amount_usdc, title, event_at as timestamp
+                    FROM wallet_activity_v2
+                    WHERE event_at > $1
+                    ORDER BY event_at ASC
                     """,
                     last_polled_time
                 )
                 
-                # 3. Fetch new markets
-                new_markets = await conn.fetch(
-                    """
-                    SELECT m.market_id, m.title, e.category, m.created_at
-                    FROM markets m
-                    JOIN events e ON m.event_id = e.event_id
-                    WHERE m.created_at > $1
-                    """, last_polled_time
-                )
-                
-                # Fetch active watchlists to know who to alert
-                watchers = []
-                if trades:
-                    watchers = await conn.fetch(
-                        "SELECT user_id, wallet_address FROM user_watchlists WHERE alerts_enabled = true"
-                    )
-                
                 new_poll_time = datetime.now(timezone.utc)
                 
-                if ticks or trades or new_markets:
-                    # Broadcast ticks globally
-                    if ticks:
-                        latest_ticks = {}
-                        for t in ticks:
-                            latest_ticks[t["market_id"]] = t["price"]
-                            
-                        for market_id, price in latest_ticks.items():
-                            await manager.broadcast_to_all({
-                                "type": "price_tick",
-                                "market_id": market_id,
-                                "price": float(price)
-                            })
-                            
-                    # Broadcast New Markets globally
-                    for m in new_markets:
-                        await manager.broadcast_to_all({
-                            "type": "new_market",
-                            "market_id": m["market_id"],
-                            "title": m["title"],
-                            "category": m["category"]
+                if activity:
+                    events = []
+                    for r in activity:
+                        ts = r["timestamp"]
+                        ts_str = ts.isoformat() if isinstance(ts, datetime) else str(ts)
+                        events.append({
+                            "id": r["id"],
+                            "address": r["address"],
+                            "event_type": r["event_type"],
+                            "amount_usdc": float(r["amount_usdc"]) if r["amount_usdc"] is not None else 0.0,
+                            "title": r["title"] or "",
+                            "timestamp": ts_str,
                         })
+                    await manager.broadcast_to_all({"type": "ACTIVITY_UPDATE", "data": events})
                     
-                    # Broadcast trades
-                    if trades:
-                        # Map wallet_address -> list of user_ids watching it
-                        wallet_to_users = {}
-                        for w in watchers:
-                            addr = w["wallet_address"]
-                            uid = str(w["user_id"])
-                            if addr not in wallet_to_users:
-                                wallet_to_users[addr] = []
-                            wallet_to_users[addr].append(uid)
-
-                        for t in trades:
-                            trade_msg = {
-                                "type": "new_trade",
-                                "trade_id": t["trade_id"],
-                                "wallet_address": t["wallet_address"],
-                                "market_id": t["market_id"],
-                                "market_title": t["market_title"],
-                                "side": t["side"],
-                                "price": float(t["price"]),
-                                "size": float(t["size"]),
-                                
-                                "strategy": t["strategy"],
-                                "timestamp": t["timestamp"].isoformat()
-                            }
-                            
-                            # Global Whale Alert
-                            if t["size"] >= 5000:
-                                whale_msg = trade_msg.copy()
-                                whale_msg["type"] = "whale_alert"
-                                await manager.broadcast_to_all(whale_msg)
-                            
-                            # Specific Watchlist Alert
-                            watching_users = wallet_to_users.get(t["wallet_address"], [])
-                            for uid in watching_users:
-                                await manager.broadcast_to_user(uid, trade_msg)
-                        
                 last_polled_time = new_poll_time
 
+        except asyncio.CancelledError:
+            break
         except Exception as e:
             logger.error(f"Error in DB poller: {e}")
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(2.0)

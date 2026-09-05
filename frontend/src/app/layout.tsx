@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Fira_Code, Fira_Sans } from "next/font/google";
 import "./globals.css";
 import Sidebar from "../components/Sidebar";
+import ContentFrame from "../components/ContentFrame";
 import HeaderBar from "../components/HeaderBar";
 import AuthProvider from "../components/AuthProvider";
 import { WebSocketProvider } from "../components/WebSocketProvider";
@@ -36,7 +37,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${firaSans.variable} ${firaCode.variable} dark`}>
+    <html lang="en" className={`${firaSans.variable} ${firaCode.variable} light`}>
       <body className="flex h-screen overflow-hidden bg-background text-foreground antialiased">
         <Suspense fallback={null}>
           <WalletProvider>
@@ -46,11 +47,11 @@ export default function RootLayout({
                   <Sidebar />
                   <div className="flex-1 flex flex-col min-w-0">
                     <HeaderBar />
-                    <main className="flex-1 overflow-auto p-5 bg-background">
+                    <ContentFrame>
                       <ErrorBoundary>
                         {children}
                       </ErrorBoundary>
-                    </main>
+                    </ContentFrame>
                   </div>
                 </ShellProvider>
               </WebSocketProvider>

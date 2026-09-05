@@ -75,38 +75,40 @@ export default function AgentBuilder({ onCreated }: { onCreated: () => void }) {
   };
 
   return (
-    <div className="bg-[#1E293B] p-6 rounded-lg mb-8 border border-white/10">
-      <h2 className="text-xl font-bold mb-4 text-white">Create New Agent</h2>
-      {error && <div className="text-red-500 mb-4">{error}</div>}
+    <div className="card p-6 mb-8">
+      <h2 className="text-xl font-bold mb-4 text-foreground">Create New Agent</h2>
+      {error && <div className="text-danger mb-4 text-sm font-medium">{error}</div>}
       <form onSubmit={handleSubmit} className="space-y-6">
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Name</label>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-subtle mb-1.5">Name</label>
             <input 
               required
               value={name} 
               onChange={e => setName(e.target.value)} 
-              className="w-full bg-[#0F172A] border border-white/10 rounded-lg px-3 py-2 text-white" 
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-foreground text-sm focus:border-primary outline-none transition-colors" 
+              placeholder="e.g. Whale Tracker Alpha"
             />
           </div>
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Description</label>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-subtle mb-1.5">Description</label>
             <input 
               value={description} 
               onChange={e => setDescription(e.target.value)} 
-              className="w-full bg-[#0F172A] border border-white/10 rounded-lg px-3 py-2 text-white" 
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-foreground text-sm focus:border-primary outline-none transition-colors" 
+              placeholder="Brief description of this agent"
             />
           </div>
         </div>
 
         <div>
           <div className="flex items-center gap-4 mb-2">
-            <h3 className="text-md font-semibold text-white">Conditions</h3>
+            <h3 className="text-sm font-bold uppercase tracking-wider text-foreground">Conditions</h3>
             {conditions.length > 1 && (
               <select 
                 value={op} 
                 onChange={e => setOp(e.target.value)}
-                className="bg-[#0F172A] border border-white/10 rounded-lg px-2 py-1 text-white text-sm"
+                className="bg-surface-2 border border-border rounded-lg px-2 py-1 text-foreground text-xs font-medium focus:border-primary outline-none"
               >
                 <option value="and">ALL (AND)</option>
                 <option value="or">ANY (OR)</option>
@@ -119,14 +121,14 @@ export default function AgentBuilder({ onCreated }: { onCreated: () => void }) {
                 <select 
                   value={cond.field} 
                   onChange={e => updateCondition(i, "field", e.target.value)}
-                  className="bg-[#0F172A] border border-white/10 rounded-lg px-3 py-2 text-white flex-1"
+                  className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-foreground text-xs font-medium flex-1 focus:border-primary outline-none"
                 >
                   {ALLOWED_FIELDS.map(f => <option key={f} value={f}>{f}</option>)}
                 </select>
                 <select 
                   value={cond.cmp} 
                   onChange={e => updateCondition(i, "cmp", e.target.value)}
-                  className="bg-[#0F172A] border border-white/10 rounded-lg px-3 py-2 text-white w-24"
+                  className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-foreground text-xs font-medium w-24 focus:border-primary outline-none"
                 >
                   {CMP_OPS.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
                 </select>
@@ -136,44 +138,44 @@ export default function AgentBuilder({ onCreated }: { onCreated: () => void }) {
                   required
                   value={cond.value} 
                   onChange={e => updateCondition(i, "value", parseFloat(e.target.value))} 
-                  className="bg-[#0F172A] border border-white/10 rounded-lg px-3 py-2 text-white w-32" 
+                  className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-foreground text-xs font-mono w-32 focus:border-primary outline-none" 
                 />
                 {conditions.length > 1 && (
-                  <button type="button" onClick={() => removeCondition(i)} className="text-red-500 hover:text-red-400 p-2">✕</button>
+                  <button type="button" onClick={() => removeCondition(i)} className="text-danger hover:opacity-80 p-2 cursor-pointer">✕</button>
                 )}
               </div>
             ))}
           </div>
-          <button type="button" onClick={addCondition} className="text-sm text-blue-400 mt-3 hover:text-blue-300">
+          <button type="button" onClick={addCondition} className="text-xs font-semibold text-primary mt-3 hover:underline cursor-pointer">
             + Add Condition
           </button>
         </div>
 
         <div>
-          <h3 className="text-md font-semibold text-white mb-2">Actions</h3>
+          <h3 className="text-sm font-bold uppercase tracking-wider text-foreground mb-2">Actions</h3>
           <div className="space-y-4">
-            <div className="bg-[#0F172A] p-4 rounded-lg border border-white/10">
-              <label className="flex items-center gap-2 text-white font-medium mb-3">
-                <input type="checkbox" checked disabled className="rounded border-white/10 bg-black/20" />
+            <div className="bg-surface-2/60 p-4 rounded-xl border border-border">
+              <label className="flex items-center gap-2 text-foreground font-semibold text-xs mb-3">
+                <input type="checkbox" checked disabled className="rounded border-border" />
                 Notify
               </label>
               <div className="ml-6">
-                <label className="block text-sm text-gray-400 mb-1">Custom Message</label>
+                <label className="block text-xs text-subtle mb-1 font-medium">Custom Message</label>
                 <input 
                   value={message} 
                   onChange={e => setMessage(e.target.value)} 
-                  className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-white" 
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-foreground text-xs focus:border-primary outline-none" 
                   placeholder="Optional alert message..."
                 />
               </div>
             </div>
             
-            <div className="bg-[#0F172A]/50 p-4 rounded-lg border border-white/10 opacity-60">
-              <label className="flex items-center gap-2 text-white font-medium mb-1">
-                <input type="checkbox" disabled className="rounded border-white/10" />
+            <div className="bg-surface-2/30 p-4 rounded-xl border border-border opacity-70">
+              <label className="flex items-center gap-2 text-foreground font-semibold text-xs mb-1">
+                <input type="checkbox" disabled className="rounded border-border" />
                 Trade (Coming Soon)
               </label>
-              <p className="ml-6 text-sm text-gray-400">Arm trading to automatically place orders (Phase 1 brokers dry-run only).</p>
+              <p className="ml-6 text-xs text-subtle">Arm trading to automatically place orders (Phase 1 brokers dry-run only).</p>
             </div>
           </div>
         </div>
@@ -181,7 +183,7 @@ export default function AgentBuilder({ onCreated }: { onCreated: () => void }) {
         <button 
           type="submit" 
           disabled={loading}
-          className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg transition-colors"
+          className="bg-primary hover:bg-primary/90 text-white font-semibold py-2 px-6 rounded-lg transition-colors cursor-pointer text-xs shadow-sm disabled:opacity-50"
         >
           {loading ? "Creating..." : "Create Agent"}
         </button>

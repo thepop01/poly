@@ -28,9 +28,9 @@ async def get_tracked_wallets(
     source: Optional[str] = None,
     min_win_rate: Optional[float] = None,
     min_volume: Optional[float] = None,
-    min_trade_size: Optional[float] = None,
+    min_position_value: Optional[float] = None,
 ) -> dict[str, Any]:
-    cache_key = f"v2_tracked_{limit}_{offset}_{sort_by}_{sort_order}_{timeframe}_{source}_{min_win_rate}_{min_volume}_{min_trade_size}"
+    cache_key = f"v2_tracked_{limit}_{offset}_{sort_by}_{sort_order}_{timeframe}_{source}_{min_win_rate}_{min_volume}_{min_position_value}"
     cached = _cache.get(cache_key)
     if cached and time.time() - cached["time"] < CACHE_TTL:
         return cached["data"]
@@ -68,9 +68,9 @@ async def get_tracked_wallets(
         conditions.append(f"m.total_volume >= ${len(args)+1}")
         args.append(min_volume)
         
-    if min_trade_size is not None:
-        conditions.append(f"m.avg_position_size >= ${len(args)+1}")
-        args.append(min_trade_size)
+    if min_position_value is not None:
+        conditions.append(f"COALESCE(m.position_value, 0) >= ${len(args)+1}")
+        args.append(min_position_value)
         
     where_clause = "WHERE " + " AND ".join(conditions)
 
@@ -83,7 +83,7 @@ async def get_tracked_wallets(
             m.total_volume,
             w.added_at,
             w.updated_at as last_indexed,
-            m.avg_position_size as max_trade_size,
+            COALESCE(m.position_value, 0) as position_value,
             m.balance,
             m.deposits,
             m.withdrawals,

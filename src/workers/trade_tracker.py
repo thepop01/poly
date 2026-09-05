@@ -122,8 +122,9 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                     continue
                 tip = int(tip_str)
 
-                start_block = int(last_block) if last_block.isdigit() else tip - 100
+                start_block = int(last_block) if last_block.isdigit() else tip - 500
                 if tip - start_block > 500:
+                    logger.info(f"Server restart gap detected (last block {start_block}, tip {tip}). Anchoring start_block to current tip {tip - 500}.")
                     start_block = tip - 500
 
                 trades = await fetch_recent_trades_etherscan(session, from_block=start_block, to_block=tip)
@@ -203,38 +204,6 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                                             INSERT INTO wallet_activity_v2 (address, event_type, amount_usdc, tx_hash, condition_id, outcome, title, event_at, created_at)
                                             VALUES ($1, 'TRADE', $2, $3, $4, $5, $6, $7, NOW())
                                         """, wallet, usd_value, tx_hash, market_id, side, title, dt)
-
-                                        # Upsert into test_computed_positions if table exists
-                                        try:
-                                            condition_id = trade.get("conditionId") or market_id
-                                            
-                                            row = await conn.fetchrow("""
-                                                SELECT total_bought_usd, total_buy_tokens, total_sold_usd, total_sell_tokens, realized_pnl
-                                                FROM test_computed_positions
-                                                WHERE address = $1 AND condition_id = $2
-                                            """, wallet, condition_id)
-                                            
-                                            current_state = dict(row) if row else {}
-                                            new_state = apply_fill(current_state, trade)
-                                            
-                                            await conn.execute("""
-                                                INSERT INTO test_computed_positions (
-                                                    address, condition_id, total_bought_usd, total_buy_tokens, 
-                                                    total_sold_usd, total_sell_tokens, realized_pnl
-                                                )
-                                                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                                                ON CONFLICT (address, condition_id) DO UPDATE SET
-                                                    total_bought_usd = EXCLUDED.total_bought_usd,
-                                                    total_buy_tokens = EXCLUDED.total_buy_tokens,
-                                                    total_sold_usd = EXCLUDED.total_sold_usd,
-                                                    total_sell_tokens = EXCLUDED.total_sell_tokens,
-                                                    realized_pnl = EXCLUDED.realized_pnl,
-                                                    updated_at = NOW()
-                                            """, wallet, condition_id, new_state.get("total_bought_usd", 0.0),
-                                                 new_state.get("total_buy_tokens", 0.0), new_state.get("total_sold_usd", 0.0),
-                                                 new_state.get("total_sell_tokens", 0.0), new_state.get("realized_pnl", 0.0))
-                                        except Exception:
-                                            pass
                                 except Exception as e:
                                     logger.warning(f"Failed to process trade for {wallet}: {e}")
 
@@ -249,14 +218,18 @@ async def run_trade_tracker(pool: asyncpg.Pool):
                 write_last_block(tip)
                 last_block = str(tip)
 
-                # Periodically prune feed events older than 3 days
+                # Periodically prune feed events older than 1 day
                 try:
                     now_ts = time.time()
                     if not hasattr(run_trade_tracker, "_last_prune") or (now_ts - getattr(run_trade_tracker, "_last_prune", 0)) > 21600:
                         setattr(run_trade_tracker, "_last_prune", now_ts)
                         async with pool.acquire() as conn:
-                            deleted = await conn.execute("DELETE FROM wallet_activity_v2 WHERE event_at < NOW() - INTERVAL '3 days'")
-                            logger.info(f"Auto-pruned 3-day old feed activity: {deleted}")
+                            deleted = await conn.execute("DELETE FROM wallet_activity_v2 WHERE event_at < NOW() - INTERVAL '1 day'")
+                            logger.info(f"Auto-pruned 24h old feed activity: {deleted}")
+                        # VACUUM needs autocommit (can't run inside transaction)
+                        raw = await asyncpg.connect(DB_URL)
+                        await raw.execute("VACUUM wallet_activity_v2")
+                        await raw.close()
                 except Exception as pe:
                     logger.debug(f"Prune error: {pe}")
 

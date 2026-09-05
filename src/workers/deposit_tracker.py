@@ -196,10 +196,15 @@ async def run_deposit_tracker(pool: asyncpg.Pool | None = None):
             while True:
                 try:
                     async with pool.acquire() as conn:
-                        if last_block is None:
-                            latest_block = int(await get_latest_block_etherscan(session))
-                            last_block = max(0, latest_block - INITIAL_LOOKBACK_BLOCKS)
-                            logger.info(f"Initializing deposit tracker from block {last_block}")
+                        latest_block = int(await get_latest_block_etherscan(session) or 0)
+                        if latest_block > 0:
+                            if last_block is None or (latest_block - last_block > 200):
+                                logger.info(f"Deposit tracker anchoring to live tip (last block {last_block}, tip {latest_block}).")
+                                last_block = latest_block - 200
+                        elif last_block is None:
+                            logger.warning("Deposit tracker could not fetch latest block tip and has no cached last_block. Retrying in 10s...")
+                            await asyncio.sleep(10)
+                            continue
 
                         transfers = await fetch_onramp_wraps(session, last_block)
 
@@ -247,7 +252,7 @@ async def run_deposit_tracker(pool: asyncpg.Pool | None = None):
 
                             logger.info(f"Globally recorded {new_deposits} new deposits. Queued {len(transfers)} wallets for evaluation.")
                         else:
-                            latest_block = int(await get_latest_block_etherscan(session))
+                            latest_block = int(await get_latest_block_etherscan(session) or 0)
                             if latest_block > last_block:
                                 last_block = latest_block
                                 write_last_block(last_block)

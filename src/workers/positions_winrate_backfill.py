@@ -1,29 +1,44 @@
 # src/workers/positions_winrate_backfill.py
 """
-Worker 1: High-Speed Positions & Win-Rate Sync with Price Buckets & 10 PnL Windows
-==================================================================================
-Syncs position data, computes 10 PnL windows (100, 200, 300, 500, 750, 1000, 1500, 2000, 3500, 5000),
-calculates price-bucket Win Rates and Avg Sell Prices (<0.15, 0.15-0.30, 0.30-0.45, 0.45-0.60, 0.60-0.75, >0.75),
-and upserts results into wallet_metrics_v2.
+Hibernated Wallet Closed Positions Backfill
+=============================================
+Fetches closed positions from Polymarket API and upserts them into
+wallet_closed_positions_v2. Also syncs redeemable open positions as closed.
+Retries failed API batches to prevent silent truncation.
+Only marks closed_synced_at when the full fetch completes successfully.
+
+Does NOT compute win rate or write metrics — that's Worker 3 (positions_metrics_compute).
+Does NOT touch open positions — that's Worker 2 (positions_open_backfill.py).
 """
 
 import asyncio
 import logging
 import os
+import sys
+import time
+from dotenv import load_dotenv
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+load_dotenv()
+
+from datetime import datetime, timezone
 import aiohttp
 import asyncpg
 from typing import Optional
 
-from src.workers.wallet_trade_history import fetch_positions, fetch_closed_positions, fetch_website_pnl
-from src.utils.category_classifier import classify_tags, flatten_subcategory
+from src.workers.wallet_trade_history import fetch_closed_positions, fetch_positions
+from src.utils.category_classifier import classify_market
+from src.utils.polymarket_rate_limit import PostgresRateLimiter
+
+GAMMA_API_URL = os.getenv("GAMMA_API_URL", "https://gamma-api.polymarket.com")
 
 logger = logging.getLogger("positions_winrate_backfill")
 
-DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
-CONCURRENCY = 15
-WALLET_TIMEOUT = 90
-
-WINDOWS = [100, 200, 300, 500, 750, 1000, 1500, 2000, 3500, 5000]
+DB_URL = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0.1:5432/poly_db").replace("localhost", "127.0.0.1").replace("postgres://", "postgresql://")
+# Keep spare pooled connections because each in-flight wallet can acquire a
+# second connection for the shared PostgreSQL API-rate limiter.
+CONCURRENCY = 50
+WALLET_TIMEOUT = 1800
 
 
 def _parse(val) -> float:
@@ -35,24 +50,65 @@ def _parse(val) -> float:
         return 0.0
 
 
-def _parse_end(dt_str) -> Optional[object]:
-    """Parse a market endDate string, capping at today to avoid future 2027+ phantom dates.
-    Polymarket sets endDate as a market deadline (e.g. 2027-12-31) before the market resolves.
-    We must never use a future endDate as the wallet's last active timestamp."""
+async def upsert_market_metadata_v2(conn: asyncpg.Connection, positions: list[dict]) -> None:
+    """Persist exact Data API event slugs and fill only missing/OTHER taxonomy."""
+    markets: dict[str, tuple] = {}
+    for position in positions:
+        condition_id = str(position.get("conditionId") or "")
+        if not condition_id:
+            continue
+        title = str(position.get("title") or "")
+        event_slug = str(position.get("eventSlug") or "")
+        category, subcategory, league = classify_market(title, event_slug)
+        markets[condition_id] = (
+            condition_id, title, category, subcategory, league, event_slug
+        )
+    if not markets:
+        return
+
+    await conn.executemany("""
+        INSERT INTO markets_v2 (
+            condition_id, title, category, subcategory, league, event_slug, status, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'ACTIVE', NOW())
+        ON CONFLICT (condition_id) DO UPDATE SET
+            title = COALESCE(NULLIF(EXCLUDED.title, ''), markets_v2.title),
+            event_slug = COALESCE(NULLIF(EXCLUDED.event_slug, ''), markets_v2.event_slug),
+            category = CASE
+                WHEN UPPER(COALESCE(markets_v2.category, 'OTHER')) = 'OTHER'
+                  OR (UPPER(markets_v2.category) = 'SPORTS' AND COALESCE(markets_v2.subcategory, '') = '')
+                THEN EXCLUDED.category ELSE markets_v2.category END,
+            subcategory = CASE
+                WHEN UPPER(COALESCE(markets_v2.category, 'OTHER')) = 'OTHER'
+                  OR (UPPER(markets_v2.category) = 'SPORTS' AND COALESCE(markets_v2.subcategory, '') = '')
+                THEN EXCLUDED.subcategory ELSE markets_v2.subcategory END,
+            league = CASE
+                WHEN UPPER(COALESCE(markets_v2.category, 'OTHER')) = 'OTHER'
+                  OR (UPPER(markets_v2.category) = 'SPORTS' AND COALESCE(markets_v2.subcategory, '') = '')
+                THEN EXCLUDED.league ELSE markets_v2.league END,
+            updated_at = NOW()
+    """, list(markets.values()))
+
+
+def _parse_realized_pnl(cp: dict) -> float:
+    return _parse(cp.get("realized_pnl") if "realized_pnl" in cp else cp.get("realizedPnl"))
+
+
+def _parse_end(dt_str) -> Optional[datetime]:
     if not dt_str:
         return None
     try:
-        from datetime import datetime, timezone
         now = datetime.now(tz=timezone.utc)
         if isinstance(dt_str, (int, float)):
             if dt_str <= 86400:
                 return None
             dt = datetime.fromtimestamp(dt_str, tz=timezone.utc)
         else:
-            dt = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+            cleaned = str(dt_str).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(cleaned)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
         if dt.year <= 1970:
             return None
-        # Reject future dates — endDate is a deadline, not a settlement date
         if dt > now:
             return None
         return dt
@@ -60,25 +116,123 @@ def _parse_end(dt_str) -> Optional[object]:
         return None
 
 
-def _get_price_bucket(buy_price: float) -> str:
-    if buy_price < 0.15:
-        return "below_15c"
-    elif buy_price < 0.30:
-        return "15_30c"
-    elif buy_price < 0.45:
-        return "30_45c"
-    elif buy_price < 0.60:
-        return "45_60c"
-    elif buy_price < 0.75:
-        return "60_75c"
-    else:
-        return "above_75c"
+def _is_parlay(pos: dict) -> bool:
+    if pos.get("isCombo") is True or pos.get("is_parlay") is True or pos.get("is_combo") is True:
+        return True
+    title = str(pos.get("title") or "")
+    upper = title.upper()
+    if "COMBO" in upper or "PARLAY" in upper:
+        return True
+    return False
+
+
+async def sync_redeemable_positions(
+    conn: asyncpg.Connection,
+    session: aiohttp.ClientSession,
+    address: str,
+    positions: list[dict],
+    closed_keys: set[tuple[str, str]],
+) -> int:
+    """Find open positions with redeemable=True and write them into wallet_closed_positions_v2."""
+    redeemable_positions = []
+    for p in positions:
+        cid = p.get("conditionId")
+        outcome = p.get("outcome") or p.get("asset", "")
+        asset = p.get("asset", "")
+        if not cid:
+            continue
+        if (cid, outcome) in closed_keys or (cid, asset) in closed_keys:
+            continue
+        if not p.get("redeemable", False):
+            continue
+        redeemable_positions.append(p)
+
+    if not redeemable_positions:
+        return 0
+
+    rows = []
+    for p in redeemable_positions:
+        cid = p.get("conditionId") or ""
+        outcome = p.get("outcome") or p.get("asset", "")
+        if not cid:
+            continue
+        realized_pnl = _parse(p.get("realizedPnl"))
+        cur_val = _parse(p.get("currentValue"))
+        avg_price = _parse(p.get("avgPrice"))
+        size_val = _parse(p.get("size"))
+        bought_val = _parse(p.get("totalBought"))
+
+        # Determine actual cash outlay on CLOB
+        actual_bought = bought_val if bought_val > 0 else 0.0
+        recorded_cash_cost = actual_bought * avg_price if (avg_price > 0 and actual_bought > 0) else 0.0
+        initial_value = _parse(p.get("initialValue"))
+        if initial_value > 0 and recorded_cash_cost > 0:
+            remaining_cost = min(initial_value, recorded_cash_cost)
+        else:
+            remaining_cost = recorded_cash_cost
+
+        quality_flag = None
+        if bought_val == 0 and size_val > 0:
+            quality_flag = "minted_shares"
+        elif size_val > bought_val * 1.5 and bought_val > 0:
+            quality_flag = "mixed_minted_shares"
+        elif avg_price <= 0:
+            quality_flag = "missing_avg_price"
+
+        total_pnl = realized_pnl + cur_val - remaining_cost
+        is_win = total_pnl > 0
+
+        closed_at = _parse_end(p.get("endDate")) or datetime.now(tz=timezone.utc)
+
+        rows.append((
+            address, cid, outcome,
+            avg_price,
+            1.0 if is_win else 0.0,
+            actual_bought,
+            0.0,
+            total_pnl,
+            closed_at,
+            _is_parlay(p),
+            True,
+            closed_at,
+            quality_flag,
+            str(p.get("asset") or "") or None,
+        ))
+
+    if not rows:
+        return 0
+
+    await upsert_market_metadata_v2(conn, redeemable_positions)
+
+    await conn.executemany("""
+        INSERT INTO wallet_closed_positions_v2 (
+            address, condition_id, outcome, avg_buy_price, avg_sell_price,
+            total_bought, total_sold, realized_pnl, closed_at, is_parlay,
+            is_redeemable, resolved_at, data_quality_flag, source_asset
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        ON CONFLICT (address, condition_id, outcome) DO UPDATE SET
+            avg_buy_price=EXCLUDED.avg_buy_price,
+            avg_sell_price=EXCLUDED.avg_sell_price,
+            total_bought=EXCLUDED.total_bought,
+            total_sold=EXCLUDED.total_sold,
+            realized_pnl=EXCLUDED.realized_pnl,
+            closed_at=COALESCE(wallet_closed_positions_v2.closed_at, EXCLUDED.closed_at),
+            is_parlay=EXCLUDED.is_parlay,
+            is_redeemable=EXCLUDED.is_redeemable,
+            resolved_at=COALESCE(wallet_closed_positions_v2.resolved_at, EXCLUDED.resolved_at),
+            data_quality_flag=EXCLUDED.data_quality_flag,
+            source_asset=COALESCE(EXCLUDED.source_asset, wallet_closed_positions_v2.source_asset)
+    """, rows)
+
+    logger.info(f"Synced {len(rows)} redeemable open positions as closed for {address[:12]}...")
+    return len(rows)
 
 
 async def upsert_closed_positions_v2(conn: asyncpg.Connection, address: str, closed_positions: list[dict]):
     """Batch-upsert closed positions into wallet_closed_positions_v2."""
     if not closed_positions:
         return
+    await upsert_market_metadata_v2(conn, closed_positions)
     rows = []
     for cp in closed_positions:
         cid = cp.get("conditionId") or ""
@@ -90,109 +244,59 @@ async def upsert_closed_positions_v2(conn: asyncpg.Connection, address: str, clo
             _parse(cp.get("avgPrice")), _parse(cp.get("avgSellPrice")),
             _parse(cp.get("totalBought")), _parse(cp.get("totalSold")),
             _parse(cp.get("realizedPnl")), _parse_end(cp.get("endDate")),
+            _is_parlay(cp), str(cp.get("asset") or "") or None,
         ))
     if not rows:
         return
 
     await conn.executemany("""
         INSERT INTO wallet_closed_positions_v2 (
-            address, condition_id, outcome, avg_buy_price, avg_sell_price, total_bought, total_sold, realized_pnl, closed_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            address, condition_id, outcome, avg_buy_price, avg_sell_price, total_bought, total_sold, realized_pnl, closed_at, is_parlay, source_asset
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ON CONFLICT (address, condition_id, outcome) DO UPDATE SET
             avg_buy_price=EXCLUDED.avg_buy_price,
             avg_sell_price=EXCLUDED.avg_sell_price,
             total_bought=EXCLUDED.total_bought,
             total_sold=EXCLUDED.total_sold,
             realized_pnl=EXCLUDED.realized_pnl,
-            closed_at=EXCLUDED.closed_at
+            closed_at=EXCLUDED.closed_at,
+            is_parlay=EXCLUDED.is_parlay,
+            source_asset=COALESCE(EXCLUDED.source_asset, wallet_closed_positions_v2.source_asset),
+            is_redeemable=FALSE,
+            resolved_at=COALESCE(wallet_closed_positions_v2.resolved_at, EXCLUDED.closed_at)
     """, rows)
 
 
-async def aggregate_and_upsert_positions_v2(conn: asyncpg.Connection, address: str, open_positions: list[dict]):
-    """Batch-upsert active open positions into wallet_positions_v2."""
-    if not open_positions:
-        return
-    rows = []
-    for p in open_positions:
-        cid = p.get("conditionId") or ""
-        outcome = p.get("outcome") or p.get("asset", "")
-        if not cid:
-            continue
-        cur_val = _parse(p.get("currentValue"))
-        pos_pnl = _parse(p.get("realizedPnl")) + _parse(p.get("cashPnl"))
-        rows.append((
-            address, cid, outcome,
-            _parse(p.get("size")), _parse(p.get("avgPrice")),
-            cur_val, pos_pnl,
-        ))
-    if not rows:
-        return
-
-    await conn.executemany("""
-        INSERT INTO wallet_positions_v2 (
-            address, condition_id, outcome, size, avg_price, current_value, unrealized_pnl, computed_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7, NOW())
-        ON CONFLICT (address, condition_id, outcome) DO UPDATE SET
-            size=EXCLUDED.size,
-            avg_price=EXCLUDED.avg_price,
-            current_value=EXCLUDED.current_value,
-            unrealized_pnl=EXCLUDED.unrealized_pnl,
-            computed_at=NOW()
-    """, rows)
-
-
-async def process_wallet_backfill(
+async def process_wallet_closed(
     conn: asyncpg.Connection,
     session: aiohttp.ClientSession,
     address: str,
+    rate_limiter: Optional[PostgresRateLimiter] = None,
 ):
-    website_f, positions_f, closed_positions_f = await asyncio.gather(
-        fetch_website_pnl(session, address),
-        fetch_positions(session, address),
-        fetch_closed_positions(session, address),
+    """Fetch closed positions from API and upsert to DB. That's it."""
+    positions_f, closed_f = await asyncio.gather(
+        fetch_positions(session, address, rate_limiter=rate_limiter),
+        fetch_closed_positions(session, address, rate_limiter=rate_limiter),
         return_exceptions=True,
     )
 
-    website          = website_f if isinstance(website_f, dict) else None
-    positions        = positions_f if isinstance(positions_f, list) else []
-    closed_positions = closed_positions_f if isinstance(closed_positions_f, list) else []
+    if isinstance(positions_f, tuple):
+        positions, positions_complete = positions_f
+    elif isinstance(positions_f, list):
+        positions, positions_complete = positions_f, True
+    else:
+        positions, positions_complete = [], False
 
-    api_failed = (
-        isinstance(website_f, Exception) and
-        isinstance(positions_f, Exception) and
-        isinstance(closed_positions_f, Exception)
-    )
-    if api_failed:
-        logger.warning(f"API request failed for {address[:12]}... — skipping, will retry")
+    if isinstance(closed_f, tuple):
+        closed_positions, closed_complete = closed_f
+    elif isinstance(closed_f, list):
+        closed_positions, closed_complete = closed_f, True
+    else:
+        closed_positions, closed_complete = [], False
+
+    if isinstance(positions_f, Exception) and isinstance(closed_f, Exception):
+        logger.warning(f"API failed for {address[:12]}... — skipping")
         return
-
-    existing_balance = await conn.fetchval(
-        "SELECT balance FROM wallet_metrics_v2 WHERE address = $1", address
-    )
-    balance = float(existing_balance) if existing_balance is not None else 0.0
-
-    total_pnl    = website["pnl"]    if website else None
-    total_volume = website["volume"] if website else None
-    pos_val      = sum(_parse(p.get("currentValue", 0)) for p in positions)
-
-    # Fallback: if the wallet isn't on the public leaderboard (API returns []),
-    # compute PnL and volume directly from closed positions so it's never None.
-    if (total_pnl is None or total_pnl == 0) and closed_positions:
-        total_pnl = sum(_parse(cp.get("realizedPnl")) for cp in closed_positions) or None
-    if (total_volume is None or total_volume == 0) and closed_positions:
-        total_volume = sum(_parse(cp.get("totalBought")) for cp in closed_positions) or None
-
-    resolved, wins = 0, 0
-    cat_volume: dict[str, float] = {}
-    from collections import defaultdict
-    cat_metrics = defaultdict(lambda: {"pnl": 0.0, "volume": 0.0, "wins": 0, "resolved": 0})
-
-    bucket_stats = {
-        k: {"buys": 0, "wins": 0, "losses": 0, "sum_sell": 0.0, "count_sell": 0}
-        for k in ["below_15c", "15_30c", "30_45c", "45_60c", "60_75c", "above_75c"]
-    }
-
-    all_buy_prices = []
 
     closed_keys = {
         (cp.get("conditionId"), cp.get("asset", ""))
@@ -200,385 +304,148 @@ async def process_wallet_backfill(
         if cp.get("conditionId")
     }
 
-    # Calculate wins/losses & price bucket stats from closed positions
-    for cp in closed_positions:
-        resolved += 1
-        realized_pnl = _parse(cp.get("realizedPnl"))
-        sell_p = _parse(cp.get("avgSellPrice"))
-        cur_p = _parse(cp.get("curPrice"))
-        is_win = realized_pnl > 0 or sell_p >= 0.95 or cur_p >= 0.95
-        if is_win:
-            wins += 1
+    synced_count = await sync_redeemable_positions(conn, session, address, positions, closed_keys)
+    if synced_count > 0:
+        closed_keys = {
+            (cp.get("conditionId"), cp.get("asset", ""))
+            for cp in closed_positions
+            if cp.get("conditionId")
+        }
 
-        title = cp.get("title") or ""
-        if title:
-            raw_c, raw_s = classify_tags([title])
-            cat = raw_c.upper()
-            subcat = flatten_subcategory(raw_c, raw_s)
-        else:
-            cat, subcat = "OTHER", "General"
-
-        m_cat = cat_metrics[(cat, "")]
-        m_cat["pnl"] += realized_pnl
-        m_cat["volume"] += _parse(cp.get("totalBought"))
-        m_cat["resolved"] += 1
-        if is_win:
-            m_cat["wins"] += 1
-
-        if subcat:
-            m_sub = cat_metrics[(cat, subcat)]
-            m_sub["pnl"] += realized_pnl
-            m_sub["volume"] += _parse(cp.get("totalBought"))
-            m_sub["resolved"] += 1
-            if is_win:
-                m_sub["wins"] += 1
-
-        buy_price = _parse(cp.get("avgPrice"))
-        if buy_price > 0:
-            if buy_price > 1.0:
-                buy_price = buy_price / 100.0
-            all_buy_prices.append(buy_price)
-            b_key = _get_price_bucket(buy_price)
-            b = bucket_stats[b_key]
-            b["buys"] += 1
-            if is_win:
-                b["wins"] += 1
-            else:
-                b["losses"] += 1
-
-            if sell_p <= 0:
-                sell_p = 1.0 if is_win else 0.0
-            b["sum_sell"] += sell_p
-            b["count_sell"] += 1
-
-    # Check open positions for resolved/redeemable status, price buckets & category volume
-    for p in positions:
-        cid = p.get("conditionId")
-        asset = p.get("asset", "")
-        if (cid, asset) in closed_keys:
-            continue
-
-        cur_price    = _parse(p.get("curPrice"))
-        redeemable   = p.get("redeemable", False)
-        total_bought = _parse(p.get("totalBought"))
-        title        = p.get("title") or ""
-        end_date     = p.get("endDate")
-        cash_pnl     = _parse(p.get("cashPnl"))
-        realized_pnl = _parse(p.get("realizedPnl"))
-        pos_pnl      = realized_pnl + cash_pnl
-
-        if title:
-            raw_c, raw_s = classify_tags([title])
-            cat = raw_c.upper()
-            subcat = flatten_subcategory(raw_c, raw_s)
-        else:
-            cat, subcat = "OTHER", "General"
-
-        cat_volume[cat] = cat_volume.get(cat, 0.0) + total_bought
-        cat_metrics[(cat, "")]["volume"] += total_bought
-        if subcat:
-            cat_metrics[(cat, subcat)]["volume"] += total_bought
-
-        buy_price = _parse(p.get("avgPrice"))
-        if buy_price > 0:
-            if buy_price > 1.0:
-                buy_price = buy_price / 100.0
-            all_buy_prices.append(buy_price)
-
-        is_resolved_pos = redeemable or cur_price < 0.03 or (end_date and cur_price < 0.10)
-        if is_resolved_pos:
-            resolved += 1
-            is_win = pos_pnl > 0 or cur_price > 0.97
-            if is_win:
-                wins += 1
-
-            m_cat = cat_metrics[(cat, "")]
-            m_cat["resolved"] += 1
-            if is_win:
-                m_cat["wins"] += 1
-            m_cat["pnl"] += pos_pnl
-
-            if subcat:
-                m_sub = cat_metrics[(cat, subcat)]
-                m_sub["resolved"] += 1
-                if is_win:
-                    m_sub["wins"] += 1
-                m_sub["pnl"] += pos_pnl
-
-            if buy_price > 0:
-                b_key = _get_price_bucket(buy_price)
-                b = bucket_stats[b_key]
-                b["buys"] += 1
-                if is_win:
-                    b["wins"] += 1
-                else:
-                    b["losses"] += 1
-
-                sell_p = 1.0 if is_win else 0.0
-                b["sum_sell"] += sell_p
-                b["count_sell"] += 1
-
-    win_rate = (wins / resolved) if resolved > 0 else None
-    avg_buy_price = (sum(all_buy_prices) / len(all_buy_prices)) if all_buy_prices else None
-
-    # Calculate Windowed PnLs for all 10 window steps
-    window_pnls = {}
-    for w in WINDOWS:
-        slice_cp = closed_positions[:w]
-        window_pnls[f"pnl_{w}"] = sum(_parse(cp.get("realizedPnl")) for cp in slice_cp) if slice_cp else (total_pnl if w == 5000 else 0.0)
-
-    # Volume fallback logic if total_volume is missing
-    if not total_volume or total_volume <= 0:
-        cat_vol = sum(cat_volume.values())
-        pos_vol = (
-            sum(_parse(p.get("totalBought", 0)) for p in positions) +
-            sum(_parse(p.get("totalBought", 0)) for p in closed_positions)
-        )
-        total_volume = max(cat_vol, pos_vol) or None
-
-    if not total_volume or total_volume <= 0:
-        try:
-            from src.workers.wallet_trade_history import fetch_all_trades
-            trades_fb = await fetch_all_trades(session, address)
-            if trades_fb:
-                total_volume = sum(
-                    _parse(t.get("usd_volume")) or (_parse(t.get("size")) * _parse(t.get("price")))
-                    for t in trades_fb
-                ) or None
-        except Exception as e:
-            logger.debug(f"Trade volume fallback error {address[:12]}: {e}")
-
-    is_zero_activity = (
-        (not total_volume or total_volume == 0) and
-        (not total_pnl or total_pnl == 0) and
-        not positions and not closed_positions
-    )
-
-    # Prepare computed avg_sell values per bucket
-    avg_sells = {
-        k: (bucket_stats[k]["sum_sell"] / bucket_stats[k]["count_sell"]) if bucket_stats[k]["count_sell"] > 0 else 0.0
-        for k in bucket_stats
-    }
-
-    # Write metrics, price bucket stats & 10 windowed PnLs to wallet_metrics_v2
-    await conn.execute("""
-        INSERT INTO wallet_metrics_v2 (
-            address, total_volume, total_pnl, balance, position_value,
-            win_rate, resolved_count, winning_count, avg_buy_price,
-            buys_below_15c, wins_below_15c, losses_below_15c, avg_sell_below_15c,
-            buys_15_30c, wins_15_30c, losses_15_30c, avg_sell_15_30c,
-            buys_30_45c, wins_30_45c, losses_30_45c, avg_sell_30_45c,
-            buys_45_60c, wins_45_60c, losses_45_60c, avg_sell_45_60c,
-            buys_60_75c, wins_60_75c, losses_60_75c, avg_sell_60_75c,
-            buys_above_75c, wins_above_75c, losses_above_75c, avg_sell_above_75c,
-            pnl_100, pnl_200, pnl_300, pnl_500, pnl_750, pnl_1000, pnl_1500, pnl_2000, pnl_3500, pnl_5000,
-            onchain_verify_pending, computed_at
-        )
-        VALUES (
-            $1,$2,$3,$4,$5,
-            $6,$7,$8,$9,
-            $10,$11,$12,$13,
-            $14,$15,$16,$17,
-            $18,$19,$20,$21,
-            $22,$23,$24,$25,
-            $26,$27,$28,$29,
-            $30,$31,$32,$33,
-            $34,$35,$36,$37,$38,$39,$40,$41,$42,$43,
-            $44, NOW()
-        )
-        ON CONFLICT (address) DO UPDATE SET
-            total_volume=EXCLUDED.total_volume,
-            total_pnl=EXCLUDED.total_pnl,
-            balance=EXCLUDED.balance,
-            position_value=EXCLUDED.position_value,
-            win_rate=EXCLUDED.win_rate,
-            resolved_count=EXCLUDED.resolved_count,
-            winning_count=EXCLUDED.winning_count,
-            avg_buy_price=EXCLUDED.avg_buy_price,
-            buys_below_15c=EXCLUDED.buys_below_15c,
-            wins_below_15c=EXCLUDED.wins_below_15c,
-            losses_below_15c=EXCLUDED.losses_below_15c,
-            avg_sell_below_15c=EXCLUDED.avg_sell_below_15c,
-            buys_15_30c=EXCLUDED.buys_15_30c,
-            wins_15_30c=EXCLUDED.wins_15_30c,
-            losses_15_30c=EXCLUDED.losses_15_30c,
-            avg_sell_15_30c=EXCLUDED.avg_sell_15_30c,
-            buys_30_45c=EXCLUDED.buys_30_45c,
-            wins_30_45c=EXCLUDED.wins_30_45c,
-            losses_30_45c=EXCLUDED.losses_30_45c,
-            avg_sell_30_45c=EXCLUDED.avg_sell_30_45c,
-            buys_45_60c=EXCLUDED.buys_45_60c,
-            wins_45_60c=EXCLUDED.wins_45_60c,
-            losses_45_60c=EXCLUDED.losses_45_60c,
-            avg_sell_45_60c=EXCLUDED.avg_sell_45_60c,
-            buys_60_75c=EXCLUDED.buys_60_75c,
-            wins_60_75c=EXCLUDED.wins_60_75c,
-            losses_60_75c=EXCLUDED.losses_60_75c,
-            avg_sell_60_75c=EXCLUDED.avg_sell_60_75c,
-            buys_above_75c=EXCLUDED.buys_above_75c,
-            wins_above_75c=EXCLUDED.wins_above_75c,
-            losses_above_75c=EXCLUDED.losses_above_75c,
-            avg_sell_above_75c=EXCLUDED.avg_sell_above_75c,
-            pnl_100=EXCLUDED.pnl_100,
-            pnl_200=EXCLUDED.pnl_200,
-            pnl_300=EXCLUDED.pnl_300,
-            pnl_500=EXCLUDED.pnl_500,
-            pnl_750=EXCLUDED.pnl_750,
-            pnl_1000=EXCLUDED.pnl_1000,
-            pnl_1500=EXCLUDED.pnl_1500,
-            pnl_2000=EXCLUDED.pnl_2000,
-            pnl_3500=EXCLUDED.pnl_3500,
-            pnl_5000=EXCLUDED.pnl_5000,
-            onchain_verify_pending=EXCLUDED.onchain_verify_pending,
-            open_synced_at=NOW(),
-            closed_synced_at=NOW(),
-            computed_at=NOW()
-    """, address, total_volume, total_pnl, balance, pos_val,
-         win_rate, resolved, wins, avg_buy_price,
-         bucket_stats["below_15c"]["buys"], bucket_stats["below_15c"]["wins"], bucket_stats["below_15c"]["losses"], avg_sells["below_15c"],
-         bucket_stats["15_30c"]["buys"], bucket_stats["15_30c"]["wins"], bucket_stats["15_30c"]["losses"], avg_sells["15_30c"],
-         bucket_stats["30_45c"]["buys"], bucket_stats["30_45c"]["wins"], bucket_stats["30_45c"]["losses"], avg_sells["30_45c"],
-         bucket_stats["45_60c"]["buys"], bucket_stats["45_60c"]["wins"], bucket_stats["45_60c"]["losses"], avg_sells["45_60c"],
-         bucket_stats["60_75c"]["buys"], bucket_stats["60_75c"]["wins"], bucket_stats["60_75c"]["losses"], avg_sells["60_75c"],
-         bucket_stats["above_75c"]["buys"], bucket_stats["above_75c"]["wins"], bucket_stats["above_75c"]["losses"], avg_sells["above_75c"],
-         window_pnls["pnl_100"], window_pnls["pnl_200"], window_pnls["pnl_300"],
-         window_pnls["pnl_500"], window_pnls["pnl_750"], window_pnls["pnl_1000"],
-         window_pnls["pnl_1500"], window_pnls["pnl_2000"], window_pnls["pnl_3500"],
-         window_pnls["pnl_5000"], is_zero_activity)
-
-    # Calculate latest active date from closed positions
-    # Use endDate only when it's in the past (real resolution) — never future deadlines
-    from datetime import datetime, timezone as _tz
-    _now = datetime.now(tz=_tz.utc)
-    last_active_dt = None
-    for cp in closed_positions:
-        end = _parse_end(cp.get("endDate"))
-        # Extra guard: _parse_end already filters futures, but be defensive
-        if end and end <= _now and (last_active_dt is None or end > last_active_dt):
-            last_active_dt = end
-
-    if last_active_dt:
+    if positions_complete:
+        redeem_keys = [
+            (p.get("conditionId"), p.get("outcome") or p.get("asset", ""))
+            for p in positions
+            if p.get("redeemable", False) and p.get("conditionId")
+        ]
         await conn.execute("""
-            UPDATE wallets_v2
-            SET last_trade_at = $2,
-                is_dormant = CASE WHEN $2 < NOW() - INTERVAL '30 days' THEN TRUE ELSE FALSE END
-            WHERE address = $1
-        """, address, last_active_dt)
-    else:
+            UPDATE wallet_closed_positions_v2 c
+            SET is_redeemable = FALSE
+            WHERE c.address = $1 AND c.is_redeemable
+              AND (c.condition_id, c.outcome) NOT IN (
+                  SELECT * FROM unnest($2::text[], $3::text[])
+              )
+        """, address, [k[0] for k in redeem_keys], [k[1] for k in redeem_keys])
+
+    real_closed = [cp for cp in closed_positions if not cp.get("is_redeemable")]
+    await upsert_closed_positions_v2(conn, address, real_closed)
+
+    if closed_complete:
         await conn.execute("""
-            UPDATE wallets_v2
-            SET is_dormant = CASE 
-                WHEN last_trade_at IS NOT NULL AND last_trade_at < NOW() - INTERVAL '30 days' THEN TRUE 
-                ELSE FALSE 
-            END
-            WHERE address = $1
+            INSERT INTO wallet_metrics_v2 (address, closed_synced_at)
+            VALUES ($1, NOW())
+            ON CONFLICT (address) DO UPDATE SET closed_synced_at = NOW()
         """, address)
+    else:
+        logger.warning(f"Incomplete closed fetch for {address[:12]}... — NOT marking closed_synced_at")
 
-    for (cat, subcat), m in cat_metrics.items():
-        cat_wr = (m["wins"] / m["resolved"]) if m["resolved"] > 0 else 0.0
-        cat_roi = 0.0
+    max_db_trade = await conn.fetchval("""
+        SELECT max(traded_at) FROM wallet_trades_v2
+        WHERE wallet_address = $1 AND traded_at <= NOW()
+    """, address)
+    if max_db_trade:
         await conn.execute("""
-            INSERT INTO category_stats_v2 (
-                address, category, subcategory, window_size, pnl, volume, win_rate, roi_pct, resolved_count, winning_count, computed_at
-            ) VALUES ($1, $2, $3, 0, $4, $5, $6, $7, $8, $9, NOW())
-            ON CONFLICT (address, category, subcategory, window_size) DO UPDATE SET
-                pnl = EXCLUDED.pnl,
-                volume = EXCLUDED.volume,
-                win_rate = EXCLUDED.win_rate,
-                roi_pct = EXCLUDED.roi_pct,
-                resolved_count = EXCLUDED.resolved_count,
-                winning_count = EXCLUDED.winning_count,
-                computed_at = NOW()
-        """, address, cat, subcat, m["pnl"], m["volume"], cat_wr, cat_roi, m["resolved"], m["wins"])
-
-    await upsert_closed_positions_v2(conn, address, closed_positions)
-    await aggregate_and_upsert_positions_v2(conn, address, positions)
+            UPDATE wallets_v2
+            SET last_trade_at = GREATEST(COALESCE(last_trade_at, $2), $2),
+                is_dormant = CASE WHEN GREATEST(COALESCE(last_trade_at, $2), $2) < NOW() - INTERVAL '30 days' THEN TRUE ELSE FALSE END
+            WHERE address = $1
+        """, address, max_db_trade)
 
     logger.info(
-        f"Done {address[:12]}... | vol=${total_volume or 0:.0f} "
-        f"pnl=${total_pnl or 0:.0f} wr={(win_rate or 0)*100:.1f}% resolved={resolved}"
+        f"Done {address[:12]}... | closed={len(real_closed)} "
+        f"redeemable_synced={synced_count}"
     )
+    sys.stdout.flush()
 
 
-async def run_positions_winrate_backfill(db_url: str = DB_URL):
-    logger.info(f"=== HIGH-SPEED POSITIONS & WIN-RATE BACKFILL WORKER STARTED (CONCURRENCY={CONCURRENCY}) ===")
-    try:
-        pool = await asyncpg.create_pool(db_url, min_size=4, max_size=12)
-    except Exception as e:
-        logger.error(f"DB pool failed: {e}")
-        return
-
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT w.address
-            FROM wallets_v2 w
-            LEFT JOIN wallet_metrics_v2 m ON w.address = m.address
-            WHERE w.is_dormant = FALSE
-              AND (
-                  -- 1. Fast schedule for open positions + open parlay positions: active in last 6 hours & open sync > 2 hours ago
-                  (w.last_trade_at >= NOW() - INTERVAL '6 hours' AND (m.open_synced_at IS NULL OR m.open_synced_at < NOW() - INTERVAL '2 hours'))
-                  OR
-                  -- 2. Standard schedule for closed positions + closed parlay positions: active in last 7 days & closed sync > 5 days ago
-                  ((w.last_trade_at IS NULL OR w.last_trade_at >= NOW() - INTERVAL '7 days') AND (m.closed_synced_at IS NULL OR m.closed_synced_at < NOW() - INTERVAL '5 days' OR m.computed_at IS NULL OR m.computed_at < NOW() - INTERVAL '5 days'))
-              )
-            ORDER BY 
-              CASE WHEN w.tier IN ('CURATED', 'CUSTOM') THEN 0 ELSE 1 END ASC,
-              LEAST(COALESCE(m.open_synced_at, '1970-01-01'::TIMESTAMPTZ), COALESCE(m.closed_synced_at, '1970-01-01'::TIMESTAMPTZ)) ASC
-        """)
-        wallets = [r["address"] for r in rows]
-        total = len(wallets)
-        logger.info(f"Queue: {total} wallets (concurrency={CONCURRENCY}, timeout={WALLET_TIMEOUT}s)")
-        if total == 0:
-            logger.info("No wallets in queue for positions/winrate backfill. Sleeping for 60s...")
-            await pool.close()
-            await asyncio.sleep(60)
-            return
-
-    sem = asyncio.Semaphore(CONCURRENCY)
-    done, errors = 0, 0
-
-    connector = aiohttp.TCPConnector(
-        limit=CONCURRENCY * 5,
-        limit_per_host=40,
-        keepalive_timeout=30,
-        enable_cleanup_closed=True,
-    )
-    async with aiohttp.ClientSession(
-        headers={"User-Agent": "Mozilla/5.0"},
-        connector=connector,
-        timeout=aiohttp.ClientTimeout(total=20),
-    ) as session:
-
-        async def _process_one(addr):
-            nonlocal done, errors
-            async with sem:
-                try:
-                    async with pool.acquire() as conn:
-                        await asyncio.wait_for(
-                            process_wallet_backfill(conn, session, addr),
-                            timeout=WALLET_TIMEOUT,
-                        )
-                    done += 1
-                except asyncio.TimeoutError:
-                    errors += 1
-                    logger.warning(f"Timeout {addr[:12]}... ({WALLET_TIMEOUT}s)")
-                except Exception as e:
-                    errors += 1
-                    logger.warning(f"Error {addr[:12]}...: {e}")
-
-                if (done + errors) % 50 == 0 or (done + errors) == total:
-                    logger.info(f"Progress: {done+errors}/{total} (ok={done} err={errors})")
-
-        await asyncio.gather(*[_process_one(addr) for addr in wallets], return_exceptions=True)
-
-    logger.info(f"=== BACKFILL COMPLETE: {done} ok, {errors} errors / {total} ===")
-    await pool.close()
-
-
-if __name__ == "__main__":
+async def main_loop(db_url: str = DB_URL):
+    import sys
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
     )
-    asyncio.run(run_positions_winrate_backfill())
+    logger.info(f"=== CLOSED POSITIONS BACKFILLER STARTED (CONCURRENCY={CONCURRENCY}) ===")
+
+    pool = await asyncpg.create_pool(DB_URL, min_size=12, max_size=80)
+    rate_limiter = PostgresRateLimiter(pool)
+    sem = asyncio.Semaphore(CONCURRENCY)
+    connector = aiohttp.TCPConnector(
+        limit=CONCURRENCY * 6,
+        limit_per_host=CONCURRENCY * 4,
+        keepalive_timeout=20,
+        enable_cleanup_closed=True,
+    )
+
+    async with aiohttp.ClientSession(
+        headers={"User-Agent": "Mozilla/5.0"},
+        connector=connector,
+        timeout=aiohttp.ClientTimeout(total=12, connect=4, sock_read=8),
+    ) as session:
+        while True:
+            try:
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch("""
+                        SELECT w.address
+                        FROM wallets_v2 w
+                        LEFT JOIN wallet_metrics_v2 m ON w.address = m.address
+                        WHERE w.is_dormant = FALSE
+                          AND (
+                              m.closed_synced_at IS NULL
+                              OR m.closed_synced_at < NOW() - INTERVAL '84 hours'
+                          )
+                        ORDER BY
+                          CASE WHEN m.closed_synced_at IS NULL THEN 0 ELSE 1 END ASC,
+                          CASE
+                            WHEN w.tier IN ('CURATED', 'CUSTOM') THEN 0
+                            WHEN w.tier = 'STANDARD' THEN 1
+                            WHEN w.tier = 'NEW' THEN 2
+                            WHEN w.tier = 'LOW_BALANCE' THEN 3
+                            ELSE 4
+                          END ASC,
+                          COALESCE(m.closed_synced_at, '1970-01-01'::TIMESTAMPTZ) ASC
+                        LIMIT 500
+                    """)
+                    wallets = [r["address"] for r in rows]
+                    total = len(wallets)
+
+                if total == 0:
+                    logger.info("All active wallets fully backfilled (closed)! Sleeping for 60s...")
+                    await asyncio.sleep(60)
+                    continue
+
+                done, errors = 0, 0
+                t0 = time.time()
+
+                async def _process_one(addr):
+                    nonlocal done, errors
+                    async with sem:
+                        try:
+                            async with pool.acquire() as conn:
+                                await asyncio.wait_for(
+                                    process_wallet_closed(conn, session, addr, rate_limiter),
+                                    timeout=WALLET_TIMEOUT,
+                                )
+                            done += 1
+                        except asyncio.TimeoutError:
+                            errors += 1
+                        except Exception as e:
+                            errors += 1
+                            logger.warning(f"Error {addr[:12]}...: {e}")
+
+                        if (done + errors) % 5 == 0 or (done + errors) == total:
+                            rate = (done + errors) / max(0.1, time.time() - t0)
+                            logger.info(f"Progress: {done+errors}/{total} (ok={done} err={errors}) | Speed: {rate:.1f} wallets/s")
+
+                await asyncio.gather(*[_process_one(addr) for addr in wallets], return_exceptions=True)
+                logger.info(f"=== BATCH COMPLETE: {done} ok, {errors} errors / {total} ===")
+                await asyncio.sleep(1)
+
+            except Exception as e:
+                logger.error(f"Error in backfill loop: {e}")
+                await asyncio.sleep(5)
+
+
+if __name__ == "__main__":
+    asyncio.run(main_loop())

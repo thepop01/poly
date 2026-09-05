@@ -52,3 +52,39 @@ export function SkeletonStatCard() {
     </div>
   );
 }
+
+export function SkeletonKpiCards({ count = 8 }: { count?: number }) {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="p-3.5 rounded-xl bg-surface border border-border/90 shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <div className="w-16 h-2.5 rounded skeleton" />
+            <div className="w-3.5 h-3.5 rounded skeleton" />
+          </div>
+          <div className="w-20 h-5 rounded skeleton" />
+          <div className="w-24 h-2 rounded skeleton mt-2" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function SkeletonTableRows({ rows = 8, cols = 6 }: { rows?: number; cols?: number }) {
+  return (
+    <tbody className="divide-y divide-border/50">
+      {Array.from({ length: rows }).map((_, r) => (
+        <tr key={r}>
+          {Array.from({ length: cols }).map((_, c) => (
+            <td key={c} className="py-2.5 px-3">
+              <div
+                className="h-3.5 rounded skeleton"
+                style={{ width: `${c === 0 ? 70 : 45 + ((r + c) % 3) * 15}%` }}
+              />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </tbody>
+  );
+}

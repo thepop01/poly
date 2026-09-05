@@ -1,15 +1,35 @@
 """Leaderboard router V2 for FastAPI (using new 10-table schema)."""
 
+import logging
+import time
 from typing import Any, Optional
 from fastapi import APIRouter, Request, HTTPException
-import time
-from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
 
+class SimpleTTLCache:
+    def __init__(self, maxsize: int = 300, ttl: float = 300):
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._data: dict[str, tuple[Any, float]] = {}
+
+    def get(self, key: str) -> Any | None:
+        if key in self._data:
+            val, ts = self._data[key]
+            if time.time() - ts < self.ttl:
+                return val
+            del self._data[key]
+        return None
+
+    def __setitem__(self, key: str, value: Any):
+        if len(self._data) >= self.maxsize:
+            oldest_key = min(self._data.keys(), key=lambda k: self._data[k][1])
+            del self._data[oldest_key]
+        self._data[key] = (value, time.time())
+
 router = APIRouter(prefix="/v2/leaderboard", tags=["leaderboard-v2"])
 
-_cache: TTLCache = TTLCache(maxsize=300, ttl=300)
+_cache = SimpleTTLCache(maxsize=300, ttl=300)
 CACHE_TTL = 300
 
 VALID_CATEGORIES = {
@@ -28,8 +48,8 @@ TAB_FILTERS = {
 }
 
 WALLET_SORT_COLUMNS = {
-    "pnl": "COALESCE(m.pm_pnl, m.total_pnl)",
-    "volume": "COALESCE(m.pm_volume, m.total_volume)",
+    "pnl": "m.total_pnl",
+    "volume": "COALESCE(m.total_volume, m.pm_volume)",
     "roi": "m.roi_pct",
     "balance": "m.balance",
     "position_value": "m.position_value",
@@ -53,6 +73,15 @@ WALLET_SORT_COLUMNS = {
     "wins_60_75c": "COALESCE(m.wins_60_75c, 0)",
     "buys_above_75c": "COALESCE(m.buys_above_75c, 0)",
     "wins_above_75c": "COALESCE(m.wins_above_75c, 0)",
+    "parlay_pnl": "COALESCE(m.parlay_pnl, 0)",
+    "parlay_volume": "COALESCE(m.parlay_volume, 0)",
+    "parlay_win_rate": "COALESCE(m.parlay_win_rate, 0)",
+    "parlay_resolved_count": "COALESCE(m.parlay_resolved_count, 0)",
+    "parlay_winning_count": "COALESCE(m.parlay_winning_count, 0)",
+    "parlay_open_count": "COALESCE(m.parlay_open_count, 0)",
+    "parlay_open_value": "COALESCE(m.parlay_open_value, 0)",
+    "p2p_txn_value": "COALESCE(p2p.p2p_txn_value, 0)",
+    "fund_transfer_value": "COALESCE(fund.fund_transfer_value, 0)",
 }
 
 WALLET_SOURCES = ("trade", "deposit", "leaderboard", "custom")
@@ -68,7 +97,10 @@ async def get_wallets_tabbed(
     sort_order: str = "desc",
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
+    league: Optional[str] = None,
     pnl_window: Optional[str] = None,
+    view_type: Optional[str] = None,
+    has_lineage: Optional[bool] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -77,9 +109,9 @@ async def get_wallets_tabbed(
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
 
-    cache_key = f"v2_wallets_{tab}_{source}_{search}_{sort_by}_{sort_order}_{category}_{subcategory}_{pnl_window}_{limit}_{offset}"
+    cache_key = f"{tab}:{source}:{search}:{sort_by}:{sort_order}:{category}:{subcategory}:{league}:{pnl_window}:{view_type}:{has_lineage}:{limit}:{offset}"
     cached = _cache.get(cache_key)
-    if cached and time.time() - cached["time"] < CACHE_TTL:
+    if cached:
         return cached["data"]
 
     pool = getattr(request.app.state, "pool", None)
@@ -98,10 +130,20 @@ async def get_wallets_tabbed(
 
     direction = "ASC" if sort_order.lower() == "asc" else "DESC"
     where = [TAB_FILTERS[tab]]
+
+    if view_type == "parlay":
+        where.append("(COALESCE(m.parlay_resolved_count, 0) > 0 OR COALESCE(m.parlay_open_count, 0) > 0 OR COALESCE(m.parlay_volume, 0) > 0 OR m.parlay_pnl IS NOT NULL)")
+    elif view_type == "lineage" or has_lineage:
+        # Fast path: the precomputed summary table replaces per-wallet EXISTS
+        # subqueries over the large transfer tables. A wallet has lineage if it
+        # has any p2p position transfer, any internal funding transfer, or a
+        # non-CEX funding origin.
+        where.append("(w.funded_by IS NOT NULL OR (w.funding_source IS NOT NULL AND w.funding_source != 'cex_deposit') OR COALESCE(w.transferred_positions_count, 0) > 0 OR COALESCE(p2p.p2p_txn_count, 0) > 0 OR COALESCE(fund.fund_transfer_count, 0) > 0)")
+
     params: list[Any] = []
 
     if is_overall:
-        if pnl_window and pnl_window in ("pnl_100", "pnl_200", "pnl_300", "pnl_500", "pnl_750", "pnl_1000", "pnl_1500", "pnl_2000", "pnl_3500", "pnl_5000"):
+        if pnl_window and pnl_window in ("pnl_100", "pnl_200", "pnl_300", "pnl_500", "pnl_750", "pnl_1000", "pnl_1500", "pnl_2000", "pnl_3500", "pnl_5000", "pnl_all"):
             pnl_select = f"COALESCE(m.{pnl_window}, m.total_pnl)"
             order_col = f"COALESCE(m.{pnl_window}, m.total_pnl)" if sort_by == "pnl" else WALLET_SORT_COLUMNS.get(sort_by, WALLET_SORT_COLUMNS["pnl"])
         else:
@@ -114,7 +156,8 @@ async def get_wallets_tabbed(
                 f"EXISTS (SELECT 1 FROM wallet_sources_v2 s WHERE s.address = w.address AND s.source = ${len(params)})"
             )
         if search:
-            params.append(f"%{search}%")
+            clean_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.append(f"%{clean_search}%")
             where.append(f"(w.address ILIKE ${len(params)} OR w.username ILIKE ${len(params)})")
         params.extend([limit, offset])
 
@@ -143,15 +186,36 @@ async def get_wallets_tabbed(
                    COALESCE(m.buys_above_75c, 0) as buys_above_75c,
                    COALESCE(m.wins_above_75c, 0) as wins_above_75c,
                    COALESCE(m.avg_sell_above_75c, 0) as avg_sell_above_75c,
+                   COALESCE(m.parlay_pnl, 0) AS parlay_pnl,
+                   COALESCE(m.parlay_volume, 0) AS parlay_volume,
+                   COALESCE(m.parlay_win_rate, 0) AS parlay_win_rate,
+                   COALESCE(m.parlay_resolved_count, 0) AS parlay_resolved_count,
+                   COALESCE(m.parlay_winning_count, 0) AS parlay_winning_count,
+                   COALESCE(m.parlay_open_count, 0) AS parlay_open_count,
+                   COALESCE(m.parlay_open_value, 0) AS parlay_open_value,
+                   w.funding_source,
+                   w.funded_by,
+                   COALESCE(w.transferred_positions_count, 0) AS transferred_positions_count,
+                   COALESCE(p2p.p2p_txn_value, 0) AS p2p_txn_value,
+                   COALESCE(p2p.p2p_txn_count, 0) AS p2p_txn_count,
+                   COALESCE(fund.fund_transfer_value, 0) AS fund_transfer_value,
+                   COALESCE(fund.fund_transfer_count, 0) AS fund_transfer_count,
                    (SELECT array_agg(s.source ORDER BY s.spotted_at)
                       FROM wallet_sources_v2 s WHERE s.address = w.address) AS sources,
                    (SELECT array_agg(c.category)
                       FROM (SELECT category FROM category_stats_v2 WHERE address = w.address AND window_size = 0 AND category != 'OTHER' ORDER BY volume DESC LIMIT 3) c
                    ) AS categories,
-                   (SELECT COUNT(*)::int FROM user_watchlists uw WHERE LOWER(uw.wallet_address) = LOWER(w.address)) AS favorite_count,
+                   COALESCE(fav.favorite_count, 0) AS favorite_count,
                    COUNT(*) OVER() AS total_count
             FROM wallets_v2 w
-            LEFT JOIN wallet_metrics_v2 m ON m.address = w.address
+            JOIN wallet_metrics_v2 m ON m.address = w.address
+            LEFT JOIN wallet_lineage_summary_v2 p2p ON p2p.address = w.address
+            LEFT JOIN wallet_lineage_summary_v2 fund ON fund.address = w.address
+            LEFT JOIN (
+                SELECT LOWER(wallet_address) as wallet_address, COUNT(*)::int as favorite_count 
+                FROM user_watchlists 
+                GROUP BY LOWER(wallet_address)
+            ) fav ON fav.wallet_address = LOWER(w.address)
             WHERE {' AND '.join(where)}
             ORDER BY {order_col} {direction} NULLS LAST
             LIMIT ${len(params) - 1} OFFSET ${len(params)}
@@ -166,6 +230,13 @@ async def get_wallets_tabbed(
             subcat_clause = f"AND c.subcategory = ${subcat_param_idx}"
         else:
             subcat_clause = "AND c.subcategory = ''"
+
+        if league:
+            params.append(league)
+            league_param_idx = len(params)
+            league_clause = f"AND c.league ILIKE ${league_param_idx}"
+        else:
+            league_clause = ""
 
         order_col_map = {
             "pnl": "c.pnl",
@@ -189,6 +260,15 @@ async def get_wallets_tabbed(
             "wins_60_75c": "COALESCE(m.wins_60_75c, 0)",
             "buys_above_75c": "COALESCE(m.buys_above_75c, 0)",
             "wins_above_75c": "COALESCE(m.wins_above_75c, 0)",
+            "parlay_pnl": "COALESCE(m.parlay_pnl, 0)",
+            "parlay_volume": "COALESCE(m.parlay_volume, 0)",
+            "parlay_win_rate": "COALESCE(m.parlay_win_rate, 0)",
+            "parlay_resolved_count": "COALESCE(m.parlay_resolved_count, 0)",
+            "parlay_winning_count": "COALESCE(m.parlay_winning_count, 0)",
+            "parlay_open_count": "COALESCE(m.parlay_open_count, 0)",
+            "parlay_open_value": "COALESCE(m.parlay_open_value, 0)",
+            "p2p_txn_value": "COALESCE(p2p.p2p_txn_value, 0)",
+            "fund_transfer_value": "COALESCE(fund.fund_transfer_value, 0)",
         }
         order_col = order_col_map.get(sort_by, "c.pnl")
 
@@ -198,7 +278,8 @@ async def get_wallets_tabbed(
                 f"EXISTS (SELECT 1 FROM wallet_sources_v2 s WHERE s.address = w.address AND s.source = ${len(params)})"
             )
         if search:
-            params.append(f"%{search}%")
+            clean_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.append(f"%{clean_search}%")
             where.append(f"(w.address ILIKE ${len(params)} OR w.username ILIKE ${len(params)})")
 
         params.extend([limit, offset])
@@ -228,6 +309,20 @@ async def get_wallets_tabbed(
                    COALESCE(m.buys_above_75c, 0) as buys_above_75c,
                    COALESCE(m.wins_above_75c, 0) as wins_above_75c,
                    COALESCE(m.avg_sell_above_75c, 0) as avg_sell_above_75c,
+                   COALESCE(m.parlay_pnl, 0) AS parlay_pnl,
+                   COALESCE(m.parlay_volume, 0) AS parlay_volume,
+                   COALESCE(m.parlay_win_rate, 0) AS parlay_win_rate,
+                   COALESCE(m.parlay_resolved_count, 0) AS parlay_resolved_count,
+                   COALESCE(m.parlay_winning_count, 0) AS parlay_winning_count,
+                   COALESCE(m.parlay_open_count, 0) AS parlay_open_count,
+                   COALESCE(m.parlay_open_value, 0) AS parlay_open_value,
+                   w.funding_source,
+                   w.funded_by,
+                   COALESCE(w.transferred_positions_count, 0) AS transferred_positions_count,
+                   COALESCE(p2p.p2p_txn_value, 0) AS p2p_txn_value,
+                   COALESCE(p2p.p2p_txn_count, 0) AS p2p_txn_count,
+                   COALESCE(fund.fund_transfer_value, 0) AS fund_transfer_value,
+                   COALESCE(fund.fund_transfer_count, 0) AS fund_transfer_count,
                    (SELECT array_agg(s.source ORDER BY s.spotted_at)
                       FROM wallet_sources_v2 s WHERE s.address = w.address) AS sources,
                    (SELECT array_agg(subc.category)
@@ -240,7 +335,10 @@ async def get_wallets_tabbed(
             JOIN category_stats_v2 c ON w.address = c.address 
                 AND c.category = ${cat_param_idx} 
                 {subcat_clause} 
+                {league_clause}
                 AND c.window_size = 0
+            LEFT JOIN wallet_lineage_summary_v2 p2p ON p2p.address = w.address
+            LEFT JOIN wallet_lineage_summary_v2 fund ON fund.address = w.address
             WHERE {' AND '.join(where)}
             ORDER BY {order_col} {direction} NULLS LAST
             LIMIT ${len(params) - 1} OFFSET ${len(params)}
@@ -339,7 +437,7 @@ async def get_global_leaderboard(
                 m.biggest_loss,
                 m.position_value,
                 m.balance,
-                m.avg_position_size as max_trade_size,
+                NULL::numeric as max_trade_size,
                 w.tier_reason as added_reason,
                 w.added_at,
                 m.pm_pnl as website_pnl,
@@ -365,7 +463,7 @@ async def get_global_leaderboard(
             "biggest_win": "m.biggest_win",
             "position_value": "m.position_value",
             "balance": "m.balance",
-            "max_trade_size": "m.avg_position_size",
+            "max_trade_size": "NULL::numeric",
             "website_rank": "m.pm_rank",
             "last_trade_at": "w.last_trade_at",
         }
@@ -381,7 +479,7 @@ async def get_global_leaderboard(
                 m.biggest_loss,
                 m.position_value,
                 m.balance,
-                m.avg_position_size as max_trade_size,
+                NULL::numeric as max_trade_size,
                 w.tier_reason as added_reason,
                 w.added_at,
                 m.pm_pnl as website_pnl,
@@ -404,7 +502,8 @@ async def get_global_leaderboard(
 
     if search:
         conditions.append(f"(w.address ILIKE ${len(args) + 1} OR w.username ILIKE ${len(args) + 1})")
-        args.append(f"%{search}%")
+        clean_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        args.append(f"%{clean_search}%")
     if source_type:
         conditions.append(
             f"EXISTS (SELECT 1 FROM wallet_sources_v2 sf WHERE sf.address = w.address AND sf.source = ${len(args) + 1})"
@@ -734,3 +833,31 @@ async def get_subcategories(
         )
         
     return {"subcategories": [r["subcategory"] for r in rows]}
+
+
+@router.get("/leagues")
+async def get_leagues(
+    request: Request,
+    category: Optional[str] = None,
+    subcategory: Optional[str] = None,
+) -> dict[str, Any]:
+    pool = getattr(request.app.state, "pool", None)
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+        
+    if not category or category.lower() == "all":
+        return {"leagues": []}
+        
+    async with pool.acquire() as conn:
+        if subcategory:
+            rows = await conn.fetch(
+                "SELECT DISTINCT league FROM category_stats_v2 WHERE category ILIKE $1 AND subcategory ILIKE $2 AND league != '' ORDER BY league",
+                category, subcategory
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT DISTINCT league FROM category_stats_v2 WHERE category ILIKE $1 AND league != '' ORDER BY league",
+                category
+            )
+        
+    return {"leagues": [r["league"] for r in rows]}

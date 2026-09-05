@@ -18,7 +18,7 @@ export type PolymarketFixture = {
 
 export function getAuthToken(): string | null {
   if (typeof window !== "undefined") {
-    return localStorage.getItem("poly_auth_token");
+    return localStorage.getItem("poly_auth_token") || sessionStorage.getItem("poly_auth_token");
   }
   return null;
 }
@@ -94,17 +94,38 @@ export async function getWalletStats(address: string) {
   return fetchAuthData(`/api/v2/wallets/${address}/stats`);
 }
 
-export async function getWalletTrades(address: string, limit = 50) {
-  return fetchAuthData(`/api/v2/wallets/${address}/trades?limit=${limit}`);
+export async function getWalletCategories(address: string) {
+  return fetchAuthData(`/api/v2/wallets/${address}/categories`);
 }
 
-export async function getWalletPositions(address: string) {
-  return fetchAuthData(`/api/v2/wallets/${address}/positions`);
+export async function getWalletTrades(address: string, limit?: number, offset = 0) {
+  const qs = new URLSearchParams();
+  if (limit != null && limit > 0) qs.append("limit", String(limit));
+  if (offset > 0) qs.append("offset", String(offset));
+  const queryStr = qs.toString() ? `?${qs.toString()}` : "";
+  return fetchAuthData(`/api/v2/wallets/${address}/trades${queryStr}`);
+}
+
+export async function getWalletPositions(address: string, enrichCategories = true) {
+  return fetchAuthData(`/api/v2/wallets/${address}/positions?enrich_categories=${enrichCategories}`);
+}
+
+export async function getWalletClosedPositions(address: string, limit?: number, offset = 0, enrichCategories = true) {
+  const qs = new URLSearchParams();
+  if (limit != null && limit > 0) qs.append("limit", String(limit));
+  if (offset > 0) qs.append("offset", String(offset));
+  qs.append("enrich_categories", String(enrichCategories));
+  return fetchAuthData(`/api/v2/wallets/${address}/closed-positions?${qs.toString()}`);
+}
+
+export async function getWalletReconciliation(address: string) {
+  return fetchAuthData(`/api/v2/wallets/${address}/reconciliation`);
 }
 
 export async function getWalletPnlChart(address: string) {
   return fetchAuthData(`/api/v2/wallets/${address}/pnl-chart`);
 }
+
 
 export async function toggleWatchlist(address: string, action?: 'add' | 'remove') {
   if (action === 'remove') {
@@ -127,7 +148,10 @@ export interface WalletListParams {
   source?: string;
   category?: string;
   subcategory?: string;
+  league?: string;
   pnl_window?: string;
+  view_type?: string;
+  has_lineage?: boolean;
   search?: string;
   sort_by?: string;
   sort_order?: 'asc' | 'desc';
@@ -206,6 +230,13 @@ export async function getCuratedWalletList(
 export async function getSubcategories(category: string) {
   if (!category) return { subcategories: [] };
   return fetchAuthData(`/api/v2/leaderboard/subcategories?category=${encodeURIComponent(category)}`);
+}
+
+export async function getLeagues(category: string, subcategory?: string) {
+  if (!category) return { leagues: [] };
+  let url = `/api/v2/leaderboard/leagues?category=${encodeURIComponent(category)}`;
+  if (subcategory) url += `&subcategory=${encodeURIComponent(subcategory)}`;
+  return fetchAuthData(url);
 }
 
 export async function fetchWhaleMetrics() {
@@ -297,3 +328,16 @@ export async function deleteAgent(agentId: number) {
 export async function listNotifications() {
   return fetchAuthData(`/api/v2/notifications`);
 }
+
+export async function getWalletParlays(address: string, enrichCategories = true) {
+  return fetchAuthData(`/api/v2/wallets/${address}/parlays?enrich_categories=${enrichCategories}`);
+}
+
+export async function getWalletFunding(address: string) {
+  return fetchAuthData(`/api/v2/wallets/${address}/funding`);
+}
+
+export async function getWalletPositionTransfers(address: string, limit: number = 50) {
+  return fetchAuthData(`/api/v2/wallets/${address}/position-transfers?limit=${limit}`);
+}
+

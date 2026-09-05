@@ -9,6 +9,7 @@ import {
   Star,
   UserPlus,
   Bot,
+  Terminal,
   LayoutDashboard,
   LogOut,
 } from "lucide-react";
@@ -30,6 +31,7 @@ const NAV_SECTIONS: { title: string; items: NavItem[] }[] = [
     items: [
       { name: "Wallets", path: "/wallets", icon: Globe, exact: true },
       { name: "Feed", path: "/feed", icon: Zap },
+      { name: "Research Hub", path: "/hub", icon: Terminal },
     ],
   },
   {
@@ -66,8 +68,8 @@ export default function Sidebar() {
           collapsed ? "justify-center px-0" : "px-4"
         }`}
       >
-        <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center flex-shrink-0">
-          <span className="text-background font-black text-sm">P</span>
+        <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center flex-shrink-0 shadow-sm">
+          <span className="text-white font-black text-sm">P</span>
         </div>
         {!collapsed && (
           <div className="leading-tight min-w-0">
@@ -103,7 +105,7 @@ export default function Sidebar() {
                       collapsed ? "justify-center px-0 py-2.5" : "px-3 py-2"
                     } ${
                       active
-                        ? "bg-surface-3 text-foreground"
+                        ? "bg-primary/10 text-primary font-semibold border border-primary/20"
                         : "text-muted-fg hover:text-foreground hover:bg-surface-2"
                     }`}
                   >
@@ -147,7 +149,7 @@ export default function Sidebar() {
           <button
             onClick={() => connect({ connector: connectors[0] })}
             title="Connect wallet"
-            className={`w-full flex items-center gap-2 rounded-lg bg-primary hover:bg-primary/80 text-background font-semibold transition-colors duration-150 cursor-pointer text-xs ${
+            className={`w-full flex items-center gap-2 rounded-lg bg-primary hover:bg-primary/90 text-white font-semibold transition-colors duration-150 cursor-pointer text-xs shadow-sm ${
               collapsed ? "justify-center p-2" : "px-2 py-1.5"
             }`}
           >
@@ -159,7 +161,7 @@ export default function Sidebar() {
         )}
 
         {/* User identity */}
-        {token ? (
+        {token && user && !user.isGuest ? (
           <div className={`flex items-center gap-2 ${collapsed ? "justify-center" : ""}`}>
             <Avatar name={user?.username || "U"} address={user?.id} size={26} />
             {!collapsed && (
@@ -183,7 +185,8 @@ export default function Sidebar() {
         ) : (
           <button
             onClick={() => {
-              window.location.href = "http://localhost:8000/api/discord/login";
+              const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+              window.location.href = `${apiBase}/api/discord/login`;
             }}
             title="Login with Discord"
             className={`w-full flex items-center gap-2 rounded-lg bg-[#5865F2] hover:bg-[#4752C4] text-white text-xs font-medium transition-colors duration-150 cursor-pointer ${

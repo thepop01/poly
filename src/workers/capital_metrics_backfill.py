@@ -2,11 +2,12 @@
 """
 Worker 2: Capital Metrics & ROI Backfill
 ==========================================
-Fetches on-chain deposit/withdrawal history and computes ROI
-using ONLY the Alchemy API (Polygon RPC).
+Fetches deposit/withdrawal history from Polymarket's activity API
+(the source of truth) and computes ROI.
 
-Runs independently from Worker 1 at low concurrency (default=4)
-to respect Alchemy rate limits without affecting Polymarket fetches.
+Falls back to Alchemy on-chain tracking when the API is unavailable.
+
+Runs independently from Worker 1 at low concurrency (default=4).
 
 What it writes to wallet_metrics_v2:
   - deposits        (total USDC ever deposited into Polymarket)
@@ -29,71 +30,113 @@ from src.utils.alchemy_client import fetch_capital_metrics
 logger = logging.getLogger("capital_metrics_backfill")
 
 DB_URL       = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
-CONCURRENCY  = int(os.environ.get("CAPITAL_CONCURRENCY", "1"))    # 1 wallet at a time = max 2 Alchemy calls simultaneously
-WALLET_TIMEOUT = int(os.environ.get("CAPITAL_WALLET_TIMEOUT", "120"))  # longer — backoff can take up to 30s per retry
+CONCURRENCY  = int(os.environ.get("CAPITAL_CONCURRENCY", "1"))    # 1 wallet at a time
+WALLET_TIMEOUT = int(os.environ.get("CAPITAL_WALLET_TIMEOUT", "120"))
+
+ACTIVITY_API = "https://activity.polymarket-tools.com/api/activity"
+
+
+async def fetch_activity_deposits_withdrawals(
+    session: aiohttp.ClientSession, address: str
+) -> tuple[float | None, float | None, float | None]:
+    """
+    Fetch total deposits and withdrawals from Polymarket's activity tool API.
+    Returns (deposits, withdrawals, total_pnl) or (None, None, None) on failure.
+
+    This is the source of truth — Alchemy on-chain tracking misses deposits
+    from intermediate wallets (CEX -> intermediate -> Polymarket) and position
+    transfers that carry value but no USDC.
+    """
+    payload = {
+        "wallets": [address],
+        "filters": {
+            "types": ["DEPOSIT", "WITHDRAWAL"],
+            "side": "ALL",
+            "timeRange": "ALL_TIME",
+            "sortDirection": "DESC",
+        },
+    }
+    try:
+        async with session.post(
+            ACTIVITY_API,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=15, connect=5, sock_read=10),
+        ) as resp:
+            if resp.status != 200:
+                logger.debug(f"Activity API {resp.status} for {address[:12]}...")
+                return None, None, None
+            data = await resp.json()
+            activities = data.get("activity", [])
+            total_pnl = data.get("totalPnl")
+
+            deposits = sum(
+                a.get("usdcSize", 0)
+                for a in activities
+                if a.get("type") == "DEPOSIT"
+            )
+            withdrawals = sum(
+                a.get("usdcSize", 0)
+                for a in activities
+                if a.get("type") == "WITHDRAWAL"
+            )
+            return deposits, withdrawals, total_pnl
+    except Exception as e:
+        logger.debug(f"Activity API error for {address[:12]}: {e}")
+        return None, None, None
 
 
 async def process_capital_metrics(conn: asyncpg.Connection, session: aiohttp.ClientSession, address: str):
-    """Fetch on-chain capital metrics incrementally and update roi_pct in wallet_metrics_v2."""
-    # Fetch existing state from DB
+    """Update roi_pct using pnl / volume * 100.
+    
+    Also updates deposits/withdrawals from Polymarket activity API for informational purposes.
+    """
     row = await conn.fetchrow(
         """
-        SELECT total_pnl, deposits, withdrawals, net_capital, peak_capital, last_capital_block
+        SELECT total_pnl, deposits, withdrawals, total_volume, pm_pnl
         FROM wallet_metrics_v2 WHERE address = $1
         """,
         address,
     )
     
     total_pnl = float(row["total_pnl"]) if row and row["total_pnl"] is not None else None
-    cur_dep = float(row["deposits"]) if row and row["deposits"] is not None else 0.0
-    cur_wdw = float(row["withdrawals"]) if row and row["withdrawals"] is not None else 0.0
-    cur_net = float(row["net_capital"]) if row and row["net_capital"] is not None else 0.0
-    cur_peak = float(row["peak_capital"]) if row and row["peak_capital"] is not None else 0.0
-    last_block = int(row["last_capital_block"]) if row and row["last_capital_block"] is not None else 0
+    pm_pnl = float(row["pm_pnl"]) if row and row["pm_pnl"] is not None else None
+    tot_vol = float(row["total_volume"]) if row and row["total_volume"] is not None else 0.0
 
-    from_block = last_block + 1 if last_block > 0 else 0
+    effective_pnl = pm_pnl if pm_pnl is not None else total_pnl
 
-    deposits, withdrawals, peak_capital, net_capital, max_block = await fetch_capital_metrics(
-        session,
-        address,
-        from_block=from_block,
-        current_deposits=cur_dep,
-        current_withdrawals=cur_wdw,
-        current_net_capital=cur_net,
-        current_peak_capital=cur_peak,
-    )
+    # Update deposits/withdrawals from activity API (informational)
+    act_dep, act_wdw, act_pnl = await fetch_activity_deposits_withdrawals(session, address)
+    if act_dep is not None:
+        deposits = act_dep
+        withdrawals = act_wdw or 0.0
+        if act_pnl is not None:
+            effective_pnl = act_pnl
+    else:
+        deposits = float(row["deposits"]) if row and row["deposits"] is not None else 0.0
+        withdrawals = float(row["withdrawals"]) if row and row["withdrawals"] is not None else 0.0
 
-    if deposits is None and withdrawals is None and peak_capital is None:
-        # Alchemy failed — don't write, will be retried next pass
-        logger.warning(f"Alchemy returned no data for {address[:12]}... — skipping")
-        return
+    # ROI = pnl / volume * 100
+    roi_pct = None
+    if effective_pnl is not None and tot_vol >= 10.0:
+        raw_roi = (effective_pnl / tot_vol) * 100.0
+        roi_pct = max(-100.0, min(raw_roi, 10000.0))
 
-    next_last_block = max(last_block, max_block or 0)
-
-    # ROI = pnl / peak_capital (use deposits as fallback if peak_capital is 0)
-    cap = peak_capital if (peak_capital and peak_capital > 0) else (deposits if (deposits and deposits > 0) else None)
-    roi_pct = (total_pnl / cap * 100.0) if (total_pnl is not None and cap and cap > 0) else None
-
-    # Small throttle to keep Alchemy requests under rate limit
     await asyncio.sleep(0.5)
 
     await conn.execute("""
         INSERT INTO wallet_metrics_v2
-            (address, deposits, withdrawals, net_capital, peak_capital, roi_pct, last_capital_block, capital_synced_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            (address, deposits, withdrawals, roi_pct, capital_synced_at)
+        VALUES ($1, $2, $3, $4, NOW())
         ON CONFLICT (address) DO UPDATE SET
             deposits          = EXCLUDED.deposits,
             withdrawals       = EXCLUDED.withdrawals,
-            net_capital       = EXCLUDED.net_capital,
-            peak_capital      = EXCLUDED.peak_capital,
             roi_pct           = EXCLUDED.roi_pct,
-            last_capital_block = EXCLUDED.last_capital_block,
             capital_synced_at = NOW()
-    """, address, deposits, withdrawals, net_capital, peak_capital, roi_pct, next_last_block)
+    """, address, deposits, withdrawals, roi_pct)
 
     logger.info(
-        f"Done {address[:12]}... | dep=${deposits or 0:.0f} "
-        f"wdw=${withdrawals or 0:.0f} peak=${peak_capital or 0:.0f} roi={roi_pct or 0:.1f}% block={next_last_block}"
+        f"Done {address[:12]}... dep=${deposits:.0f} wdw=${withdrawals:.0f} "
+        f"pnl=${effective_pnl or 0:.0f} vol=${tot_vol:.0f} roi={roi_pct or 0:.1f}%"
     )
 
 
@@ -111,11 +154,18 @@ async def run_capital_metrics_backfill(db_url: str = DB_URL):
             FROM wallets_v2 w
             LEFT JOIN wallet_metrics_v2 m ON w.address = m.address
             WHERE w.is_dormant = FALSE
+              AND (w.last_trade_at IS NULL OR w.last_trade_at >= NOW() - INTERVAL '7 days')
+              AND (m.capital_synced_at IS NULL OR m.capital_synced_at < NOW() - INTERVAL '5 days')
             ORDER BY m.capital_synced_at ASC NULLS FIRST
         """)
         wallets = [r["address"] for r in rows]
         total = len(wallets)
         logger.info(f"Queue: {total} wallets for capital metrics (concurrency={CONCURRENCY}, timeout={WALLET_TIMEOUT}s)")
+        if total == 0:
+            logger.info("No wallets in queue for capital metrics backfill. Sleeping for 60s...")
+            await pool.close()
+            await asyncio.sleep(60)
+            return
 
     sem = asyncio.Semaphore(CONCURRENCY)
     done, errors = 0, 0

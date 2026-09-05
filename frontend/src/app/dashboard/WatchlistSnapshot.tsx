@@ -32,10 +32,9 @@ export function WatchlistSnapshot({ wallets }: { wallets: WatchlistEntry[] }) {
           {wallets.map((w) => {
             const pnl = toNum(w.pnl);
             return (
-              <Link
+              <div
                 key={w.address}
-                href={`/wallet/${w.address}`}
-                className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0 group"
+                className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <Avatar name={w.username} address={w.address} size={28} />
@@ -58,7 +57,7 @@ export function WatchlistSnapshot({ wallets }: { wallets: WatchlistEntry[] }) {
                     {formatCurrency(toNum(w.balance) ?? 0)} balance
                   </div>
                 </div>
-              </Link>
+              </div>
             );
           })}
         </div>

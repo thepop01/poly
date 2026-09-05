@@ -258,12 +258,9 @@ export default function AlphaFeedPage() {
                         <div className="flex items-center gap-2">
                           <Avatar name={a.wallet_name} address={a.address} size={26} />
                           <div className="min-w-0">
-                            <Link
-                              href={`/wallet/${a.address}`}
-                              className="text-sm font-medium text-foreground hover:text-primary transition-colors block truncate max-w-[140px]"
-                            >
+                            <span className="text-sm font-medium text-foreground block truncate max-w-[140px]">
                               {a.wallet_name || formatAddress(a.address)}
-                            </Link>
+                            </span>
                             <button
                               onClick={(e) => handleCopy(e, a.address)}
                               className="text-[11px] font-mono text-subtle hover:text-foreground transition-colors flex items-center gap-1"

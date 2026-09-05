@@ -5,6 +5,7 @@ import { getTrackerLists, getTrackerListWallets, createTrackerList, deleteTracke
 import Link from "next/link";
 import { Anchor, Plus, Trash2, X } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
+import { formatPercent } from "@/utils/format";
 
 interface TrackerList {
   id: number;
@@ -275,7 +276,7 @@ export default function TrackerPage() {
                           ${Number(w.website_pnl || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
                         </td>
                         <td className="px-4 py-3">
-                          {(Number(w.win_rate || 0) * 100).toFixed(0)}%
+                          {formatPercent(w.win_rate, 0)}
                         </td>
                         <td className="px-4 py-3">
                           {w.roi_pct ? `${Number(w.roi_pct).toFixed(1)}%` : "—"}
@@ -292,9 +293,6 @@ export default function TrackerPage() {
                           )}
                         </td>
                         <td className="px-4 py-3 flex items-center gap-2">
-                          <Link href={`/wallet/${w.wallet_address}`} className="text-primary hover:underline text-xs">
-                            View
-                          </Link>
                           <button
                             onClick={() => handleRemoveWallet(w.wallet_address)}
                             className="text-muted-fg hover:text-danger text-xs transition"

@@ -46,8 +46,9 @@ COLLATERAL_OFFRAMP = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854".lower()
 _keys: list[str] = _load_keys()
 _key_cycle = cycle(_keys)
 
-# Global semaphore to limit concurrent Alchemy requests across 3 keys
-_alchemy_sem = asyncio.Semaphore(3)  # hard cap on simultaneous Alchemy HTTP calls
+# Global semaphore to limit concurrent Alchemy requests across active keys
+_alchemy_sem = asyncio.Semaphore(max(1, len(_keys)))
+
 
 
 def get_next_key() -> str:

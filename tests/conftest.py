@@ -12,16 +12,11 @@ from src.api.routers.auth import create_access_token
 def anyio_backend():
     return "asyncio"
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="function")
 async def test_pool():
-    """Create a database connection pool for the test session."""
-    # Tests assume a local development database 'poly_db'
-    db_url = os.getenv("DATABASE_URL", "postgres://poly_user:poly_password@localhost:5432/poly_db")
+    """Create a database connection pool for each test function."""
+    db_url = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0.1:5432/poly_db").replace("localhost", "127.0.0.1").replace("postgres://", "postgresql://")
     pool = await asyncpg.create_pool(db_url)
-    
-    # Optional: We could run `init_db(pool)` here if we want to ensure tables exist,
-    # but the app lifespan usually handles that.
-    
     yield pool
     await pool.close()
 

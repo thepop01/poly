@@ -47,7 +47,8 @@ export default function AgentsPage() {
         </p>
         <button
           onClick={() => {
-            window.location.href = "http://localhost:8000/api/discord/login";
+            const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+            window.location.href = `${apiBase}/api/discord/login`;
           }}
           className="flex items-center gap-2 px-6 py-3 mt-4 rounded-lg bg-[#5865F2] hover:bg-[#4752C4] text-white font-medium transition-colors"
         >
