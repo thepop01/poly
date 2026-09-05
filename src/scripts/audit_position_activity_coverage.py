@@ -360,44 +360,10 @@ async def _persist_audit(
              row["current_position_verified"], row["is_redeemable"], False)
             for row in activity_only_markets
         ])
-        # Keep raw provenance for only contradictory/lifecycle markets.  The
-        # hot Activity table is bounded below; exception evidence is retained
-        # in its own deduplicated table for later review/archive.
-        exception_pairs = {
-            (row["condition_id"], row["outcome"]): row["comparison_quality"]
-            for row in reconciliations
-            if row["comparison_quality"] != "exact_activity_buy"
-        }
-        exception_events = []
-        for event in activity:
-            cid = str(event.get("conditionId") or "")
-            if not cid:
-                continue
-            matching = [quality for (pair_cid, _), quality in exception_pairs.items() if pair_cid == cid]
-            if not matching:
-                continue
-            outcome = str(event.get("outcome") or "")
-            quality = next((q for (pair_cid, pair_outcome), q in exception_pairs.items()
-                            if pair_cid == cid and pair_outcome.lower() == outcome.lower()), matching[0])
-            exception_events.append((
-                address, cid, event.get("asset"), event.get("outcome"), event.get("type"),
-                event.get("side"), _number(event.get("timestamp")) or None,
-                _number(event.get("size")), _number(event.get("usdcSize")),
-                _number(event.get("price")), event.get("transactionHash"),
-                _activity_event_digest(event), snapshot_id, quality, json.dumps(event),
-            ))
-        if exception_events:
-            await conn.executemany("""
-                INSERT INTO wallet_activity_exception_events_v2 (
-                    address, condition_id, asset, outcome, event_type, side,
-                    event_timestamp, size, usdc_size, price, transaction_hash,
-                    event_sha256, snapshot_id, classification, payload
-                ) VALUES ($1,$2,$3,$4,$5,$6,to_timestamp($7),$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
-                ON CONFLICT (address, event_sha256) DO NOTHING
-            """, exception_events)
         # Raw events are a hot cache (last 100 per wallet for PnL-divergent
-        # wallets only).  Aggregates and exception evidence above remain
-        # available after this bounded retention pass.
+        # wallets only).  Aggregates above remain available after this bounded
+        # retention pass.  Per-fill evidence is intentionally not retained:
+        # aggregates per (wallet, market, outcome) are the permanent store.
         await conn.execute("""
             DELETE FROM wallet_activity_events_v2
             WHERE address = $1 AND id NOT IN (
