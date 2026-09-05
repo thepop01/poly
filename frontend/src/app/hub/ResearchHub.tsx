@@ -5,23 +5,26 @@ import ChatRail from "@/components/research/ChatRail";
 import ChatTabs from "@/components/research/ChatTabs";
 import EmptyResearchState from "@/components/research/EmptyResearchState";
 import PanelCanvas from "@/components/research/PanelCanvas";
+import TradingPanel from "@/components/research/TradingPanel";
+import PositionsBar from "@/components/research/PositionsBar";
 import { useResearchHub } from "@/hooks/useResearchHub";
 
 const RAIL_KEY = "pt-research-rail-width";
-const RAIL_MIN = 300;
+const RAIL_MIN = 280;
 const RAIL_MAX = 560;
 
 function initialRailWidth(): number {
-  if (typeof window === "undefined") return 360;
+  if (typeof window === "undefined") return 340;
   const raw = Number(window.localStorage.getItem(RAIL_KEY));
   if (Number.isFinite(raw) && raw >= RAIL_MIN && raw <= RAIL_MAX) return raw;
-  return 360;
+  return 340;
 }
 
 export default function ResearchHub() {
   const hub = useResearchHub();
   const [railWidth, setRailWidth] = useState(initialRailWidth);
   const [mobileView, setMobileView] = useState<"chat" | "results">("chat");
+  const [tradingPanelVisible, setTradingPanelVisible] = useState(true);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
   const activeChat = hub.chats.find((c) => c.chat_id === hub.activeChatId) ?? null;
   const activeId = activeChat?.chat_id ?? null;
@@ -32,8 +35,13 @@ export default function ResearchHub() {
     return clamped;
   };
 
+  // Collect position rows for the positions bar (wallet table panels have position data)
+  const allPanels = activeId ? hub.panelsByChat[activeId] ?? [] : [];
+  const allResults = activeId ? hub.resultsForChat(activeId) : [];
+
   return (
     <div className="research-workspace" data-testid="research-workspace">
+      {/* ── Top: Chat tab bar ── */}
       <ChatTabs
         chats={hub.chats}
         archivedChats={hub.archivedChats}
@@ -45,6 +53,8 @@ export default function ResearchHub() {
         onClose={(id) => hub.closeChat(id)}
         onReopen={(id) => hub.reopenChat(id)}
       />
+
+      {/* ── Mobile view switcher (hidden on md+) ── */}
       <div className="research-view-switch" role="group" aria-label="Workspace view">
         {(["chat", "results"] as const).map((view) => (
           <button
@@ -62,7 +72,10 @@ export default function ResearchHub() {
           </button>
         ))}
       </div>
+
+      {/* ── Main 3-zone split: [ChatRail | Canvas | TradingPanel] ── */}
       <div className="research-split">
+        {/* Left: Chat rail */}
         <section
           aria-label="Conversation"
           className={`research-rail ${mobileView === "chat" ? "flex flex-col" : "hidden"} md:flex md:flex-col`}
@@ -83,6 +96,8 @@ export default function ResearchHub() {
             onConsumeRestore={() => activeId && hub.consumeRestorePrompt(activeId)}
           />
         </section>
+
+        {/* Drag splitter */}
         <div
           role="separator"
           aria-orientation="vertical"
@@ -111,31 +126,46 @@ export default function ResearchHub() {
           }}
           className="research-splitter"
         />
-        <section
-          aria-label="Results"
-          className={`research-canvas ${mobileView === "results" ? "flex" : "hidden"} md:flex`}
-        >
-          {!activeChat || !activeId ? (
-            <EmptyResearchState
-              onPick={async (prompt) => {
-                const chat = await hub.createChat();
-                await hub.sendPrompt(chat.chat_id, prompt);
-              }}
-            />
-          ) : (
-            <div
-              id={`research-panel-${activeChat.chat_id}`}
-              role="tabpanel"
-              aria-label={`Results for ${activeChat.title}`}
-              className="research-canvas-scroll"
-            >
-              <PanelCanvas
-                panels={hub.panelsByChat[activeId] ?? []}
-                onPanelState={(panelId, state) => hub.setPanelState(activeId, panelId, state)}
+
+        {/* Center: Canvas area with bottom positions bar */}
+        <div className={`research-canvas-wrapper ${mobileView === "results" ? "flex" : "hidden"} md:flex`}>
+          {/* Canvas scroll area */}
+          <section aria-label="Results" className="research-canvas">
+            {!activeChat || !activeId ? (
+              <EmptyResearchState
+                onPick={async (prompt) => {
+                  const chat = await hub.createChat();
+                  await hub.sendPrompt(chat.chat_id, prompt);
+                }}
               />
-            </div>
-          )}
-        </section>
+            ) : (
+              <div
+                id={`research-panel-${activeChat.chat_id}`}
+                role="tabpanel"
+                aria-label={`Results for ${activeChat.title}`}
+                className="research-canvas-scroll"
+              >
+                <PanelCanvas
+                  panels={allPanels}
+                  onPanelState={(panelId, state) => hub.setPanelState(activeId, panelId, state)}
+                />
+              </div>
+            )}
+          </section>
+
+          {/* Bottom: Positions bar dock */}
+          <PositionsBar
+            rows={[]}
+            chatTitle={activeChat?.title}
+          />
+        </div>
+
+        {/* Right: Trading / Position view panel */}
+        <TradingPanel
+          positionRows={[]}
+          visible={tradingPanelVisible}
+          onToggle={() => setTradingPanelVisible((v) => !v)}
+        />
       </div>
     </div>
   );
