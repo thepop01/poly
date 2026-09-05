@@ -1,10 +1,8 @@
 from scripts.backtest_activity_pnl import activity_cash_delta
-from src.scripts.archive_activity_parquet import archive_events
 from src.scripts.audit_position_activity_coverage import (
     _activity_lifecycle_summary,
     _restore_activity_event,
 )
-import pytest
 
 
 def test_activity_cash_delta_uses_real_cash_fields():
@@ -46,18 +44,3 @@ def test_stored_activity_payload_restores_api_keys():
     assert event["type"] == "TRADE"
     assert event["side"] == "BUY"
     assert event["usdcSize"] == 4
-
-
-def test_activity_archive_round_trip(tmp_path):
-    try:
-        import pyarrow  # noqa: F401
-    except (ImportError, OSError):
-        pytest.skip("PyArrow native runtime is unavailable in this environment")
-    info = archive_events([
-        {"conditionId": "0x1", "outcome": "Yes", "type": "TRADE", "side": "BUY",
-         "timestamp": 10, "size": 2, "usdcSize": 1, "price": 0.5},
-        {"conditionId": "0x1", "outcome": "Yes", "type": "REDEEM",
-         "timestamp": 20, "size": 2, "usdcSize": 2},
-    ], "0x" + "1" * 40, tmp_path)
-    assert info["row_count"] == 2
-    assert len(info["sha256"]) == 64

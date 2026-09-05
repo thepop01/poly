@@ -24,7 +24,6 @@ import aiohttp
 import asyncpg
 from dotenv import load_dotenv
 
-from src.scripts.archive_activity_parquet import archive_events
 from src.workers.wallet_provenance_audit import classify_row, normalize_outcome
 
 load_dotenv()
@@ -260,22 +259,6 @@ async def _persist_audit(
         json.dumps([_activity_key(row) for row in activity], sort_keys=True, default=str).encode()
     ).hexdigest()
     audit_id = uuid.uuid4()
-    archive_info = None
-    # A legacy one-shot audit owns its source fetch and archives it here. The
-    # split analyzer receives the exact snapshot staged by Worker 3; archiving
-    # that complete fetch happens before Worker 4 applies hot-cache retention.
-    if source_snapshot_id is None:
-        divergence = await conn.fetchrow(
-            "SELECT total_pnl, pm_pnl FROM wallet_metrics_v2 WHERE address=$1", address
-        )
-        if divergence and divergence["total_pnl"] is not None and divergence["pm_pnl"] is not None:
-            if abs(float(divergence["total_pnl"]) - float(divergence["pm_pnl"])) >= 100000:
-                try:
-                    archive_info = archive_events(
-                        activity, address, os.getenv("ACTIVITY_ARCHIVE_DIR", "backtest_cache/activity_archives")
-                    )
-                except RuntimeError as exc:
-                    logger.error("Activity archive unavailable for %s: %s", address, exc)
     async with conn.transaction():
         snapshot_id = source_snapshot_id
         if snapshot_id is None:
@@ -447,17 +430,6 @@ async def _persist_audit(
             datetime.fromisoformat(report["activity_window"]["end"]),
             datetime.fromtimestamp(_number(latest.get("timestamp")), timezone.utc) if latest else None,
             _activity_event_digest(latest) if latest else None, audit_id)
-        if archive_info:
-            archive_min = datetime.fromtimestamp(archive_info["minimum_timestamp"], timezone.utc) if archive_info["minimum_timestamp"] else None
-            archive_max = datetime.fromtimestamp(archive_info["maximum_timestamp"], timezone.utc) if archive_info["maximum_timestamp"] else None
-            await conn.execute("""
-                INSERT INTO wallet_activity_archives_v2 (
-                    address, file_path, sha256, row_count, minimum_timestamp,
-                    maximum_timestamp, schema_version, compression, baseline_complete, verified_at
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
-            """, address, archive_info["file_path"], archive_info["sha256"], archive_info["row_count"],
-                archive_min, archive_max, archive_info["schema_version"], archive_info["compression"],
-                bool(report["activity_window"].get("incremental") is False))
         if canonical_markets:
             await conn.execute("""
                 UPDATE wallet_activity_only_markets_v2
@@ -720,22 +692,6 @@ async def backfill_activity(address: str, start: int, end: int, persist: bool = 
     activity_digest = hashlib.sha256(
         json.dumps([_activity_key(row) for row in activity], sort_keys=True, default=str).encode()
     ).hexdigest()
-    archive_info = None
-    divergence_conn = await asyncpg.connect(DB_URL)
-    try:
-        divergence = await divergence_conn.fetchrow(
-            "SELECT total_pnl, pm_pnl FROM wallet_metrics_v2 WHERE address=$1", address
-        )
-    finally:
-        await divergence_conn.close()
-    if divergence and divergence["total_pnl"] is not None and divergence["pm_pnl"] is not None:
-        if abs(float(divergence["total_pnl"]) - float(divergence["pm_pnl"])) >= 100000:
-            try:
-                archive_info = archive_events(
-                    activity, address, os.getenv("ACTIVITY_ARCHIVE_DIR", "backtest_cache/activity_archives")
-                )
-            except RuntimeError as exc:
-                logger.error("Activity archive unavailable for %s: %s", address, exc)
     conn = await asyncpg.connect(DB_URL)
     try:
         async with conn.transaction():
@@ -781,17 +737,6 @@ async def backfill_activity(address: str, start: int, end: int, persist: bool = 
                 datetime.fromisoformat(report["activity_window"]["end"]),
                 datetime.fromtimestamp(_number(latest.get("timestamp")), timezone.utc) if latest else None,
                 _activity_event_digest(latest) if latest else None, snapshot_id)
-            if archive_info:
-                archive_min = datetime.fromtimestamp(archive_info["minimum_timestamp"], timezone.utc) if archive_info["minimum_timestamp"] else None
-                archive_max = datetime.fromtimestamp(archive_info["maximum_timestamp"], timezone.utc) if archive_info["maximum_timestamp"] else None
-                await conn.execute("""
-                    INSERT INTO wallet_activity_archives_v2 (
-                        address, file_path, sha256, row_count, minimum_timestamp,
-                        maximum_timestamp, schema_version, compression, baseline_complete, verified_at
-                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
-                """, address, archive_info["file_path"], archive_info["sha256"], archive_info["row_count"],
-                    archive_min, archive_max, archive_info["schema_version"], archive_info["compression"],
-                    not report["activity_window"]["incremental"])
     finally:
         await conn.close()
     return report
