@@ -1,10 +1,12 @@
 "use client";
 
 import type { ResearchPanel } from "@/types/research";
-import { Minimize2, Maximize2, X, RotateCcw, Table2, BarChart2, Users, Layers } from "lucide-react";
+import { Minimize2, Maximize2, X, RotateCcw, Table2, BarChart2, Users, Layers, Columns2 } from "lucide-react";
 
 interface PanelFrameProps {
   panel: ResearchPanel;
+  colSpan?: number;
+  onToggleSpan?: () => void;
   hidden?: boolean;
   onState: (panelId: string, state: ResearchPanel["state"]) => void;
   children: React.ReactNode;
@@ -50,7 +52,14 @@ function isLive(panel: ResearchPanel): boolean {
   return snapAge < 5 * 60 * 1000; // within 5 minutes = "live"
 }
 
-export default function PanelFrame({ panel, hidden, onState, children }: PanelFrameProps) {
+export default function PanelFrame({
+  panel,
+  colSpan,
+  onToggleSpan,
+  hidden,
+  onState,
+  children,
+}: PanelFrameProps) {
   const meta = metaLine(panel);
   const typeConfig = PANEL_TYPE_CONFIG[panel.panel_type] ?? { icon: Table2, accent: "#64748B", label: panel.panel_type };
   const TypeIcon = typeConfig.icon;
@@ -122,6 +131,19 @@ export default function PanelFrame({ panel, hidden, onState, children }: PanelFr
               className="research-panel-btn"
             >
               <Minimize2 size={12} />
+            </button>
+          )}
+
+          {/* Half / Full width toggle */}
+          {onToggleSpan && !maximized && !minimized && (
+            <button
+              type="button"
+              aria-label={colSpan === 12 ? `Split ${panel.title} to half width` : `Expand ${panel.title} to full width`}
+              title={colSpan === 12 ? "Half width (side-by-side)" : "Full width"}
+              onClick={onToggleSpan}
+              className="research-panel-btn"
+            >
+              <Columns2 size={12} className={colSpan === 6 ? "text-primary" : ""} />
             </button>
           )}
 

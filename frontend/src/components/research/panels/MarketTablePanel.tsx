@@ -28,8 +28,10 @@ export default function MarketTablePanel({ panel }: { panel: ResearchPanel }) {
               const path = [p.category, p.subcategory, p.league].filter(Boolean).join(" → ");
               return (
                 <tr key={`${m.ordinal}-${m.entity_key}`}>
-                  <td className="max-w-64">
-                    <span className="font-medium">{String(p.title ?? m.entity_key)}</span>
+                  <td className="max-w-56">
+                    <span className="font-medium truncate block" title={String(p.title ?? m.entity_key)}>
+                      {String(p.title ?? m.entity_key)}
+                    </span>
                   </td>
                   <td className="text-xs">{path || "—"}</td>
                   <td className="font-mono">{String(p.wallet_count ?? "—")}</td>

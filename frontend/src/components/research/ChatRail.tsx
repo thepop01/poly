@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ResearchMessage, ResultSetSummary } from "@/types/research";
-import { Send, Square, Paperclip, Bot, User } from "lucide-react";
+import { Send, Square, Paperclip, Bot, User, Sparkles, Layers } from "lucide-react";
 
 interface ChatRailProps {
   chatId: string | null;
@@ -17,6 +17,12 @@ interface ChatRailProps {
   onStop: () => void;
   onConsumeRestore: () => void;
 }
+
+const PROMPT_SUGGESTIONS = [
+  "Find top Cricket wallets with >70% win rate",
+  "Show open position overlap in election markets",
+  "Analyze outcome consensus on high-volume markets",
+];
 
 function formatTime(dateStr: string) {
   try {
@@ -44,9 +50,10 @@ export default function ChatRail({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // A failed/stopped run hands its prompt back once for editing. Adopt it in
-  // an effect (never setState during render) and consume it so repeats work.
+  // an effect and consume it so repeats work.
   useEffect(() => {
     if (restorePrompt) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDraft((prev) => prev || restorePrompt);
       onConsumeRestore();
     }
@@ -84,14 +91,21 @@ export default function ChatRail({
       <div className="chat-rail-header">
         <div className="flex items-center gap-2">
           <div className="chat-rail-icon">
-            <Bot size={12} />
+            <Bot size={13} />
           </div>
-          <span className="text-sm font-semibold text-foreground">Conversation</span>
+          <div>
+            <span className="text-xs font-semibold text-foreground">Research Terminal</span>
+            <span className="text-[10px] text-subtle block font-mono">Antigravity AI · v2</span>
+          </div>
         </div>
-        {busy && (
+        {busy ? (
           <span className="chat-status-chip chat-status-live">
             <span className="chat-live-dot" />
             live
+          </span>
+        ) : (
+          <span className="text-[10px] font-mono text-subtle px-1.5 py-0.5 rounded bg-surface-2 border border-border">
+            READY
           </span>
         )}
       </div>
@@ -110,13 +124,35 @@ export default function ChatRail({
       {/* Message list */}
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-3" data-testid="chat-messages">
         {messages.length === 0 && !streamingText && !busy ? (
-          <div className="flex flex-col items-center justify-center h-full gap-3 text-center py-8">
+          <div className="flex flex-col items-center justify-center h-full gap-4 text-center py-6 px-2">
             <div className="chat-empty-icon">
-              <Bot size={20} className="text-primary" />
+              <Bot size={22} className="text-primary" />
             </div>
-            <p className="text-sm text-subtle max-w-xs leading-relaxed">
-              Ask a question to start this research thread.
-            </p>
+            <div>
+              <h4 className="text-sm font-semibold text-foreground">AI Research Terminal</h4>
+              <p className="text-xs text-subtle mt-1 max-w-xs leading-relaxed">
+                Query wallets, compare market positions, discover consensus, and explore historical evidence.
+              </p>
+            </div>
+            <div className="w-full space-y-1.5 pt-2">
+              <p className="text-[10px] font-semibold text-subtle uppercase tracking-wider text-left">
+                Suggested Prompts
+              </p>
+              {PROMPT_SUGGESTIONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  onClick={() => {
+                    setDraft(suggestion);
+                    textareaRef.current?.focus();
+                  }}
+                  className="chat-suggestion-chip w-full"
+                >
+                  <Sparkles size={11} className="text-primary flex-shrink-0" />
+                  <span className="truncate">{suggestion}</span>
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           <div className="flex flex-col gap-3">
@@ -185,7 +221,8 @@ export default function ChatRail({
                     title={`${result.kind} · snapshot ${result.snapshot_at}`}
                     className="chat-result-chip"
                   >
-                    {result.label} · {result.row_count}
+                    <Layers size={10} className="text-primary" />
+                    <span>{result.label} · {result.row_count}</span>
                   </span>
                 ))}
               </div>
@@ -228,7 +265,7 @@ export default function ChatRail({
               >
                 <Paperclip size={13} />
               </button>
-              <span className="chat-model-chip">AI</span>
+              <span className="chat-model-chip">Antigravity AI</span>
             </div>
 
             {/* Right: char count + send/stop */}
@@ -239,7 +276,7 @@ export default function ChatRail({
                 </span>
               )}
               {!draft && !busy && (
-                <span className="chat-shortcut-hint">⌘↵</span>
+                <span className="chat-shortcut-hint">↵ Run</span>
               )}
               {busy ? (
                 <button

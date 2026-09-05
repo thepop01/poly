@@ -1,14 +1,15 @@
 "use client";
 
+import { useState } from "react";
 import type { PanelLayout, PanelType, ResearchPanel } from "@/types/research";
 import PanelFrame from "./PanelFrame";
 import { PanelRenderer } from "./PanelRenderer";
 
 export const PANEL_DEFAULTS: Record<PanelType, Pick<PanelLayout, "col_span" | "min_height">> = {
-  wallet_table: { col_span: 12, min_height: 420 },
-  market_table: { col_span: 12, min_height: 420 },
-  overlap_table: { col_span: 8, min_height: 380 },
-  consensus: { col_span: 4, min_height: 380 },
+  wallet_table: { col_span: 6, min_height: 380 },
+  market_table: { col_span: 6, min_height: 380 },
+  overlap_table: { col_span: 6, min_height: 380 },
+  consensus: { col_span: 6, min_height: 380 },
 };
 
 interface PanelCanvasProps {
@@ -24,10 +25,18 @@ function ordered(panels: ResearchPanel[]): ResearchPanel[] {
 }
 
 export default function PanelCanvas({ panels, onPanelState }: PanelCanvasProps) {
+  const [spanOverrides, setSpanOverrides] = useState<Record<string, number>>({});
   const visible = ordered(panels.filter((p) => p.state !== "closed"));
   const closed = ordered(panels.filter((p) => p.state === "closed"));
   const maximized = visible.find((p) => p.state === "maximized");
   const shown = maximized ? [maximized] : visible;
+
+  const toggleSpan = (panelId: string, currentSpan: number) => {
+    setSpanOverrides((prev) => ({
+      ...prev,
+      [panelId]: currentSpan === 12 ? 6 : 12,
+    }));
+  };
 
   return (
     <div className="research-canvas-body" data-testid="panel-canvas">
@@ -37,16 +46,24 @@ export default function PanelCanvas({ panels, onPanelState }: PanelCanvasProps) 
         </p>
       ) : (
         <div className="research-panel-grid">
-          {shown.map((panel) => (
-            <div
-              key={panel.panel_id}
-              className={`research-span-${panel.layout.col_span}`}
-            >
-              <PanelFrame panel={panel} onState={onPanelState}>
-                <PanelRenderer panel={panel} />
-              </PanelFrame>
-            </div>
-          ))}
+          {shown.map((panel) => {
+            const colSpan = spanOverrides[panel.panel_id] ?? (panel.layout.col_span === 12 ? 6 : panel.layout.col_span);
+            return (
+              <div
+                key={panel.panel_id}
+                className={`research-span-${colSpan}`}
+              >
+                <PanelFrame
+                  panel={panel}
+                  colSpan={colSpan}
+                  onToggleSpan={() => toggleSpan(panel.panel_id, colSpan)}
+                  onState={onPanelState}
+                >
+                  <PanelRenderer panel={panel} />
+                </PanelFrame>
+              </div>
+            );
+          })}
         </div>
       )}
       {closed.length > 0 && (
