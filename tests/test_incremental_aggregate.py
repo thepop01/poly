@@ -110,7 +110,7 @@ async def test_incremental_merge_picks_up_stale_rows(test_pool):
 
 @pytest.mark.asyncio
 async def test_incremental_merge_never_collapses_trimmed_history(test_pool):
-    """Trim-to-500 must not shrink a complete aggregate (the BTB case).
+    """Trim-to-100 must not shrink a complete aggregate (the BTB case).
 
     Aggregate holds full history (10 events); raw keeps only the 2 newest
     plus 2 brand-new arrivals. Additive merge must yield 12, never 4.

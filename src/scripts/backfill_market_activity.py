@@ -215,7 +215,7 @@ async def incremental_aggregate_wallet(pool: asyncpg.Pool, address: str) -> int:
 
     Only events newer than each group's ``last_event_at`` are aggregated and
     ADDED to the stored totals — never recomputed from raw. This is what makes
-    the merge safe under the 500-event hot-cache trim: groups whose old raw
+    the merge safe under the 100-event hot-cache trim: groups whose old raw
     rows are gone keep their history and only grow.
 
     Returns the number of groups upserted. For wallets with no existing

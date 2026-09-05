@@ -395,8 +395,9 @@ async def _persist_audit(
                 ) VALUES ($1,$2,$3,$4,$5,$6,to_timestamp($7),$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
                 ON CONFLICT (address, event_sha256) DO NOTHING
             """, exception_events)
-        # Raw events are a hot cache.  Aggregates and exception evidence above
-        # remain available after this bounded retention pass.
+        # Raw events are a hot cache (last 100 per wallet for PnL-divergent
+        # wallets only).  Aggregates and exception evidence above remain
+        # available after this bounded retention pass.
         await conn.execute("""
             DELETE FROM wallet_activity_events_v2
             WHERE address = $1 AND id NOT IN (
@@ -408,7 +409,7 @@ async def _persist_audit(
                     ORDER BY event_sha256, event_timestamp DESC NULLS LAST, id DESC
                 ) distinct_events
                 ORDER BY event_timestamp DESC NULLS LAST, id DESC
-                LIMIT 500
+                LIMIT 100
             )
         """, address)
         latest = max(activity, key=lambda e: (_number(e.get("timestamp")), _activity_event_digest(e)), default=None)
@@ -658,7 +659,7 @@ async def backfill_activity(address: str, start: int, end: int, persist: bool = 
     This is the slow part: recursive bisection to avoid the 5000 offset cap.
     Stores a complete pending snapshot in wallet_activity_events_v2 and updates
     scan state. The snapshot is deliberately not pruned here: Worker 4 must
-    compare the full source before retaining only the 500-event hot cache.
+    compare the full source before retaining only the 100-event hot cache.
     """
     requested_start = start
     if persist and start <= 1:
