@@ -131,47 +131,69 @@ INSERT INTO wallet_market_activity_v2 (
     event_count, first_event_at, last_event_at,
     last_event_ts, last_event_sha, updated_at
 )
-SELECT * FROM (
 SELECT
     $1::varchar AS address,
-    e.condition_id,
-    CASE WHEN e.asset ~ '^[0-9]+$' THEN e.asset::numeric ELSE 0 END AS outcome_token_id,
-    MODE() WITHIN GROUP (ORDER BY e.outcome) AS outcome_label,
-    COUNT(*) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'BUY') AS trade_buys,
-    COALESCE(SUM(e.size) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'BUY'), 0) AS buy_shares,
-    COALESCE(SUM(e.size * e.price) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'BUY'), 0) AS buy_cost,
-    COUNT(*) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'SELL') AS trade_sells,
-    COALESCE(SUM(e.size) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'SELL'), 0) AS sell_shares,
-    COALESCE(SUM(e.size * e.price) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'SELL'), 0) AS sell_proceeds,
-    COUNT(*) FILTER (WHERE e.event_type = 'REDEEM') AS redeem_count,
-    COALESCE(SUM(e.usdc_size) FILTER (WHERE e.event_type = 'REDEEM'), 0) AS redeem_usdc,
-    COALESCE(SUM(e.size) FILTER (WHERE e.event_type = 'SPLIT'), 0) AS split_shares,
-    COALESCE(SUM(e.size) FILTER (WHERE e.event_type = 'MERGE'), 0) AS merge_shares,
-    COUNT(*) FILTER (WHERE e.event_type = 'CONVERSION') AS conversion_events,
-    COALESCE(SUM(e.usdc_size) FILTER (WHERE e.event_type IN ('REWARD', 'YIELD', 'MAKER_REBATE', 'TAKER_REBATE')), 0) AS reward_usdc,
-    COUNT(*) AS event_count,
-    MIN(e.event_timestamp) AS first_event_at,
-    MAX(e.event_timestamp) AS last_event_at,
-    COALESCE(EXTRACT(EPOCH FROM MAX(e.event_timestamp))::bigint, 0) AS last_event_ts,
-    COALESCE((ARRAY_AGG(e.event_sha256 ORDER BY e.event_timestamp DESC, e.event_sha256 DESC))[1], '') AS last_event_sha,
+    d.condition_id,
+    d.outcome_token_id,
+    d.outcome_label,
+    COALESCE(w.trade_buys, 0) + d.trade_buys AS trade_buys,
+    COALESCE(w.buy_shares, 0) + d.buy_shares AS buy_shares,
+    COALESCE(w.buy_cost, 0) + d.buy_cost AS buy_cost,
+    COALESCE(w.trade_sells, 0) + d.trade_sells AS trade_sells,
+    COALESCE(w.sell_shares, 0) + d.sell_shares AS sell_shares,
+    COALESCE(w.sell_proceeds, 0) + d.sell_proceeds AS sell_proceeds,
+    COALESCE(w.redeem_count, 0) + d.redeem_count AS redeem_count,
+    COALESCE(w.redeem_usdc, 0) + d.redeem_usdc AS redeem_usdc,
+    COALESCE(w.split_shares, 0) + d.split_shares AS split_shares,
+    COALESCE(w.merge_shares, 0) + d.merge_shares AS merge_shares,
+    COALESCE(w.conversion_events, 0) + d.conversion_events AS conversion_events,
+    COALESCE(w.reward_usdc, 0) + d.reward_usdc AS reward_usdc,
+    COALESCE(w.event_count, 0) + d.event_count AS event_count,
+    CASE WHEN w.first_event_at IS NULL THEN d.first_event_at
+         WHEN d.first_event_at IS NULL THEN w.first_event_at
+         ELSE LEAST(w.first_event_at, d.first_event_at) END AS first_event_at,
+    d.last_event_at AS last_event_at,
+    d.last_event_ts AS last_event_ts,
+    d.last_event_sha AS last_event_sha,
     NOW() AS updated_at
-FROM wallet_activity_events_v2 e
-WHERE e.address = $1
-  AND e.condition_id IS NOT NULL AND e.condition_id <> ''
-  AND (e.condition_id, CASE WHEN e.asset ~ '^[0-9]+$' THEN e.asset::numeric ELSE 0 END) IN (
-      SELECT w.condition_id, w.outcome_token_id
-      FROM wallet_market_activity_v2 w
-      WHERE w.address = $1
-        AND EXISTS (
-            SELECT 1 FROM wallet_activity_events_v2 ne
-            WHERE ne.address = w.address
-              AND ne.condition_id = w.condition_id
-              AND ne.event_timestamp > w.last_event_at
-        )
-  )
-GROUP BY e.condition_id,
-         CASE WHEN e.asset ~ '^[0-9]+$' THEN e.asset::numeric ELSE 0 END
-) stale_rows
+FROM (
+    SELECT
+        e.condition_id,
+        CASE WHEN e.asset ~ '^[0-9]+$' THEN e.asset::numeric ELSE 0 END AS outcome_token_id,
+        MODE() WITHIN GROUP (ORDER BY e.outcome) AS outcome_label,
+        COUNT(*) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'BUY') AS trade_buys,
+        COALESCE(SUM(e.size) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'BUY'), 0) AS buy_shares,
+        COALESCE(SUM(e.size * e.price) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'BUY'), 0) AS buy_cost,
+        COUNT(*) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'SELL') AS trade_sells,
+        COALESCE(SUM(e.size) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'SELL'), 0) AS sell_shares,
+        COALESCE(SUM(e.size * e.price) FILTER (WHERE e.event_type = 'TRADE' AND e.side = 'SELL'), 0) AS sell_proceeds,
+        COUNT(*) FILTER (WHERE e.event_type = 'REDEEM') AS redeem_count,
+        COALESCE(SUM(e.usdc_size) FILTER (WHERE e.event_type = 'REDEEM'), 0) AS redeem_usdc,
+        COALESCE(SUM(e.size) FILTER (WHERE e.event_type = 'SPLIT'), 0) AS split_shares,
+        COALESCE(SUM(e.size) FILTER (WHERE e.event_type = 'MERGE'), 0) AS merge_shares,
+        COUNT(*) FILTER (WHERE e.event_type = 'CONVERSION') AS conversion_events,
+        COALESCE(SUM(e.usdc_size) FILTER (WHERE e.event_type IN ('REWARD', 'YIELD', 'MAKER_REBATE', 'TAKER_REBATE')), 0) AS reward_usdc,
+        COUNT(*) AS event_count,
+        MIN(e.event_timestamp) AS first_event_at,
+        MAX(e.event_timestamp) AS last_event_at,
+        COALESCE(EXTRACT(EPOCH FROM MAX(e.event_timestamp))::bigint, 0) AS last_event_ts,
+        COALESCE((ARRAY_AGG(e.event_sha256 ORDER BY e.event_timestamp DESC, e.event_sha256 DESC))[1], '') AS last_event_sha
+    FROM wallet_activity_events_v2 e
+    LEFT JOIN wallet_market_activity_v2 w
+      ON w.address = e.address
+      AND w.condition_id = e.condition_id
+      AND w.outcome_token_id = CASE WHEN e.asset ~ '^[0-9]+$' THEN e.asset::numeric ELSE 0 END
+    WHERE e.address = $1
+      AND e.condition_id IS NOT NULL AND e.condition_id <> ''
+      AND e.event_timestamp IS NOT NULL
+      AND (w.last_event_at IS NULL OR e.event_timestamp > w.last_event_at)
+    GROUP BY e.condition_id,
+             CASE WHEN e.asset ~ '^[0-9]+$' THEN e.asset::numeric ELSE 0 END
+) d
+LEFT JOIN wallet_market_activity_v2 w
+  ON w.address = $1
+  AND w.condition_id = d.condition_id
+  AND w.outcome_token_id = d.outcome_token_id
 ON CONFLICT (address, condition_id, outcome_token_id) DO UPDATE SET
     outcome_label = EXCLUDED.outcome_label,
     trade_buys = EXCLUDED.trade_buys, buy_shares = EXCLUDED.buy_shares,
@@ -189,7 +211,12 @@ ON CONFLICT (address, condition_id, outcome_token_id) DO UPDATE SET
 
 
 async def incremental_aggregate_wallet(pool: asyncpg.Pool, address: str) -> int:
-    """Merge only stale groups for a single wallet (watermark-based).
+    """Additively merge deltas for a single wallet (watermark-based).
+
+    Only events newer than each group's ``last_event_at`` are aggregated and
+    ADDED to the stored totals — never recomputed from raw. This is what makes
+    the merge safe under the 500-event hot-cache trim: groups whose old raw
+    rows are gone keep their history and only grow.
 
     Returns the number of groups upserted. For wallets with no existing
     aggregates, falls back to full aggregation.
