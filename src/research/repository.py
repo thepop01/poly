@@ -62,9 +62,13 @@ class ResearchRepository:
         async with self.pool.acquire() as conn:
             if include_archived:
                 rows = await conn.fetch(
-                    """SELECT chat_id, title, is_archived, created_at, updated_at
-                       FROM research_chats WHERE owner_id = $1::uuid
-                       ORDER BY updated_at DESC LIMIT $2""",
+                    """SELECT c.chat_id, c.title, c.is_archived, c.created_at, c.updated_at
+                       FROM research_chats c
+                       WHERE c.owner_id = $1::uuid
+                         AND (c.is_archived = FALSE OR EXISTS (
+                             SELECT 1 FROM research_messages m WHERE m.chat_id = c.chat_id
+                         ))
+                       ORDER BY c.updated_at DESC LIMIT $2""",
                     owner_id, limit,
                 )
             else:
@@ -100,6 +104,17 @@ class ResearchRepository:
         self, owner_id: str, chat_id: UUID, is_archived: bool = True
     ) -> ResearchChat | None:
         async with self.pool.acquire() as conn:
+            if is_archived:
+                has_msgs = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM research_messages WHERE chat_id = $1)",
+                    chat_id,
+                )
+                if not has_msgs:
+                    await conn.execute(
+                        "DELETE FROM research_chats WHERE chat_id = $1 AND owner_id = $2::uuid",
+                        chat_id, owner_id,
+                    )
+                    return None
             row = await conn.fetchrow(
                 """UPDATE research_chats
                    SET is_archived = $3, updated_at = NOW()

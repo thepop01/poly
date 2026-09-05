@@ -58,7 +58,12 @@ export function useResearchHub() {
   const abortByChat = useRef<Record<string, AbortController>>({});
 
   const openChats = chats.filter((c) => !c.is_archived);
-  const archivedChats = chats.filter((c) => c.is_archived);
+  const archivedChats = chats.filter((c) => {
+    if (!c.is_archived) return false;
+    const msgs = messagesByChat[c.chat_id];
+    if (msgs !== undefined && msgs.length === 0) return false;
+    return true;
+  });
 
   const refreshChatData = useCallback(async (chatId: string) => {
     const [messages, panels, results, positions] = await Promise.all([
@@ -148,11 +153,19 @@ export function useResearchHub() {
 
   const handleCloseChat = useCallback(
     async (chatId: string) => {
-      const chat = await patchChat(chatId, { is_archived: true });
-      setChats((prev) => prev.map((c) => (c.chat_id === chatId ? chat : c)));
+      const msgs = messagesByChat[chatId] ?? [];
+      const hasConversation = msgs.length > 0;
+      if (!hasConversation) {
+        // If a chat has no conversation done, delete it so it is never kept in history
+        await deleteChat(chatId).catch(() => {});
+        setChats((prev) => prev.filter((c) => c.chat_id !== chatId));
+      } else {
+        const chat = await patchChat(chatId, { is_archived: true });
+        setChats((prev) => prev.map((c) => (c.chat_id === chatId ? chat : c)));
+      }
       if (activeIdRef.current === chatId) activate(openRemaining(chatId));
     },
-    [activate, openRemaining],
+    [activate, openRemaining, messagesByChat],
   );
 
   const handleReopenChat = useCallback(

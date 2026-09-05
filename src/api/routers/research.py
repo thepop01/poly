@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
@@ -125,6 +126,14 @@ async def patch_chat(
         chat = await repo.rename_chat(owner_id, chat_id, body.title)
     if body.is_archived is not None:
         chat = await repo.archive_chat(owner_id, chat_id, body.is_archived)
+        if chat is None:
+            return {
+                "chat_id": str(chat_id),
+                "title": "",
+                "is_archived": True,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
     assert chat is not None
     return chat.model_dump(mode="json")
 

@@ -11,14 +11,16 @@ import type { ResearchPosition } from "@/types/research";
 import { useResearchHub } from "@/hooks/useResearchHub";
 
 const RAIL_KEY = "pt-research-rail-width";
-const RAIL_MIN = 240;
-const RAIL_MAX = 480;
+const RAIL_MIN = 280;
+const RAIL_MAX = 560;
 
 function initialRailWidth(): number {
-  if (typeof window === "undefined") return 280;
+  if (typeof window === "undefined") return 350;
   const raw = Number(window.localStorage.getItem(RAIL_KEY));
-  if (Number.isFinite(raw) && raw >= RAIL_MIN && raw <= RAIL_MAX) return raw;
-  return 280;
+  if (Number.isFinite(raw) && raw >= RAIL_MIN && raw <= RAIL_MAX) {
+    return Math.max(raw, 340);
+  }
+  return 350;
 }
 
 export default function ResearchHub() {
