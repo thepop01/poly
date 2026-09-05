@@ -136,12 +136,12 @@ async def overlap_seed(test_pool, research_user):
     }
     async with test_pool.acquire() as conn:
         await conn.execute(
-            "DELETE FROM wallet_positions_v2 WHERE condition_id = ANY($1)",
-            [market_a, market_b, market_c],
+            "DELETE FROM wallet_positions_v2 WHERE address = ANY($1) OR condition_id = ANY($2)",
+            wallets, [market_a, market_b, market_c],
         )
         await conn.execute(
-            "DELETE FROM wallet_closed_positions_v2 WHERE condition_id = ANY($1)",
-            [market_a, market_b, market_c],
+            "DELETE FROM wallet_closed_positions_v2 WHERE address = ANY($1) OR condition_id = ANY($2)",
+            wallets, [market_a, market_b, market_c],
         )
         await conn.execute("DELETE FROM markets_v2 WHERE condition_id = ANY($1)", [market_a, market_b, market_c])
         await conn.execute("DELETE FROM category_stats_v2 WHERE address = ANY($1)", wallets)
@@ -278,3 +278,127 @@ async def test_scope_hint_lists_real_taxonomy_values(test_pool):
     assert hint
     assert {row["league"] for row in hint} >= {"", "IPL"}
     assert await analytics.scope_hint(FindWalletsArgs()) == []
+
+
+@pytest.mark.asyncio
+async def test_list_positions_owner_and_chat_scoped(test_pool):
+    analytics = ResearchAnalytics(test_pool)
+    repo = ResearchRepository(test_pool)
+
+    # Create two users
+    async with test_pool.acquire() as conn:
+        owner_a = str(await conn.fetchval(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING user_id",
+            f"owner-a-{uuid.uuid4().hex[:8]}@example.com", "mock_hash",
+        ))
+        owner_b = str(await conn.fetchval(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING user_id",
+            f"owner-b-{uuid.uuid4().hex[:8]}@example.com", "mock_hash",
+        ))
+
+    chat_a = await repo.create_chat(owner_a, "Chat A")
+    chat_other = await repo.create_chat(owner_a, "Chat Other")
+    chat_b = await repo.create_chat(owner_b, "Chat B")
+
+    w1, w2, w3, w4 = _wallet(31), _wallet(32), _wallet(33), _wallet(34)
+    m_a, m_b, m_c, m_d = _market("pos_a"), _market("pos_b"), _market("pos_c"), _market("pos_d")
+
+    wallets = [w1, w2, w3, w4]
+    markets = [m_a, m_b, m_c, m_d]
+
+    try:
+        async with test_pool.acquire() as conn:
+            for w in wallets:
+                await conn.execute(
+                    "INSERT INTO wallets_v2 (address, username) VALUES ($1, $2) ON CONFLICT (address) DO NOTHING",
+                    w, f"pos-{w[-4:]}",
+                )
+            for m, title in ((m_a, "Market A Title"), (m_b, "Market B Title"), (m_c, "Market C Title"), (m_d, "Market D Title")):
+                await conn.execute(
+                    "INSERT INTO markets_v2 (condition_id, title) VALUES ($1, $2) ON CONFLICT (condition_id) DO NOTHING",
+                    m, title,
+                )
+
+            # Positions:
+            # w1: m_a (val 100, open), m_b (val 50, open)
+            # w2: m_a (val 200, open), m_c (val 0, zero-value), m_d (val 80, resolved)
+            # w3: m_a (val 300, open) - in chat_other
+            # w4: m_a (val 400, open) - in chat_b
+            pos_data = [
+                (w1, m_a, "YES", 10, 10.0, 100.0, 15.0, False),
+                (w1, m_b, "NO", 5, 10.0, 50.0, -5.0, False),
+                (w2, m_a, "YES", 20, 10.0, 200.0, 25.0, False),
+                (w2, m_c, "YES", 1, 0.0, 0.0, 0.0, False),       # zero-value
+                (w2, m_d, "YES", 8, 10.0, 80.0, 0.0, True),        # resolved
+                (w3, m_a, "YES", 30, 10.0, 300.0, 50.0, False),    # chat_other
+                (w4, m_a, "YES", 40, 10.0, 400.0, 60.0, False),    # chat_b
+            ]
+            for addr, cid, outcome, size, avg_price, cur_val, un_pnl, is_res in pos_data:
+                await conn.execute(
+                    """INSERT INTO wallet_positions_v2
+                           (address, condition_id, outcome, size, avg_price, current_value, unrealized_pnl, is_resolved)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                       ON CONFLICT (address, condition_id, outcome)
+                       DO UPDATE SET current_value = $6, is_resolved = $8""",
+                    addr, cid, outcome, size, avg_price, cur_val, un_pnl, is_res,
+                )
+
+        # Save result sets
+        await repo.save_result_set(
+            owner_a, chat_a.chat_id, "wallet_set", "Chat A Wallets", {"tool": "test"},
+            [{"entity_type": "wallet", "entity_key": w1, "payload": {}},
+             {"entity_type": "wallet", "entity_key": w2, "payload": {}}],
+        )
+        await repo.save_result_set(
+            owner_a, chat_other.chat_id, "wallet_set", "Chat Other Wallets", {"tool": "test"},
+            [{"entity_type": "wallet", "entity_key": w3, "payload": {}}],
+        )
+        await repo.save_result_set(
+            owner_b, chat_b.chat_id, "wallet_set", "Chat B Wallets", {"tool": "test"},
+            [{"entity_type": "wallet", "entity_key": w4, "payload": {}}],
+        )
+
+        # Query chat_a under owner_a
+        rows = await analytics.list_positions(owner_a, chat_a.chat_id, 0, 100)
+
+        # Must contain only w1 and w2 open positions (3 rows total)
+        assert len(rows) == 3
+        # Deterministic ordering by current_value DESC
+        assert [r["current_value"] for r in rows] == [200.0, 100.0, 50.0]
+        assert [r["address"] for r in rows] == [w2, w1, w1]
+        assert rows[0]["condition_id"] == m_a
+        assert rows[0]["market_title"] == "Market A Title"
+        assert rows[0]["outcome"] == "YES"
+        assert rows[0]["size"] == 20.0
+        assert rows[0]["avg_price"] == 10.0
+        assert rows[0]["unrealized_pnl"] == 25.0
+        assert "entry_at" in rows[0]
+        assert "computed_at" in rows[0]
+
+        # Zero-value (m_c) and resolved (m_d) positions must NOT appear
+        assert m_c not in [r["condition_id"] for r in rows]
+        assert m_d not in [r["condition_id"] for r in rows]
+
+        # Wallets from another chat (w3) or another user (w4) must NOT appear
+        assert w3 not in [r["address"] for r in rows]
+        assert w4 not in [r["address"] for r in rows]
+
+        # Pagination test: offset=1, limit=1
+        page = await analytics.list_positions(owner_a, chat_a.chat_id, 1, 1)
+        assert len(page) == 1
+        assert page[0]["address"] == w1
+        assert page[0]["current_value"] == 100.0
+
+        # Cross-owner isolation: owner_b querying chat_a gets nothing
+        cross_rows = await analytics.list_positions(owner_b, chat_a.chat_id, 0, 100)
+        assert cross_rows == []
+
+    finally:
+        async with test_pool.acquire() as conn:
+            await conn.execute("DELETE FROM wallet_positions_v2 WHERE address = ANY($1) OR condition_id = ANY($2)", wallets, markets)
+            await conn.execute("DELETE FROM wallet_closed_positions_v2 WHERE address = ANY($1) OR condition_id = ANY($2)", wallets, markets)
+            await conn.execute("DELETE FROM markets_v2 WHERE condition_id = ANY($1)", markets)
+            await conn.execute("DELETE FROM wallets_v2 WHERE address = ANY($1)", wallets)
+            await conn.execute("DELETE FROM research_chats WHERE chat_id = ANY($1)", [chat_a.chat_id, chat_other.chat_id, chat_b.chat_id])
+            await conn.execute("DELETE FROM users WHERE user_id = ANY($1::uuid[])", [owner_a, owner_b])
+

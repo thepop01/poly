@@ -31,10 +31,10 @@ from src.research.contracts import (
 )
 
 SORT_COLUMNS = {
-    "win_rate": "c.win_rate",
-    "pnl": "c.pnl",
-    "volume": "c.volume",
-    "resolved_count": "c.resolved_count",
+    "win_rate": "win_rate",
+    "pnl": "pnl",
+    "volume": "volume",
+    "resolved_count": "resolved_count",
 }
 
 GLOBAL_SORT_COLUMNS = {
@@ -76,6 +76,43 @@ def _scope_equals(column: str, param: str) -> str:
         f"({param}::text IS NULL OR {column} = {param} "
         f"OR UPPER({column}) = UPPER({param}))"
     )
+
+
+# Exact (case-insensitive) taxonomy match for a scope level that the user
+# explicitly requested. Unlike _scope_equals, a NULL param never matches.
+def _scope_exact(column: str, param: str) -> str:
+    return f"({column} = {param} OR UPPER({column}) = UPPER({param}))"
+
+
+def _stats_slice_filter(
+    subcategory: str | None,
+    league: str | None,
+    sub_param: str = "$3",
+    league_param: str = "$4",
+) -> str:
+    """Row filter matching the pipeline's rollup grain.
+
+    compute_category_stats writes (category,'','') category totals plus one
+    row per (subcategory, league) slice; there are no subcategory totals.
+    So a category-only scope must read the total row (never SUM slices with
+    it), while a subcategory scope SUMs every league slice within it.
+    """
+    parts = []
+    if subcategory is not None:
+        parts.append(_scope_exact("c.subcategory", sub_param))
+    elif league is None:
+        # Category total row. The IS NULL anchors keep unused params typed.
+        parts.append(
+            f"c.subcategory = '' AND c.league = '' "
+            f"AND {sub_param}::text IS NULL AND {league_param}::text IS NULL"
+        )
+    if league is not None:
+        parts.append(_scope_exact("c.league", league_param))
+        if subcategory is None:
+            parts.append(f"{sub_param}::text IS NULL")
+    elif subcategory is not None:
+        parts.append(f"{league_param}::text IS NULL")
+    return "AND " + " AND ".join(parts)
 
 
 # Ownership guard shared by every set-based method. Runs before any
@@ -225,22 +262,43 @@ class ResearchAnalytics:
         }
         async with self.pool.acquire() as conn:
             if args.category is not None:
+                # One row per wallet at the requested rollup grain (category
+                # total row, or SUM of league slices for a subcategory scope).
+                # SUMming total rows together with slices would double-count.
                 sort_col = SORT_COLUMNS[args.sort_by]
+                slice_filter = _stats_slice_filter(
+                    args.subcategory, args.league,
+                    sub_param="$3", league_param="$4")
                 rows = await conn.fetch(
-                    f"""SELECT w.address, w.username, w.last_trade_at,
-                               c.win_rate, c.pnl, c.volume,
-                               c.resolved_count, c.winning_count,
-                               m.balance, m.position_value
-                        FROM category_stats_v2 c
-                        JOIN wallets_v2 w ON w.address = c.address
-                        LEFT JOIN wallet_metrics_v2 m ON m.address = w.address
-                        WHERE c.window_size = $1
-                          AND {_scope_equals('c.category', '$2')}
-                          AND {_scope_equals('c.subcategory', '$3')}
-                          AND {_scope_equals('c.league', '$4')}
-                          AND c.win_rate {comparison_sql} $5
-                          AND c.resolved_count >= $6
-                        ORDER BY {sort_col} DESC, c.resolved_count DESC, w.address ASC
+                    f"""SELECT address, username, last_trade_at,
+                               win_rate, pnl, volume,
+                               resolved_count, winning_count,
+                               balance, position_value
+                        FROM (
+                            SELECT w.address AS address,
+                                   MAX(w.username) AS username,
+                                   MAX(w.last_trade_at) AS last_trade_at,
+                                   CASE WHEN SUM(c.resolved_count) > 0
+                                        THEN 100.0 * SUM(c.winning_count)
+                                             / SUM(c.resolved_count)
+                                        ELSE 0 END AS win_rate,
+                                   SUM(c.pnl) AS pnl,
+                                   SUM(c.volume) AS volume,
+                                   SUM(c.resolved_count) AS resolved_count,
+                                   SUM(c.winning_count) AS winning_count,
+                                   MAX(m.balance) AS balance,
+                                   MAX(m.position_value) AS position_value
+                            FROM category_stats_v2 c
+                            JOIN wallets_v2 w ON w.address = c.address
+                            LEFT JOIN wallet_metrics_v2 m ON m.address = w.address
+                            WHERE c.window_size = $1
+                              AND {_scope_equals('c.category', '$2')}
+                              {slice_filter}
+                            GROUP BY w.address
+                        ) agg
+                        WHERE win_rate {comparison_sql} $5
+                          AND resolved_count >= $6
+                        ORDER BY {sort_col} DESC, resolved_count DESC, address ASC
                         LIMIT $7""",
                     args.window_size, args.category, args.subcategory, args.league,
                     args.min_win_rate, args.min_resolved_count, args.limit,
@@ -298,24 +356,41 @@ class ResearchAnalytics:
         }
         async with self.pool.acquire() as conn:
             if scope.category is not None:
+                slice_filter = _stats_slice_filter(
+                    scope.subcategory, scope.league,
+                    sub_param="$4", league_param="$5")
                 rows = await conn.fetch(
-                    f"""SELECT p.address, w.username, p.outcome, p.size, p.avg_price,
-                              p.current_value, c.win_rate, c.resolved_count, c.pnl,
-                              c.volume, w.last_trade_at
-                       FROM wallet_positions_v2 p
-                       JOIN wallets_v2 w ON w.address = p.address
-                       JOIN category_stats_v2 c ON c.address = p.address
-                         AND c.window_size = $2 AND {_scope_equals('c.category', '$3')}
-                         AND {_scope_equals('c.subcategory', '$4')}
-                         AND {_scope_equals('c.league', '$5')}
-                       WHERE p.condition_id = $1
-                         AND COALESCE(p.current_value, 0) > 0
-                         AND COALESCE(p.is_resolved, FALSE) = FALSE
-                         AND ($6::numeric IS NULL OR c.win_rate > $6)
-                         AND c.resolved_count >= $7
-                       ORDER BY c.win_rate DESC, c.resolved_count DESC,
-                                p.address ASC, p.outcome ASC
-                       LIMIT $8""",
+                    f"""WITH scoped AS (
+                            SELECT c.address AS address,
+                                   CASE WHEN SUM(c.resolved_count) > 0
+                                        THEN 100.0 * SUM(c.winning_count)
+                                             / SUM(c.resolved_count)
+                                        ELSE 0 END AS win_rate,
+                                   SUM(c.resolved_count) AS resolved_count,
+                                   SUM(c.winning_count) AS winning_count,
+                                   SUM(c.pnl) AS pnl,
+                                   SUM(c.volume) AS volume
+                            FROM category_stats_v2 c
+                            WHERE c.window_size = $2
+                              AND {_scope_equals('c.category', '$3')}
+                              {slice_filter}
+                            GROUP BY c.address
+                        )
+                        SELECT p.address, w.username, p.outcome, p.size, p.avg_price,
+                               p.current_value, s.win_rate, s.resolved_count, s.winning_count,
+                               s.pnl, s.volume, m.balance, m.position_value, w.last_trade_at
+                        FROM wallet_positions_v2 p
+                        JOIN wallets_v2 w ON w.address = p.address
+                        JOIN scoped s ON s.address = p.address
+                        LEFT JOIN wallet_metrics_v2 m ON m.address = p.address
+                        WHERE p.condition_id = $1
+                          AND COALESCE(p.current_value, 0) > 0
+                          AND COALESCE(p.is_resolved, FALSE) = FALSE
+                          AND ($6::numeric IS NULL OR s.win_rate > $6)
+                          AND s.resolved_count >= $7
+                        ORDER BY s.win_rate DESC, s.resolved_count DESC,
+                                 p.address ASC, p.outcome ASC
+                        LIMIT $8""",
                     args.condition_id, scope.window_size, scope.category,
                     scope.subcategory, scope.league, args.min_win_rate,
                     args.min_resolved_count, args.limit,
@@ -323,20 +398,20 @@ class ResearchAnalytics:
             else:
                 rows = await conn.fetch(
                     """SELECT p.address, w.username, p.outcome, p.size, p.avg_price,
-                              p.current_value, m.win_rate, m.resolved_count,
-                              m.total_pnl AS pnl, m.total_volume AS volume,
-                              w.last_trade_at
-                       FROM wallet_positions_v2 p
-                       JOIN wallets_v2 w ON w.address = p.address
-                       JOIN wallet_metrics_v2 m ON m.address = p.address
-                       WHERE p.condition_id = $1
-                         AND COALESCE(p.current_value, 0) > 0
-                         AND COALESCE(p.is_resolved, FALSE) = FALSE
-                         AND ($2::numeric IS NULL OR m.win_rate > $2)
-                         AND m.resolved_count >= $3
-                       ORDER BY m.win_rate DESC, m.resolved_count DESC,
-                                p.address ASC, p.outcome ASC
-                       LIMIT $4""",
+                               p.current_value, m.win_rate, m.resolved_count,
+                               m.winning_count, m.total_pnl AS pnl, m.total_volume AS volume,
+                               m.balance, m.position_value, w.last_trade_at
+                        FROM wallet_positions_v2 p
+                        JOIN wallets_v2 w ON w.address = p.address
+                        JOIN wallet_metrics_v2 m ON m.address = p.address
+                        WHERE p.condition_id = $1
+                          AND COALESCE(p.current_value, 0) > 0
+                          AND COALESCE(p.is_resolved, FALSE) = FALSE
+                          AND ($2::numeric IS NULL OR m.win_rate > $2)
+                          AND m.resolved_count >= $3
+                        ORDER BY m.win_rate DESC, m.resolved_count DESC,
+                                 p.address ASC, p.outcome ASC
+                        LIMIT $4""",
                     args.condition_id, args.min_win_rate,
                     args.min_resolved_count, args.limit,
                 )
@@ -378,9 +453,9 @@ class ResearchAnalytics:
                            COUNT(DISTINCT CASE WHEN p.source = 'closed' THEN p.address END)::int AS closed_wallets,
                            ROUND(100.0 * COUNT(DISTINCT p.address)
                                  / NULLIF((SELECT n FROM input_count), 0), 2) AS coverage_pct,
-                           COALESCE(array_agg(DISTINCT p.outcome)
-                                    FILTER (WHERE p.outcome IS NOT NULL), '{{}}') AS outcomes,
-                           SUM(p.current_value) AS total_value
+                            COALESCE(array_agg(DISTINCT p.outcome)
+                                     FILTER (WHERE p.outcome IS NOT NULL), '{{}}') AS outcomes,
+                            COALESCE(SUM(p.current_value), 0) AS total_value
                     FROM pos p
                     JOIN markets_v2 mk ON mk.condition_id = p.condition_id
                     WHERE {_scope_equals('mk.category', '$3')}
@@ -547,3 +622,39 @@ class ResearchAnalytics:
             r["input_wallet_count"] = input_count
             results.append(r)
         return results
+
+    # -- chat-scoped positions -----------------------------------------
+
+    async def list_positions(
+        self,
+        owner_id: str,
+        chat_id: UUID | str,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return owner- and chat-scoped open positions for wallets discovered in the chat."""
+        sql = """
+        WITH chat_wallets AS (
+            SELECT DISTINCT m.entity_key AS address
+            FROM research_result_members m
+            JOIN research_result_sets rs ON rs.result_set_id = m.result_set_id
+            JOIN research_chats c ON c.chat_id = rs.chat_id
+            WHERE c.owner_id = $1::uuid
+              AND c.chat_id = $2::uuid
+              AND m.entity_type = 'wallet'
+        )
+        SELECT p.address, p.condition_id, mk.title AS market_title,
+               p.outcome, p.size, p.avg_price, p.current_value,
+               p.unrealized_pnl, p.entry_at, p.computed_at
+        FROM wallet_positions_v2 p
+        JOIN chat_wallets cw ON cw.address = p.address
+        LEFT JOIN markets_v2 mk ON mk.condition_id = p.condition_id
+        WHERE COALESCE(p.current_value, 0) > 0
+          AND COALESCE(p.is_resolved, FALSE) = FALSE
+        ORDER BY p.current_value DESC NULLS LAST, p.condition_id, p.outcome, p.address
+        OFFSET $3 LIMIT $4
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(sql, str(owner_id), str(chat_id), offset, limit)
+        return _clean_rows(rows)
+
