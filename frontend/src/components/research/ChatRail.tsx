@@ -89,13 +89,13 @@ export default function ChatRail({
     <div className="flex h-full min-h-0 flex-col">
       {/* Header */}
       <div className="chat-rail-header">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <div className="chat-rail-icon">
-            <Bot size={13} />
+            <Bot size={11} />
           </div>
           <div>
-            <span className="text-xs font-semibold text-foreground">Research Terminal</span>
-            <span className="text-[10px] text-subtle block font-mono">Antigravity AI · v2</span>
+            <span className="text-[11px] font-semibold text-foreground leading-none block">Research Terminal</span>
+            <span className="text-[9px] text-subtle block font-mono mt-0.5">Antigravity AI · v2</span>
           </div>
         </div>
         {busy ? (
@@ -104,7 +104,7 @@ export default function ChatRail({
             live
           </span>
         ) : (
-          <span className="text-[10px] font-mono text-subtle px-1.5 py-0.5 rounded bg-surface-2 border border-border">
+          <span className="text-[9px] font-mono text-subtle px-1 py-0.5 rounded bg-surface-2 border border-border">
             READY
           </span>
         )}
@@ -114,28 +114,28 @@ export default function ChatRail({
       {(status || error) && (
         <div className={`chat-status-banner ${error ? "chat-status-error" : "chat-status-thinking"}`} role="status" aria-live="polite">
           {error ? (
-            <div data-testid="run-error" className="text-xs text-danger">{error}</div>
+            <div data-testid="run-error" className="text-[11px] text-danger">{error}</div>
           ) : (
-            <div data-testid="run-status" className="text-xs text-subtle">{status}</div>
+            <div data-testid="run-status" className="text-[11px] text-subtle">{status}</div>
           )}
         </div>
       )}
 
       {/* Message list */}
-      <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-3" data-testid="chat-messages">
+      <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2" data-testid="chat-messages">
         {messages.length === 0 && !streamingText && !busy ? (
-          <div className="flex flex-col items-center justify-center h-full gap-4 text-center py-6 px-2">
+          <div className="flex flex-col items-center justify-center h-full gap-3 text-center py-4 px-2">
             <div className="chat-empty-icon">
-              <Bot size={22} className="text-primary" />
+              <Bot size={18} className="text-primary" />
             </div>
             <div>
-              <h4 className="text-sm font-semibold text-foreground">AI Research Terminal</h4>
-              <p className="text-xs text-subtle mt-1 max-w-xs leading-relaxed">
+              <h4 className="text-xs font-semibold text-foreground">AI Research Terminal</h4>
+              <p className="text-[11px] text-subtle mt-0.5 max-w-[210px] leading-snug">
                 Query wallets, compare market positions, discover consensus, and explore historical evidence.
               </p>
             </div>
-            <div className="w-full space-y-1.5 pt-2">
-              <p className="text-[10px] font-semibold text-subtle uppercase tracking-wider text-left">
+            <div className="w-full space-y-1 pt-1">
+              <p className="text-[9px] font-semibold text-subtle uppercase tracking-wider text-left">
                 Suggested Prompts
               </p>
               {PROMPT_SUGGESTIONS.map((suggestion) => (
@@ -148,14 +148,14 @@ export default function ChatRail({
                   }}
                   className="chat-suggestion-chip w-full"
                 >
-                  <Sparkles size={11} className="text-primary flex-shrink-0" />
+                  <Sparkles size={10} className="text-primary flex-shrink-0" />
                   <span className="truncate">{suggestion}</span>
                 </button>
               ))}
             </div>
           </div>
         ) : (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1.5">
             {messages.map((message) =>
               message.role === "tool" ? null : (
                 <div
@@ -166,12 +166,12 @@ export default function ChatRail({
                 >
                   {/* Role avatar */}
                   <div className={message.role === "user" ? "chat-bubble-avatar chat-bubble-avatar-user" : "chat-bubble-avatar chat-bubble-avatar-ai"}>
-                    {message.role === "user" ? <User size={10} /> : <Bot size={10} />}
+                    {message.role === "user" ? <User size={9} /> : <Bot size={9} />}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                    <p className="text-xs text-foreground leading-normal whitespace-pre-wrap">{message.content}</p>
                     {(message as { created_at?: string }).created_at && (
-                      <p className="text-[10px] text-subtle mt-1">
+                      <p className="text-[9px] text-subtle mt-0.5">
                         {formatTime((message as { created_at: string }).created_at)}
                       </p>
                     )}
@@ -184,10 +184,10 @@ export default function ChatRail({
             {streamingText && (
               <div data-testid="chat-streaming" className="chat-bubble-ai">
                 <div className="chat-bubble-avatar chat-bubble-avatar-ai">
-                  <Bot size={10} />
+                  <Bot size={9} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">
+                  <p className="text-xs text-foreground leading-normal whitespace-pre-wrap">
                     {streamingText}
                     <span aria-hidden="true" className="ml-1 inline-block animate-pulse text-primary">▍</span>
                   </p>
@@ -199,29 +199,29 @@ export default function ChatRail({
             {busy && !streamingText && (
               <div data-testid="chat-thinking" aria-hidden="true" className="chat-bubble-ai">
                 <div className="chat-bubble-avatar chat-bubble-avatar-ai">
-                  <Bot size={10} />
+                  <Bot size={9} />
                 </div>
-                <div className="flex items-center gap-2 py-0.5">
+                <div className="flex items-center gap-1.5 py-0.5">
                   <span className="thinking-dots">
                     <span />
                     <span />
                     <span />
                   </span>
-                  <span className="text-xs text-subtle">Thinking…</span>
+                  <span className="text-[11px] text-subtle">Thinking…</span>
                 </div>
               </div>
             )}
 
             {/* Result set badges — after last AI message */}
             {results.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 pt-1" aria-label="Result sets">
+              <div className="flex flex-wrap gap-1 pt-1" aria-label="Result sets">
                 {results.map((result) => (
                   <span
                     key={result.result_set_id}
                     title={`${result.kind} · snapshot ${result.snapshot_at}`}
                     className="chat-result-chip"
                   >
-                    <Layers size={10} className="text-primary" />
+                    <Layers size={9} className="text-primary" />
                     <span>{result.label} · {result.row_count}</span>
                   </span>
                 ))}
@@ -255,7 +255,7 @@ export default function ChatRail({
           {/* Input controls row */}
           <div className="chat-input-controls">
             {/* Left: attach + model badge */}
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1">
               <button
                 type="button"
                 disabled={busy || !chatId}
@@ -263,13 +263,13 @@ export default function ChatRail({
                 title="Attach file (coming soon)"
                 aria-label="Attach file"
               >
-                <Paperclip size={13} />
+                <Paperclip size={11} />
               </button>
               <span className="chat-model-chip">Antigravity AI</span>
             </div>
 
             {/* Right: char count + send/stop */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               {draft.length > 0 && (
                 <span className={`chat-char-count ${nearLimit ? "text-warning" : ""}`}>
                   {charCount}/{charLimit}
@@ -285,7 +285,7 @@ export default function ChatRail({
                   className="chat-stop-btn"
                   aria-label="Stop"
                 >
-                  <Square size={12} />
+                  <Square size={10} />
                   <span>Stop</span>
                 </button>
               ) : (
@@ -296,7 +296,7 @@ export default function ChatRail({
                   className="chat-send-btn"
                   aria-label="Send message"
                 >
-                  <Send size={13} />
+                  <Send size={11} />
                 </button>
               )}
             </div>

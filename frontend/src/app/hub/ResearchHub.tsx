@@ -11,14 +11,14 @@ import type { ResearchPosition } from "@/types/research";
 import { useResearchHub } from "@/hooks/useResearchHub";
 
 const RAIL_KEY = "pt-research-rail-width";
-const RAIL_MIN = 280;
-const RAIL_MAX = 560;
+const RAIL_MIN = 240;
+const RAIL_MAX = 480;
 
 function initialRailWidth(): number {
-  if (typeof window === "undefined") return 340;
+  if (typeof window === "undefined") return 280;
   const raw = Number(window.localStorage.getItem(RAIL_KEY));
   if (Number.isFinite(raw) && raw >= RAIL_MIN && raw <= RAIL_MAX) return raw;
-  return 340;
+  return 280;
 }
 
 export default function ResearchHub() {
@@ -46,6 +46,18 @@ export default function ResearchHub() {
 
   const allPanels = activeId ? hub.panelsByChat[activeId] ?? [] : [];
   const positions = activeId ? hub.positionsForChat(activeId) : [];
+
+  const handleToggleTradingTerminal = () => {
+    setTradingTerminalOpen((prev) => {
+      const next = !prev;
+      if (next && typeof document !== "undefined") {
+        setTimeout(() => {
+          document.querySelector(".trading-terminal")?.scrollIntoView({ behavior: "smooth" });
+        }, 50);
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="research-workspace" data-testid="research-workspace">
@@ -176,7 +188,7 @@ export default function ResearchHub() {
             selectedPosition={selectedPosition}
             onSelectPosition={(pos) => setSelectedPosition(pos)}
             isOpen={tradingTerminalOpen}
-            onToggleOpen={() => setTradingTerminalOpen((o) => !o)}
+            onToggleOpen={handleToggleTradingTerminal}
           />
         </div>
 

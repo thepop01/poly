@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { ResearchPosition } from "@/types/research";
-import { ChevronDown, ChevronUp, Layers } from "lucide-react";
+import { ArrowUp, ChevronDown, ChevronUp, Layers } from "lucide-react";
 
 interface PositionsBarProps {
   rows: ResearchPosition[];
@@ -100,11 +100,30 @@ export default function PositionsBar({
           })}
         </div>
 
+        {/* Scroll back to canvas button */}
+        <button
+          type="button"
+          onClick={() => {
+            if (typeof document !== "undefined") {
+              const workspace = document.querySelector(".research-workspace");
+              if (workspace && typeof workspace.scrollTo === "function") {
+                workspace.scrollTo({ top: 0, behavior: "smooth" });
+              }
+            }
+          }}
+          className="positions-jump-btn ml-auto"
+          title="Scroll up to Canvas & Terminal"
+          aria-label="Scroll to Canvas"
+        >
+          <ArrowUp size={11} />
+          <span>Canvas</span>
+        </button>
+
         {/* Collapse toggle */}
         <button
           type="button"
           onClick={toggleOpen}
-          className="positions-collapse-btn ml-auto"
+          className="positions-collapse-btn"
           aria-label={open ? "Collapse positions bar" : "Expand positions bar"}
           title={open ? "Collapse positions" : "Expand positions"}
         >
