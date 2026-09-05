@@ -5,6 +5,7 @@ import type {
   ResearchChat,
   ResearchMessage,
   ResearchPanel,
+  ResearchPosition,
   ResultSetSummary,
   StreamEvent,
 } from "@/types/research";
@@ -15,6 +16,8 @@ import {
   listChats,
   listMessages,
   listPanels,
+  listPositions,
+  listResults,
   patchChat,
   patchPanel,
   streamResearchRun,
@@ -28,6 +31,7 @@ export interface ChatState {
   messagesByChat: Record<string, ResearchMessage[]>;
   panelsByChat: Record<string, ResearchPanel[]>;
   resultsByChat: Record<string, ResultSetSummary[]>;
+  positionsByChat: Record<string, ResearchPosition[]>;
   busyByChat: Record<string, boolean>;
   statusByChat: Record<string, string | null>;
   errorByChat: Record<string, string | null>;
@@ -36,6 +40,7 @@ export interface ChatState {
 }
 
 const EMPTY_RESULTS: ResultSetSummary[] = [];
+const EMPTY_POSITIONS: ResearchPosition[] = [];
 
 export function useResearchHub() {
   const [chats, setChats] = useState<ResearchChat[]>([]);
@@ -43,6 +48,7 @@ export function useResearchHub() {
   const [messagesByChat, setMessagesByChat] = useState<Record<string, ResearchMessage[]>>({});
   const [panelsByChat, setPanelsByChat] = useState<Record<string, ResearchPanel[]>>({});
   const [resultsByChat, setResultsByChat] = useState<Record<string, ResultSetSummary[]>>({});
+  const [positionsByChat, setPositionsByChat] = useState<Record<string, ResearchPosition[]>>({});
   const [busyByChat, setBusyByChat] = useState<Record<string, boolean>>({});
   const [statusByChat, setStatusByChat] = useState<Record<string, string | null>>({});
   const [errorByChat, setErrorByChat] = useState<Record<string, string | null>>({});
@@ -55,12 +61,18 @@ export function useResearchHub() {
   const archivedChats = chats.filter((c) => c.is_archived);
 
   const refreshChatData = useCallback(async (chatId: string) => {
-    const [messages, panels] = await Promise.all([
+    const [messages, panels, results, positions] = await Promise.all([
       listMessages(chatId, 0, 200),
       listPanels(chatId),
+      listResults(chatId).catch(() => ({ results: [] as ResultSetSummary[] })),
+      listPositions(chatId, 0, 100).catch(() => null),
     ]);
     setMessagesByChat((prev) => ({ ...prev, [chatId]: messages.messages }));
     setPanelsByChat((prev) => ({ ...prev, [chatId]: panels.panels }));
+    setResultsByChat((prev) => ({ ...prev, [chatId]: results.results.slice(0, 20) }));
+    if (positions !== null) {
+      setPositionsByChat((prev) => ({ ...prev, [chatId]: positions.positions }));
+    }
   }, []);
 
   const activeIdRef = useRef<string | null>(null);
@@ -247,6 +259,18 @@ export function useResearchHub() {
       abortByChat.current[chatId]?.abort();
       const controller = new AbortController();
       abortByChat.current[chatId] = controller;
+      // Optimistic user bubble so the message shows instantly; the server
+      // refetch in finishRun replaces it (negative id marks it local-only).
+      const optimistic: ResearchMessage = {
+        message_id: -Date.now(),
+        chat_id: chatId,
+        run_id: null,
+        role: "user",
+        content: text,
+        metadata: {},
+        created_at: new Date().toISOString(),
+      };
+      setMessagesByChat((prev) => ({ ...prev, [chatId]: [...(prev[chatId] ?? []), optimistic] }));
       setBusyByChat((prev) => ({ ...prev, [chatId]: true }));
       setErrorByChat((prev) => ({ ...prev, [chatId]: null }));
       setRestorePromptByChat((prev) => ({ ...prev, [chatId]: null }));
@@ -331,6 +355,8 @@ export function useResearchHub() {
     streamingTextByChat,
     restorePromptByChat,
     resultsForChat: (chatId: string) => resultsByChat[chatId] ?? EMPTY_RESULTS,
+    positionsByChat,
+    positionsForChat: (chatId: string | null) => (chatId ? positionsByChat[chatId] ?? EMPTY_POSITIONS : EMPTY_POSITIONS),
     selectChat,
     createChat: handleCreateChat,
     renameChat: handleRenameChat,

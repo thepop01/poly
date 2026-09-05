@@ -63,6 +63,26 @@ export interface ResultMember {
   payload: Record<string, unknown>;
 }
 
+export interface ResearchPosition {
+  address: string;
+  condition_id: string;
+  market_title: string | null;
+  outcome: string | null;
+  size: number | null;
+  avg_price: number | null;
+  current_value: number | null;
+  unrealized_pnl: number | null;
+  entry_at: string | null;
+  computed_at: string | null;
+}
+
+export interface PositionsPage {
+  positions: ResearchPosition[];
+  offset: number;
+  limit: number;
+}
+
+
 export type StreamEventType =
   | "run.started"
   | "tool.started"

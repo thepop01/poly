@@ -2,6 +2,7 @@
 
 import { getAuthToken } from "@/utils/api";
 import type {
+  PositionsPage,
   ResearchChat,
   ResearchMessage,
   ResearchPanel,
@@ -83,6 +84,20 @@ export async function patchPanel(
     method: "PATCH",
     body: JSON.stringify({ state }),
   });
+}
+
+export async function listResults(chatId: string): Promise<{ results: ResultSetSummary[] }> {
+  return request(`/api/v2/research/chats/${chatId}/results`);
+}
+
+export async function listPositions(
+  chatId: string,
+  offset = 0,
+  limit = 100,
+): Promise<PositionsPage> {
+  return request(
+    `/api/v2/research/chats/${chatId}/positions?offset=${offset}&limit=${limit}`,
+  );
 }
 
 export async function getResultPage(
