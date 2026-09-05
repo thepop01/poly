@@ -274,7 +274,7 @@ async def _persist_audit(
                     transaction_hash, payload
                 ) VALUES (
                     $1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9),$10,$11,$12,$13,$14::jsonb
-                ) ON CONFLICT (snapshot_id, event_sha256) DO NOTHING
+                ) ON CONFLICT (address, event_sha256) DO NOTHING
             """, [
                 (
                     snapshot_id, address, _activity_event_digest(event), event.get("conditionId"),
@@ -707,7 +707,7 @@ async def backfill_activity(address: str, start: int, end: int, persist: bool = 
                     transaction_hash, payload
                 ) VALUES (
                     $1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9),$10,$11,$12,$13,$14::jsonb
-                ) ON CONFLICT (snapshot_id, event_sha256) DO NOTHING
+                ) ON CONFLICT (address, event_sha256) DO NOTHING
             """, [
                 (
                     snapshot_id, address, _activity_event_digest(event), event.get("conditionId"),
