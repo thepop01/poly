@@ -12,6 +12,7 @@ const PAGE_TITLES: { prefix: string; title: string; description: string }[] = [
   { prefix: "/wallets", title: "Wallets", description: "Every tracked wallet, ranked by performance" },
   { prefix: "/tracker", title: "My Tracker", description: "Your personal wallet lists" },
   { prefix: "/agents", title: "Agents", description: "Conditional rules that monitor the market for you" },
+  { prefix: "/hub", title: "Research Hub", description: "AI-driven market research, wallet intelligence, and mock execution" },
 ];
 
 export default function HeaderBar() {
