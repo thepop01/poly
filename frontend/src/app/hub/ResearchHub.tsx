@@ -26,6 +26,7 @@ export default function ResearchHub() {
   const [railWidth, setRailWidth] = useState(initialRailWidth);
   const [mobileView, setMobileView] = useState<"chat" | "results">("chat");
   const [tradingPanelVisible, setTradingPanelVisible] = useState(true);
+  const [tradingTerminalOpen, setTradingTerminalOpen] = useState(true);
   const [selectedPosition, setSelectedPosition] = useState<ResearchPosition | null>(null);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
   const activeChat = hub.chats.find((c) => c.chat_id === hub.activeChatId) ?? null;
@@ -80,9 +81,66 @@ export default function ResearchHub() {
         ))}
       </div>
 
-      {/* ── Main 3-zone split: [ChatRail | Canvas | TradingPanel] ── */}
-      <div className="research-split">
-        {/* Left: Chat rail */}
+      {/* ── Upper Section: Canvas (Left) | Chat Terminal (Right) ── */}
+      <div className="research-upper-workspace">
+        {/* Left: Canvas area (directly beside app sidebar) */}
+        <section
+          aria-label="Results"
+          className={`research-canvas ${mobileView === "results" ? "flex" : "hidden"} md:flex`}
+        >
+          {!activeChat || !activeId ? (
+            <EmptyResearchState
+              onPick={async (prompt) => {
+                const chat = await hub.createChat();
+                await hub.sendPrompt(chat.chat_id, prompt);
+              }}
+            />
+          ) : (
+            <div
+              id={`research-panel-${activeChat.chat_id}`}
+              role="tabpanel"
+              aria-label={`Results for ${activeChat.title}`}
+              className="research-canvas-scroll"
+            >
+              <PanelCanvas
+                panels={allPanels}
+                onPanelState={(panelId, state) => hub.setPanelState(activeId, panelId, state)}
+              />
+            </div>
+          )}
+        </section>
+
+        {/* Drag splitter between Canvas and Chat Terminal */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize conversation panel"
+          aria-valuenow={railWidth}
+          aria-valuemin={RAIL_MIN}
+          aria-valuemax={RAIL_MAX}
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+              e.preventDefault();
+              setRailWidth((w) => clampRail(w + (e.key === "ArrowLeft" ? 16 : -16)));
+            }
+          }}
+          onPointerDown={(e) => {
+            (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+            dragState.current = { startX: e.clientX, startWidth: railWidth };
+          }}
+          onPointerMove={(e) => {
+            const drag = dragState.current;
+            if (!drag || e.buttons === 0) return;
+            setRailWidth(clampRail(drag.startWidth - (e.clientX - drag.startX)));
+          }}
+          onPointerUp={() => {
+            dragState.current = null;
+          }}
+          className="research-splitter hidden md:block"
+        />
+
+        {/* Right: Chat rail / terminal */}
         <section
           aria-label="Conversation"
           className={`research-rail ${mobileView === "chat" ? "flex flex-col" : "hidden"} md:flex md:flex-col`}
@@ -103,79 +161,34 @@ export default function ResearchHub() {
             onConsumeRestore={() => activeId && hub.consumeRestorePrompt(activeId)}
           />
         </section>
+      </div>
 
-        {/* Drag splitter */}
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize conversation panel"
-          aria-valuenow={railWidth}
-          aria-valuemin={RAIL_MIN}
-          aria-valuemax={RAIL_MAX}
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-              e.preventDefault();
-              setRailWidth((w) => clampRail(w + (e.key === "ArrowRight" ? 16 : -16)));
-            }
-          }}
-          onPointerDown={(e) => {
-            (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-            dragState.current = { startX: e.clientX, startWidth: railWidth };
-          }}
-          onPointerMove={(e) => {
-            const drag = dragState.current;
-            if (!drag || e.buttons === 0) return;
-            setRailWidth(clampRail(drag.startWidth + e.clientX - drag.startX));
-          }}
-          onPointerUp={() => {
-            dragState.current = null;
-          }}
-          className="research-splitter"
-        />
-
-        {/* Center: Canvas area with bottom positions bar */}
-        <div className={`research-canvas-wrapper ${mobileView === "results" ? "flex" : "hidden"} md:flex`}>
-          {/* Canvas scroll area */}
-          <section aria-label="Results" className="research-canvas">
-            {!activeChat || !activeId ? (
-              <EmptyResearchState
-                onPick={async (prompt) => {
-                  const chat = await hub.createChat();
-                  await hub.sendPrompt(chat.chat_id, prompt);
-                }}
-              />
-            ) : (
-              <div
-                id={`research-panel-${activeChat.chat_id}`}
-                role="tabpanel"
-                aria-label={`Results for ${activeChat.title}`}
-                className="research-canvas-scroll"
-              >
-                <PanelCanvas
-                  panels={allPanels}
-                  onPanelState={(panelId, state) => hub.setPanelState(activeId, panelId, state)}
-                />
-              </div>
-            )}
-          </section>
-
-          {/* Bottom: Positions bar dock */}
+      {/* ── Lower Section: Trading Terminal (Positions Bar + Buy/Sell Ticket) ── */}
+      <section
+        aria-label="Trading terminal"
+        className={`trading-terminal ${tradingTerminalOpen ? "trading-terminal-open" : "trading-terminal-closed"}`}
+      >
+        {/* Left: Positions dock */}
+        <div className="trading-terminal-positions">
           <PositionsBar
             rows={positions}
             chatTitle={activeChat?.title}
             selectedPosition={selectedPosition}
             onSelectPosition={(pos) => setSelectedPosition(pos)}
+            isOpen={tradingTerminalOpen}
+            onToggleOpen={() => setTradingTerminalOpen((o) => !o)}
           />
         </div>
 
-        {/* Right: Trading / Position view panel */}
-        <TradingPanel
-          selectedPosition={selectedPosition ?? undefined}
-          visible={tradingPanelVisible}
-          onToggle={() => setTradingPanelVisible((v) => !v)}
-        />
-      </div>
+        {/* Right: Buy/Sell Trading Panel */}
+        <div className="trading-terminal-ticket">
+          <TradingPanel
+            selectedPosition={selectedPosition ?? undefined}
+            visible={tradingPanelVisible}
+            onToggle={() => setTradingPanelVisible((v) => !v)}
+          />
+        </div>
+      </section>
     </div>
   );
 }

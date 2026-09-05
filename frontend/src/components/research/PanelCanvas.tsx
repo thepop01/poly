@@ -41,7 +41,6 @@ export default function PanelCanvas({ panels, onPanelState }: PanelCanvasProps) 
             <div
               key={panel.panel_id}
               className={`research-span-${panel.layout.col_span}`}
-              style={{ minHeight: panel.layout.min_height }}
             >
               <PanelFrame panel={panel} onState={onPanelState}>
                 <PanelRenderer panel={panel} />

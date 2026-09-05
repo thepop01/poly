@@ -9,6 +9,8 @@ interface PositionsBarProps {
   chatTitle?: string;
   selectedPosition?: ResearchPosition | null;
   onSelectPosition?: (position: ResearchPosition) => void;
+  isOpen?: boolean;
+  onToggleOpen?: () => void;
 }
 
 type BarTab = "positions" | "orders" | "fills" | "taker";
@@ -49,8 +51,12 @@ export default function PositionsBar({
   chatTitle,
   selectedPosition,
   onSelectPosition,
+  isOpen: controlledOpen,
+  onToggleOpen,
 }: PositionsBarProps) {
-  const [open, setOpen] = useState(true);
+  const [internalOpen, setInternalOpen] = useState(true);
+  const open = controlledOpen !== undefined ? controlledOpen : internalOpen;
+  const toggleOpen = onToggleOpen ?? (() => setInternalOpen((o) => !o));
   const [activeTab, setActiveTab] = useState<BarTab>("positions");
 
   const isSelected = (pos: ResearchPosition) =>
@@ -97,7 +103,7 @@ export default function PositionsBar({
         {/* Collapse toggle */}
         <button
           type="button"
-          onClick={() => setOpen((o) => !o)}
+          onClick={toggleOpen}
           className="positions-collapse-btn ml-auto"
           aria-label={open ? "Collapse positions bar" : "Expand positions bar"}
           title={open ? "Collapse positions" : "Expand positions"}
