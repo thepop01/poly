@@ -2,8 +2,6 @@
 
 import { Suspense } from "react";
 import { usePathname } from "next/navigation";
-import { PanelLeft } from "lucide-react";
-import { useShell } from "./ShellProvider";
 import { WalletTierTabs } from "./wallets/WalletTierTabs";
 
 const PAGE_TITLES: { prefix: string; title: string; description: string }[] = [
@@ -17,9 +15,8 @@ const PAGE_TITLES: { prefix: string; title: string; description: string }[] = [
 
 export default function HeaderBar() {
   const pathname = usePathname();
-  const { toggleSidebar } = useShell();
 
-  if (pathname.startsWith("/wallet/")) {
+  if (pathname.startsWith("/wallet/") || pathname.startsWith("/hub")) {
     return null;
   }
 
@@ -27,14 +24,6 @@ export default function HeaderBar() {
 
   return (
     <header className="h-16 flex-shrink-0 flex items-center gap-4 px-5 border-b border-border bg-background">
-      <button
-        onClick={toggleSidebar}
-        className="p-2 -ml-2 rounded-lg text-subtle hover:text-foreground hover:bg-surface-2 transition-colors cursor-pointer"
-        title="Toggle sidebar"
-      >
-        <PanelLeft size={18} />
-      </button>
-
       <div className="min-w-0 flex-shrink-0">
         <h1 className="text-base font-bold text-foreground leading-tight truncate">
           {page?.title ?? "PolyTracker"}

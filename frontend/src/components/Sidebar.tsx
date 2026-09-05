@@ -10,8 +10,6 @@ import {
   Terminal,
   LayoutDashboard,
   LogOut,
-  ChevronLeft,
-  ChevronRight,
 } from "lucide-react";
 import { useAuth } from "./AuthProvider";
 import { useShell } from "./ShellProvider";
@@ -47,13 +45,13 @@ const NAV_SECTIONS: { title: string; items: NavItem[] }[] = [
 export default function Sidebar() {
   const pathname = usePathname();
   const { token, user, logout } = useAuth();
-  const { collapsed, hovering, toggleSidebar, setHovering } = useShell();
+  const { hovering, setHovering } = useShell();
   const { address, isConnected } = useAccount();
   const { connect, connectors } = useConnect();
   const { disconnect } = useDisconnect();
 
-  // Sidebar visually expands when: not collapsed OR (collapsed but user is hovering)
-  const isExpanded = !collapsed || hovering;
+  // Sidebar always collapses when not hovered, expands on hover
+  const isExpanded = hovering;
 
   const isActive = (item: NavItem) =>
     item.exact ? pathname === item.path : pathname.startsWith(item.path);
@@ -64,10 +62,8 @@ export default function Sidebar() {
       onMouseEnter={() => setHovering(true)}
       onMouseLeave={() => setHovering(false)}
       className={`${
-        isExpanded ? "w-52" : "w-14"
-      } flex-shrink-0 flex flex-col border-r border-border bg-surface overflow-y-auto overflow-x-hidden transition-[width,box-shadow] duration-200 ${
-        collapsed && hovering ? "shadow-xl shadow-black/10 z-30" : ""
-      }`}
+        isExpanded ? "w-52 shadow-xl shadow-black/10 z-30" : "w-14"
+      } flex-shrink-0 flex flex-col border-r border-border bg-surface overflow-y-auto overflow-x-hidden transition-[width,box-shadow] duration-200`}
     >
       {/* Logo */}
       <Link
@@ -207,24 +203,6 @@ export default function Sidebar() {
             {isExpanded && "Login with Discord"}
           </button>
         )}
-
-        {/* Collapse toggle button */}
-        <button
-          onClick={toggleSidebar}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className={`w-full flex items-center gap-2 rounded-lg text-subtle hover:text-foreground hover:bg-surface-2 transition-colors duration-150 cursor-pointer text-xs py-1.5 ${
-            isExpanded ? "px-2 justify-start" : "justify-center p-2"
-          }`}
-        >
-          {collapsed ? (
-            <ChevronRight size={14} />
-          ) : (
-            <>
-              <ChevronLeft size={14} />
-              <span>Collapse</span>
-            </>
-          )}
-        </button>
       </div>
     </aside>
   );

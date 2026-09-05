@@ -543,7 +543,7 @@
 .research-split,
 .research-upper-workspace {
   display: flex;
-  height: calc(100vh - 150px);
+  height: calc(100vh - 86px);
   min-height: 480px;
   flex-shrink: 0;
 }
@@ -721,7 +721,7 @@
   transition: height 0.2s ease, max-height 0.2s ease;
 }
 .trading-terminal-open {
-  height: calc(100vh - 64px);
+  height: 100vh;
   min-height: 500px;
 }
 .trading-terminal-closed {
