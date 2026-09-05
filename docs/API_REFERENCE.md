@@ -433,3 +433,44 @@ These lessons reflect practical verification from real-world trading and indexin
 - **Order Rate Limits**: Token-bucket rate limiting applies to order creation and cancellation (~200 ops/10s). Use batch endpoints (`POST /orders`, `DELETE /orders`, `DELETE /cancel-all`) to conserve quota.
 - **Dead Man's Switch**: For automated market makers, regularly invoke `POST /heartbeats` or set auto-cancel deadlines (`PATCH /v1/trade/auto-cancel` on Perps) to avoid resting stale quotes during network disconnections.
 
+## 12. AI Research Hub API (Internal Platform API)
+
+### Positions Endpoint: `GET /api/v2/research/chats/{chat_id}/positions`
+
+- **URL**: `/api/v2/research/chats/{chat_id}/positions`
+- **Method**: `GET`
+- **Authentication**: Authenticated Bearer token (`get_current_user`). Unauthenticated requests return `401 Unauthorized`.
+- **Authorization & Scoping**:
+  - `chat_id` must belong to the authenticated user (`owner_id = user["sub"]`). Inaccessible or non-existent chat IDs return `404 Not Found` without disclosing existence.
+  - Queries wallets discovered in the authenticated chat's persisted result sets (`entity_type = 'wallet'`). Cross-chat or cross-owner wallets are strictly excluded in SQL.
+- **Query Parameters**:
+  - `offset` (integer, optional, default `0`, minimum `0`): Pagination offset.
+  - `limit` (integer, optional, default `100`, minimum `1`, maximum `200`): Maximum rows returned per page.
+- **Open Positions Predicate**:
+  - Joins to `wallet_positions_v2` and `markets_v2`.
+  - Filters strictly by `COALESCE(p.current_value, 0) > 0` and `COALESCE(p.is_resolved, FALSE) = FALSE`.
+- **Ordering**:
+  - Deterministic: `ORDER BY p.current_value DESC NULLS LAST, p.condition_id, p.outcome, p.address`.
+- **Response Format (`application/json`)**:
+  ```json
+  {
+    "positions": [
+      {
+        "address": "0x...",
+        "condition_id": "0x...",
+        "market_title": "Market title or null",
+        "outcome": "YES",
+        "size": 25.0,
+        "avg_price": 0.5,
+        "current_value": 12.5,
+        "unrealized_pnl": 2.5,
+        "entry_at": "2026-09-01T12:00:00Z",
+        "computed_at": "2026-09-06T00:00:00Z"
+      }
+    ],
+    "offset": 0,
+    "limit": 100
+  }
+  ```
+
+

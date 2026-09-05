@@ -14,7 +14,9 @@ For day-to-day operation, start with the [Operations Runbook](rule.md). It conta
 - **Exact/all coverage:** “all of them” requires `distinct_wallet_count = input_result_set.row_count` (coverage exactly 100%). “Most” is never substituted silently.
 - **Eligible history:** historical same-market/same-outcome analysis uses only `wallet_closed_positions_v2.metrics_eligible = TRUE`; open rows join only when explicitly requested, and each row carries its source.
 - **Outcome labels:** consensus groups by the market's stored outcome label. Binary markets may summarize as YES/NO; multi-outcome markets retain actual labels. Historical overlap is descriptive and never labels wallets coordinated/copied/collusive.
-- **No fabrication:** monetary and win-rate values come from database fields only. The model explains values but never invents, rescales, or repairs them.
+- **No fabrication:** monetary and win-rate values come from database fields only. The model explains values but never invents, rescales, or repairs them. Missing database fields render as em dash (`—`).
+- **Chat-scoped open positions:** Positions shown in the Research Hub dock are strictly read-only and derived from `wallet_positions_v2` joined via `research_result_members` for wallet entities persisted in the active authenticated chat (`COALESCE(current_value, 0) > 0` AND `COALESCE(is_resolved, FALSE) = FALSE`). Cross-chat or cross-owner wallets are excluded.
+- **Mock trading ticket boundary:** The right-hand trading panel in the Research Hub is strictly a frontend UI prototype/mock ticket. It makes no network requests, does not connect to any exchange, CLOB, or execution broker, does not sign transactions, and places no live orders. Displayed mock prices, balances, expiration dates, and estimated returns are illustrative only and not authoritative financial quotes.
 
 ---
 
