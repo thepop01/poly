@@ -131,9 +131,15 @@ class ResearchOrchestrator:
     ) -> AsyncIterator[StreamEvent]:
         """Execute one conversational run, yielding NDJSON-ready stream events."""
         events: list[StreamEvent] = []
+        chat = await self.repo.get_chat(owner_id, chat_id)
+        if chat is None:
+            # Chat missing or not owned; nothing to stream against.
+            return
+        workspace_id = chat.workspace_id
         run = await self.repo.create_run(owner_id, chat_id, prompt)
         if run is None:
-            # Chat missing or not owned; nothing to stream against.
+            # The chat may have been removed between the ownership check and
+            # run creation; do not stream against a missing chat.
             return
         run_id = run.run_id
         terminal_sent = False
@@ -310,7 +316,7 @@ class ResearchOrchestrator:
                         snapshot_at=result_set.snapshot_at.isoformat(),
                         summary=result_set.summary))
                     panel = await self._upsert_panel(
-                        owner_id, chat_id, tool.name, validated_args,
+                        owner_id, workspace_id, chat_id, tool.name, validated_args,
                         execution.panel_type, result_set)
                     events.append(self._event(
                         run_id, "panel.upserted", panel=panel.model_dump(mode="json")))
@@ -342,7 +348,8 @@ class ResearchOrchestrator:
     async def _upsert_panel(
         self,
         owner_id: str,
-        chat_id: UUID,
+        workspace_id: UUID,
+        source_chat_id: UUID,
         tool_name: str,
         args: BaseModel,
         panel_type: PanelType,
@@ -350,7 +357,10 @@ class ResearchOrchestrator:
     ) -> Any:
         key = panel_key(tool_name, args)
         defaults = PANEL_DEFAULTS[panel_type.value]
-        existing = await self.repo.list_panels(owner_id, chat_id)
+        existing = await self.repo.list_workspace_panels(owner_id, workspace_id)
+        if existing is None:
+            # Workspace ownership was revoked between run start and upsert.
+            raise RuntimeError("workspace not found")
         order = len(existing)
         for panel in existing:
             if panel.panel_key == key:
@@ -368,8 +378,8 @@ class ResearchOrchestrator:
             "snapshot_at": result_set.snapshot_at.isoformat(),
         }
         panel = await self.repo.upsert_panel(
-            owner_id, chat_id, key, panel_type.value, result_set.label,
-            result_set.result_set_id, layout, config,
+            owner_id, workspace_id, source_chat_id, key, panel_type.value,
+            result_set.label, result_set.result_set_id, layout, config,
         )
         assert panel is not None
         return panel

@@ -199,6 +199,114 @@ async def test_run_with_tool_creates_panel_and_pages(api_pool, user_a):
 
 
 @pytest.mark.asyncio
+async def test_workspace_canvas_is_shared_across_chats(api_pool, user_a):
+    async with _client(user_a["token"]) as client:
+        workspace = (await client.post(
+            "/api/v2/research/workspaces", json={"name": "Shared canvas"}
+        )).json()
+        workspace_id = workspace["workspace_id"]
+        first_chat = (await client.post(
+            "/api/v2/research/chats",
+            json={"workspace_id": workspace_id, "title": "First analysis"},
+        )).json()
+        second_chat = (await client.post(
+            "/api/v2/research/chats",
+            json={"workspace_id": workspace_id, "title": "Second analysis"},
+        )).json()
+
+        # Different limits create independent immutable result snapshots while
+        # panel_key intentionally ignores limit and therefore remains stable.
+        _script([
+            ModelAction(kind="tool_call", tool_name="find_wallets", arguments={"limit": 3}),
+            ModelAction(kind="answer", text="First result."),
+        ])
+        first_response = await client.post(
+            f"/api/v2/research/chats/{first_chat['chat_id']}/runs",
+            json={"prompt": "find wallets"},
+        )
+        first_events = _events(first_response)
+        assert _terminal(first_events)["type"] == "run.completed"
+        first_result_id = next(
+            event["data"]["result_set_id"]
+            for event in first_events if event["type"] == "result.created"
+        )
+        first_panel_event = next(
+            event for event in first_events if event["type"] == "panel.upserted"
+        )
+        assert first_panel_event["data"]["panel"]["workspace_id"] == workspace_id
+        assert first_panel_event["data"]["panel"]["source_chat_id"] == first_chat["chat_id"]
+
+        first_panels = (await client.get(
+            f"/api/v2/research/workspaces/{workspace_id}/panels"
+        )).json()["panels"]
+        assert len(first_panels) == 1
+        panel_id = first_panels[0]["panel_id"]
+        panel_key = first_panels[0]["panel_key"]
+        moved = await client.patch(
+            f"/api/v2/research/panels/{panel_id}",
+            json={"floating": {"x": 24, "y": 48, "width": 640, "height": 480}},
+        )
+        assert moved.status_code == 200
+
+        _script([
+            ModelAction(kind="tool_call", tool_name="find_wallets", arguments={"limit": 5}),
+            ModelAction(kind="answer", text="Second result."),
+        ])
+        second_response = await client.post(
+            f"/api/v2/research/chats/{second_chat['chat_id']}/runs",
+            json={"prompt": "find wallets"},
+        )
+        second_events = _events(second_response)
+        assert _terminal(second_events)["type"] == "run.completed"
+        second_result_id = next(
+            event["data"]["result_set_id"]
+            for event in second_events if event["type"] == "result.created"
+        )
+        assert second_result_id != first_result_id
+        second_panel_event = next(
+            event for event in second_events if event["type"] == "panel.upserted"
+        )
+        assert second_panel_event["data"]["panel"]["panel_id"] == panel_id
+        assert second_panel_event["data"]["panel"]["panel_key"] == panel_key
+        assert second_panel_event["data"]["panel"]["workspace_id"] == workspace_id
+        assert second_panel_event["data"]["panel"]["source_chat_id"] == second_chat["chat_id"]
+
+        panels = (await client.get(
+            f"/api/v2/research/workspaces/{workspace_id}/panels"
+        )).json()["panels"]
+        assert len(panels) == 1
+        assert panels[0]["panel_id"] == panel_id
+        assert panels[0]["workspace_id"] == workspace_id
+        assert panels[0]["source_chat_id"] == second_chat["chat_id"]
+        assert panels[0]["layout"]["floating"] == {
+            "x": 24, "y": 48, "width": 640, "height": 480,
+        }
+
+        first_results = (await client.get(
+            f"/api/v2/research/chats/{first_chat['chat_id']}/results"
+        )).json()["results"]
+        second_results = (await client.get(
+            f"/api/v2/research/chats/{second_chat['chat_id']}/results"
+        )).json()["results"]
+        assert [result["result_set_id"] for result in first_results] == [first_result_id]
+        assert [result["result_set_id"] for result in second_results] == [second_result_id]
+        first_messages = (await client.get(
+            f"/api/v2/research/chats/{first_chat['chat_id']}/messages"
+        )).json()["messages"]
+        second_messages = (await client.get(
+            f"/api/v2/research/chats/{second_chat['chat_id']}/messages"
+        )).json()["messages"]
+        assert [message["content"] for message in first_messages] == [
+            "find wallets", "First result."
+        ]
+        assert [message["content"] for message in second_messages] == [
+            "find wallets", "Second result."
+        ]
+        assert first_messages[0]["chat_id"] == first_chat["chat_id"]
+        assert second_messages[0]["chat_id"] == second_chat["chat_id"]
+
+
+@pytest.mark.asyncio
 async def test_run_failure_is_single_terminal_event(api_pool, user_a):
     _script([ModelAction(kind="tool_call", tool_name="nope", arguments={})])
     async with _client(user_a["token"]) as client:
