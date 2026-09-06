@@ -16,8 +16,6 @@ export const PANEL_DEFAULTS: Record<PanelType, Pick<PanelLayout, "col_span" | "m
 
 interface PanelCanvasProps {
   workspaceId?: string | null;
-  /** @deprecated Use workspaceId; retained for older callers. */
-  chatId?: string | null;
   panels: ResearchPanel[];
   onPanelState: (panelId: string, state: ResearchPanel["state"]) => void;
   onSaveMutation?: (panelId: string, mutation: PanelMutation) => Promise<ResearchPanel | null>;
@@ -25,7 +23,6 @@ interface PanelCanvasProps {
 
 export default function PanelCanvas({
   workspaceId,
-  chatId,
   panels,
   onPanelState,
   onSaveMutation,
@@ -67,7 +64,7 @@ export default function PanelCanvas({
   }, []);
 
   const layout = usePanelLayout({
-    workspaceId: workspaceId ?? chatId ?? "default",
+    workspaceId: workspaceId ?? "default",
     panels,
     stageWidth,
     onSaveMutation:

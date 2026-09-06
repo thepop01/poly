@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import PanelCanvas from "@/components/research/PanelCanvas";
 import type { PanelType, ResearchPanel } from "@/types/research";
@@ -14,7 +14,8 @@ const mockedGetResultPage = vi.mocked(getResultPage);
 function panel(id: string, type: PanelType, overrides = {}): ResearchPanel {
   return {
     panel_id: id,
-    chat_id: "chat-1",
+    workspace_id: "workspace-1",
+    source_chat_id: "chat-1",
     result_set_id: `rs-${id}`,
     panel_type: type,
     panel_key: `key-${id}`,
@@ -106,6 +107,45 @@ describe("PanelCanvas", () => {
     const frames = screen.getAllByTestId("panel-w");
     expect(frames).toHaveLength(1);
     expect(within(frames[0]).getByText("Title w v2")).toBeInTheDocument();
+  });
+
+  it("preserves active geometry when the parent chat changes within a workspace", async () => {
+    const onState = vi.fn();
+    const first = panel("w", "wallet_table");
+    function Harness({ chatId }: { chatId: string }) {
+      return <div data-chat={chatId}><PanelCanvas workspaceId="workspace-1" panels={[first]} onPanelState={onState} /></div>;
+    }
+    const { rerender } = render(<Harness chatId="chat-1" />);
+    const frame = await screen.findByTestId("panel-w");
+    await userEvent.setup().click(frame);
+    const moveGrip = screen.getByRole("button", { name: "Move Title w" });
+    fireEvent.keyDown(moveGrip, { key: "ArrowRight" });
+    const floating = frame.parentElement!;
+    const transformBefore = floating.style.transform;
+    expect(frame).toHaveClass("research-panel-active");
+
+    rerender(<Harness chatId="chat-2" />);
+
+    expect(screen.getByTestId("panel-w")).toBe(frame);
+    expect(screen.getByTestId("panel-w")).toHaveClass("research-panel-active");
+    expect(floating.style.transform).toBe(transformBefore);
+  });
+
+  it("resets transient active geometry when the workspace changes", async () => {
+    const onState = vi.fn();
+    const first = panel("w", "wallet_table");
+    const { rerender } = render(<PanelCanvas workspaceId="workspace-1" panels={[first]} onPanelState={onState} />);
+    const frame = await screen.findByTestId("panel-w");
+    await userEvent.setup().click(frame);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Move Title w" }), { key: "ArrowRight" });
+    const movedTransform = frame.parentElement!.style.transform;
+    expect(frame).toHaveClass("research-panel-active");
+
+    rerender(<PanelCanvas workspaceId="workspace-2" panels={[first]} onPanelState={onState} />);
+
+    const nextFrame = screen.getByTestId("panel-w");
+    expect(nextFrame).not.toHaveClass("research-panel-active");
+    expect(nextFrame.parentElement!.style.transform).not.toBe(movedTransform);
   });
 
   it("hides closed panels but keeps them restorable", async () => {
@@ -216,4 +256,66 @@ describe("PanelCanvas", () => {
     expect(zW2).toBeGreaterThan(zM2);
     expect(panelW).toHaveClass("research-panel-active");
   });
+
+  it("renders toolbar with Reset layout and triggers layout reset", async () => {
+    const onState = vi.fn();
+    const onSaveMutation = vi.fn().mockResolvedValue({ success: true });
+    const user = userEvent.setup();
+
+    render(
+      <PanelCanvas
+        workspaceId="workspace-1"
+        panels={[panel("w", "wallet_table"), panel("m", "market_table")]}
+        onPanelState={onState}
+        onSaveMutation={onSaveMutation}
+      />,
+    );
+
+    const resetBtn = await screen.findByTestId("reset-layout-btn");
+    expect(resetBtn).toBeInTheDocument();
+
+    await user.click(resetBtn);
+    expect(onSaveMutation).toHaveBeenCalled();
+  });
+
+  it("displays save error banner when onSaveMutation fails", async () => {
+    const onState = vi.fn();
+    const onSaveMutation = vi.fn().mockRejectedValue(new Error("Network failure"));
+    const user = userEvent.setup();
+
+    render(
+      <PanelCanvas
+        workspaceId="workspace-1"
+        panels={[panel("w", "wallet_table")]}
+        onPanelState={onState}
+        onSaveMutation={onSaveMutation}
+      />,
+    );
+
+    const resetBtn = await screen.findByTestId("reset-layout-btn");
+    await user.click(resetBtn);
+
+    const errorBanner = await screen.findByTestId("layout-save-error");
+    expect(errorBanner).toBeInTheDocument();
+    expect(within(errorBanner).getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it("falls back to stacked layout when viewport is narrow", async () => {
+    const originalInnerWidth = window.innerWidth;
+    window.innerWidth = 500;
+    try {
+      const onState = vi.fn();
+      render(
+        <PanelCanvas
+          panels={[panel("w", "wallet_table")]}
+          onPanelState={onState}
+        />,
+      );
+      expect(screen.getByTestId("stacked-canvas")).toBeInTheDocument();
+      expect(screen.queryByTestId("floating-stage")).toBeNull();
+    } finally {
+      window.innerWidth = originalInnerWidth;
+    }
+  });
 });
+
