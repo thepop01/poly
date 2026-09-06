@@ -212,9 +212,11 @@ export function useResearchHub() {
         const workspaceId = panel.workspace_id ?? workspaceByChatRef.current[chatId];
         if (!workspaceId) break;
         setPanelsByWorkspace((p) => {
-          const existing = p[workspaceId] ?? [];
+          const existing = p[workspaceId] ?? panelsRef.current[workspaceId] ?? [];
           const index = existing.findIndex((x) => x.panel_id === panel.panel_id);
-          return { ...p, [workspaceId]: index >= 0 ? existing.map((x, i) => i === index ? panel : x) : [...existing, panel] };
+          const next = index >= 0 ? existing.map((x, i) => i === index ? panel : x) : [...existing, panel];
+          panelsRef.current[workspaceId] = next;
+          return { ...p, [workspaceId]: next };
         }); break;
       }
       case "assistant.delta": setStreamingTextByChat((p) => ({ ...p, [chatId]: `${p[chatId] ?? ""}${String(event.data.text ?? "")}` })); break;

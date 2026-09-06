@@ -77,6 +77,19 @@ test("ignores stale overlapping workspace selections", async () => {
   expect(result.current.activeChatId).toBe("chat-b");
 });
 
+test("keeps streamed panels when a later mutation runs", async () => {
+  const { result } = renderHook(() => useResearchHub());
+  await waitFor(() => expect(result.current.activeChatId).toBe("chat-a"));
+  mocked.streamResearchRun.mockImplementationOnce(async (_id, _prompt, onEvent) => {
+    onEvent({ type: "panel.upserted", run_id: "run", data: { panel: panel("panel-2") } });
+    onEvent({ type: "run.completed", run_id: "run", data: {} });
+  });
+  await act(async () => { await result.current.sendPrompt("chat-a", "hello"); });
+  mocked.patchPanel.mockResolvedValueOnce({ ...panel("panel-1"), state: "minimized" });
+  await act(async () => { await result.current.mutatePanel("workspace-1", "panel-1", { state: "minimized" }); });
+  expect(result.current.panelsByWorkspace["workspace-1"].map((item) => item.panel_id)).toEqual(["panel-1", "panel-2"]);
+});
+
 test("serializes concurrent panel mutations without stale rollback", async () => {
   const first = deferred<ResearchPanel>();
   const second = deferred<ResearchPanel>();
