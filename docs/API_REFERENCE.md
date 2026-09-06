@@ -508,5 +508,3 @@ All Research Hub endpoints require the authenticated bearer identity. Workspace,
   - When background runs stream fresh analytical snapshots via `upsert_panel`, existing user geometry (`layout`) is strictly preserved (does not overwrite `layout`).
 - **Response Format (`application/json`)**: Full `ResearchPanel` object with updated `state` and `layout`.
 
-
-
