@@ -156,6 +156,13 @@ class ResearchRepository:
     ) -> ResearchChat:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                if workspace_id is None:
+                    # Serialize default-workspace selection/creation per owner so
+                    # concurrent first chats cannot create duplicate canvases.
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+                        owner_id,
+                    )
                 if workspace_id is not None:
                     owns = await conn.fetchval(
                         "SELECT 1 FROM research_workspaces WHERE workspace_id = $1 AND owner_id = $2::uuid",
@@ -195,9 +202,13 @@ class ResearchRepository:
         async with self.pool.acquire() as conn:
             if include_archived:
                 rows = await conn.fetch(
-                    """SELECT chat_id, workspace_id, title, is_archived, created_at, updated_at
-                       FROM research_chats WHERE owner_id = $1::uuid
-                       ORDER BY updated_at DESC LIMIT $2""",
+                    """SELECT c.chat_id, c.workspace_id, c.title, c.is_archived, c.created_at, c.updated_at
+                       FROM research_chats c
+                       WHERE c.owner_id = $1::uuid
+                         AND (c.is_archived = FALSE OR EXISTS (
+                             SELECT 1 FROM research_messages m WHERE m.chat_id = c.chat_id
+                         ))
+                       ORDER BY c.updated_at DESC LIMIT $2""",
                     owner_id, limit,
                 )
             else:
@@ -233,6 +244,17 @@ class ResearchRepository:
         self, owner_id: str, chat_id: UUID, is_archived: bool = True
     ) -> ResearchChat | None:
         async with self.pool.acquire() as conn:
+            if is_archived:
+                has_msgs = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM research_messages WHERE chat_id = $1)",
+                    chat_id,
+                )
+                if not has_msgs:
+                    await conn.execute(
+                        "DELETE FROM research_chats WHERE chat_id = $1 AND owner_id = $2::uuid",
+                        chat_id, owner_id,
+                    )
+                    return None
             row = await conn.fetchrow(
                 """UPDATE research_chats
                    SET is_archived = $3, updated_at = NOW()
@@ -448,18 +470,10 @@ class ResearchRepository:
         config: dict[str, Any] | None = None,
     ) -> ResearchPanel | None:
         # Accept the pre-workspace call shape while callers migrate: (owner, chat_id,
-        # panel_key, panel_type, title, result_set_id, layout, config).
-        if not isinstance(workspace_id, UUID):
-            try:
-                workspace_id = UUID(str(workspace_id))
-            except (TypeError, ValueError):
-                pass
-        if source_chat_id is not None and not isinstance(source_chat_id, UUID):
-            try:
-                source_chat_id = UUID(str(source_chat_id))
-            except (TypeError, ValueError):
-                pass
-        legacy_call = source_chat_id is not None and not isinstance(source_chat_id, UUID)
+        # panel_key, panel_type, title, result_set_id, layout, config). The legacy
+        # layout occupies the new result_set_id slot, so inspect that slot before
+        # coercing any string: panel keys may themselves be UUID-shaped strings.
+        legacy_call = isinstance(result_set_id, dict)
         if legacy_call:
             legacy_chat_id = workspace_id
             legacy_panel_key = source_chat_id
@@ -492,8 +506,15 @@ class ResearchRepository:
                    SELECT $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb
                    FROM research_workspaces w
                    LEFT JOIN research_chats c ON c.chat_id = $2
+                   LEFT JOIN research_result_sets rs ON rs.result_set_id = $3
+                   LEFT JOIN research_chats rs_chat ON rs_chat.chat_id = rs.chat_id
                    WHERE w.workspace_id = $1 AND w.owner_id = $9::uuid
                      AND ($2 IS NULL OR (c.owner_id = $9::uuid AND c.workspace_id = $1))
+                     AND ($3 IS NULL OR (
+                         rs.result_set_id IS NOT NULL
+                         AND rs_chat.owner_id = $9::uuid
+                         AND rs_chat.workspace_id = $1
+                     ))
                    ON CONFLICT (workspace_id, panel_key) DO UPDATE SET
                        source_chat_id = EXCLUDED.source_chat_id,
                        result_set_id = EXCLUDED.result_set_id,

@@ -44,12 +44,80 @@ async def test_chat_create_rename_archive_roundtrip(test_pool, two_users):
     renamed = await repo.rename_chat(two_users.first, chat.chat_id, "T20 deep dive")
     assert renamed is not None and renamed.title == "T20 deep dive"
     assert await repo.rename_chat(two_users.second, chat.chat_id, "Hijacked") is None
+    await repo.add_message(two_users.first, chat.chat_id, "user", "keep this chat")
 
     archived = await repo.archive_chat(two_users.first, chat.chat_id, True)
     assert archived is not None and archived.is_archived is True
     assert await repo.list_chats(two_users.first) == []
     reopened = await repo.list_chats(two_users.first, include_archived=True)
     assert [c.chat_id for c in reopened] == [chat.chat_id]
+
+
+@pytest.mark.asyncio
+async def test_archiving_empty_chat_deletes_it_and_archived_list_excludes_empty(test_pool, two_users):
+    repo = ResearchRepository(test_pool)
+    empty = await repo.create_chat(two_users.first, "Empty")
+    assert await repo.archive_chat(two_users.first, empty.chat_id, True) is None
+    assert await repo.get_chat(two_users.first, empty.chat_id) is None
+
+    with_message = await repo.create_chat(two_users.first, "With message")
+    await repo.add_message(two_users.first, with_message.chat_id, "user", "hello")
+    archived = await repo.archive_chat(two_users.first, with_message.chat_id, True)
+    assert archived is not None and archived.is_archived
+
+    unarchived_empty = await repo.create_chat(two_users.first, "Unarchived empty")
+    listed = await repo.list_chats(two_users.first, include_archived=True)
+    listed_ids = [chat.chat_id for chat in listed]
+    assert with_message.chat_id in listed_ids
+    assert unarchived_empty.chat_id in listed_ids
+    assert empty.chat_id not in listed_ids
+
+
+@pytest.mark.asyncio
+async def test_concurrent_default_chats_share_one_workspace(test_pool, two_users):
+    import asyncio
+
+    repo = ResearchRepository(test_pool)
+    chats = await asyncio.gather(
+        repo.create_chat(two_users.first, "First"),
+        repo.create_chat(two_users.first, "Second"),
+    )
+    assert chats[0].workspace_id == chats[1].workspace_id
+    workspaces = await repo.list_workspaces(two_users.first)
+    assert len(workspaces) == 1
+
+
+@pytest.mark.asyncio
+async def test_panel_result_set_must_belong_to_workspace_owner(test_pool, two_users):
+    repo = ResearchRepository(test_pool)
+    first_workspace = await repo.create_workspace(two_users.first, "First")
+    second_workspace = await repo.create_workspace(two_users.second, "Second")
+    first_chat = await repo.create_chat(two_users.first, "First chat", first_workspace.workspace_id)
+    second_chat = await repo.create_chat(two_users.second, "Second chat", second_workspace.workspace_id)
+    result = await repo.save_result_set(
+        two_users.second, second_chat.chat_id, "wallet_set", "Other", {}, [],
+    )
+    assert result is not None
+    panel = await repo.upsert_panel(
+        two_users.first, first_workspace.workspace_id, first_chat.chat_id, "foreign-result",
+        "wallet_table", "Foreign", result.result_set_id,
+        {"col_span": 12, "min_height": 420, "order": 0},
+    )
+    assert panel is None
+
+
+@pytest.mark.asyncio
+async def test_uuid_shaped_legacy_panel_key_is_preserved(test_pool, two_users):
+    repo = ResearchRepository(test_pool)
+    chat = await repo.create_chat(two_users.first, "UUID panel key")
+    panel_key = str(uuid.uuid4())
+    panel = await repo.upsert_panel(
+        two_users.first, chat.chat_id, panel_key, "wallet_table", "Wallets", None,
+        {"col_span": 12, "min_height": 420, "order": 0},
+    )
+    assert panel is not None
+    assert panel.panel_key == panel_key
+    assert panel.source_chat_id == chat.chat_id
 
 
 @pytest.mark.asyncio
