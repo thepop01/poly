@@ -24,6 +24,8 @@ import {
   listWorkspacePanels,
   listWorkspaceTabs,
   listWorkspaces,
+  patchWorkspace,
+  deleteWorkspace as removeWorkspace,
   patchChat,
   patchPanel,
   streamResearchRun,
@@ -114,7 +116,7 @@ export function useResearchHub() {
     const open = all.filter((c) => !c.is_archived);
     const current = selectId !== undefined ? selectId : activeIdRef.current;
     const next = current && open.some((c) => c.chat_id === current) ? current : open[0]?.chat_id ?? null;
-    const workspaceId = next ? all.find((c) => c.chat_id === next)?.workspace_id : ws[0]?.workspace_id ?? null;
+    const workspaceId = (next ? all.find((c) => c.chat_id === next)?.workspace_id : undefined) ?? ws[0]?.workspace_id ?? null;
     activeIdRef.current = next;
     activeWorkspaceRef.current = workspaceId;
     setActiveChatId(next);
@@ -296,6 +298,11 @@ export function useResearchHub() {
 
   const setPanelState = useCallback(async (workspaceId: string, panelId: string, state: ResearchPanel["state"]) => { await mutatePanel(workspaceId, panelId, { state }); }, [mutatePanel]);
 
+  const renameWorkspace = useCallback(async (workspaceId: string, name: string) => {
+    const updated = await patchWorkspace(workspaceId, { name });
+    setWorkspaces((previous) => previous.map((workspace) => workspace.workspace_id === workspaceId ? updated : workspace));
+  }, []);
+
   const selectWorkspace = useCallback(async (workspaceId: string) => {
     const version = ++workspaceSelectionVersion.current;
     await refreshWorkspaceData(workspaceId);
@@ -315,12 +322,28 @@ export function useResearchHub() {
     activate(created.chat_id);
   }, [activate, refreshWorkspaceData]);
 
+  const createWorkspaceAndSelect = useCallback(async () => {
+    const workspace = await createWorkspace("New workspace");
+    setWorkspaces((previous) => [...previous, workspace]);
+    await selectWorkspace(workspace.workspace_id);
+    return workspace;
+  }, [selectWorkspace]);
+
+  const deleteWorkspace = useCallback(async (workspaceId: string) => {
+    await removeWorkspace(workspaceId);
+    const remaining = workspaces.filter((workspace) => workspace.workspace_id !== workspaceId);
+    setWorkspaces(remaining);
+    if (activeWorkspaceRef.current === workspaceId && remaining[0]) {
+      await selectWorkspace(remaining[0].workspace_id);
+    }
+  }, [selectWorkspace, workspaces]);
+
   return {
     chats: openChats, archivedChats, activeChatId, loading, workspaces, activeWorkspaceId, tabsByWorkspace, panelsByWorkspace,
     messagesByChat, resultsByChat, busyByChat, statusByChat, errorByChat, streamingTextByChat, restorePromptByChat,
     resultsForChat: (chatId: string) => resultsByChat[chatId] ?? EMPTY_RESULTS,
     positionsByChat, positionsForChat: (chatId: string | null) => chatId ? positionsByChat[chatId] ?? EMPTY_POSITIONS : EMPTY_POSITIONS,
-    selectChat, selectWorkspace, createChat: handleCreateChat, renameChat: handleRenameChat, closeChat: handleCloseChat,
+    selectChat, selectWorkspace, renameWorkspace, deleteWorkspace, createWorkspace: createWorkspaceAndSelect, createChat: handleCreateChat, renameChat: handleRenameChat, closeChat: handleCloseChat,
     reopenChat: handleReopenChat, deleteChat: handleDeleteChat, refreshChatData, refreshWorkspaceData, reloadChats, sendPrompt,
     stopRun, consumeRestorePrompt, setPanelState, mutatePanel, getResultPage,
   };

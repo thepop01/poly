@@ -498,38 +498,90 @@
   font-size: 13px;
   font-weight: 500;
   color: var(--color-text-2);
+  background-color: transparent;
   cursor: pointer;
-  white-space: nowrap;
+  transition: all 0.15s ease;
+  position: relative;
+  user-select: none;
 }
 .research-tab:hover {
   background-color: var(--color-surface-2);
+  color: var(--color-text);
 }
 .research-tab-active {
-  color: var(--color-primary);
-  border-color: rgba(5, 150, 105, 0.35);
-  background-color: var(--color-primary-dim);
-  font-weight: 600;
+  background-color: var(--color-surface-2);
+  color: var(--color-text);
+  border-color: var(--color-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
-.research-tab-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
+.research-tab-active::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-color: var(--color-primary);
+  border-radius: 2px 2px 0 0;
 }
-.research-tab-icon-btn {
+.research-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.research-tab-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  font-size: 13px;
-  line-height: 1;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
   color: var(--color-text-3);
+  transition: all 0.15s ease;
 }
-.research-tab-icon-btn:hover {
+.research-tab-close:hover {
   background-color: var(--color-surface-3);
   color: var(--color-text);
 }
+
+.research-new-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  color: var(--color-text-3);
+  transition: all 0.15s ease;
+}
+.research-new-tab-btn:hover {
+  background-color: var(--color-surface-3);
+  color: var(--color-text);
+}
+
+.research-canvas-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 6px 12px;
+  overflow-x: auto;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+.research-workspace-selector { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.research-control-label { color: var(--color-text-3); font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.research-workspace-select { min-width: 150px; max-width: 240px; padding: 5px 8px; border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-surface); color: var(--color-text); font-size: 13px; }
+.research-workspace-action { padding: 4px 7px; border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-surface); color: var(--color-text-2); font-size: 11px; cursor: pointer; }
+.research-workspace-action:hover:not(:disabled) { background: var(--color-surface-2); color: var(--color-text); }
+.research-workspace-action:disabled { cursor: not-allowed; opacity: 0.5; }
+.research-workspace-rename { display: flex; gap: 4px; align-items: center; }
+.research-workspace-rename input { width: 130px; padding: 4px 6px; border: 1px solid var(--color-border); border-radius: var(--radius); }
+.research-canvas-tabs { display: flex; align-items: center; gap: 2px; min-width: max-content; overflow-x: auto; }
+.research-canvas-tab { padding: 6px 10px; border: 1px solid transparent; border-radius: var(--radius); color: var(--color-text-3); background: transparent; font-size: 12px; cursor: pointer; }
+.research-canvas-tab:hover { background: var(--color-surface-2); color: var(--color-text); }
+.research-canvas-tab-active { color: var(--color-text); background: var(--color-surface-2); border-color: var(--color-border); }
+.research-canvas-tabs-loading { color: var(--color-text-3); font-size: 11px; white-space: nowrap; }
 
 .research-view-switch {
   display: none;
@@ -540,12 +592,23 @@
   flex-shrink: 0;
 }
 
-.research-split,
-.research-upper-workspace {
+.research-split {
   display: flex;
   height: calc(100vh - 86px);
   min-height: 480px;
   flex-shrink: 0;
+}
+
+.research-upper-workspace {
+  display: flex;
+  height: calc(100vh - 86px);
+  min-height: 520px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.research-upper-workspace.research-upper-collapsed {
+  display: none !important;
 }
 
 .research-rail {
@@ -558,13 +621,42 @@
 
 .research-splitter {
   flex-shrink: 0;
-  width: 6px;
+  width: 14px;
+  margin-left: -7px;
+  margin-right: -7px;
   cursor: col-resize;
   background-color: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 30;
+  user-select: none;
+  touch-action: none;
 }
+
+/* Central pill grip: distinct size & shape (not a full-height column like the scrollbar) */
+.research-splitter-grip {
+  width: 4px;
+  height: 48px;
+  border-radius: 9999px;
+  background-color: var(--color-border);
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.research-splitter:hover .research-splitter-grip,
+.research-splitter:focus-visible .research-splitter-grip,
+.research-splitter.research-splitter-active .research-splitter-grip {
+  background-color: var(--color-primary);
+  height: 64px;
+  width: 6px;
+  box-shadow: 0 0 12px rgba(5, 150, 105, 0.45);
+}
+
 .research-splitter:hover,
-.research-splitter:focus-visible {
-  background-color: rgba(5, 150, 105, 0.3);
+.research-splitter:focus-visible,
+.research-splitter.research-splitter-active {
+  background-color: transparent;
 }
 
 .research-canvas {
@@ -582,6 +674,25 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+
+.research-canvas-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.research-canvas-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.research-canvas-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--color-border);
+  border-radius: 9999px;
+}
+
+.research-canvas-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-subtle);
 }
 
 .research-canvas-body {
@@ -658,12 +769,66 @@
   border-bottom: 1px solid var(--color-border);
   background-color: var(--color-surface-2);
 }
+
+/* Isolated Floating Canvas Stage */
+.research-canvas-stage {
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  min-height: 100%;
+}
+
+.research-panel-floating {
+  position: absolute;
+  box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.08), 0 2px 6px -1px rgba(0, 0, 0, 0.04);
+}
+
+.research-panel-resize-bottom {
+  position: absolute;
+  left: 0;
+  right: 14px;
+  bottom: 0;
+  height: 6px;
+  cursor: ns-resize;
+  touch-action: none;
+  z-index: 20;
+  transition: background-color 0.15s ease;
+}
+.research-panel-resize-bottom:hover,
+.research-panel-resize-bottom:focus-visible {
+  background-color: rgba(5, 150, 105, 0.4);
+}
+
+.research-panel-resize-corner {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  touch-action: none;
+  z-index: 21;
+}
+.research-panel-resize-corner::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid var(--color-border);
+  border-bottom: 2px solid var(--color-border);
+  transition: border-color 0.15s ease;
+}
+.research-panel-resize-corner:hover::after,
+.research-panel-resize-corner:focus-visible::after {
+  border-color: var(--color-primary);
+}
+
 .research-panel-body {
-  min-height: 160px;
-  max-height: 850px;
+  min-height: 120px;
   overflow-y: auto;
   overflow-x: auto;
-  resize: vertical;
 }
 .research-panel-move-btn {
   display: inline-flex;
@@ -761,40 +926,6 @@
   30% { transform: translateY(-4px); opacity: 1; }
 }
 
-.research-horizontal-splitter {
-  flex-shrink: 0;
-  height: 9px;
-  cursor: row-resize;
-  background-color: var(--color-surface);
-  border-top: 1px solid var(--color-border);
-  border-bottom: 1px solid var(--color-border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  z-index: 30;
-  transition: background-color 0.15s ease;
-  user-select: none;
-  touch-action: none;
-}
-.research-horizontal-splitter:hover,
-.research-horizontal-splitter:focus-visible,
-.research-horizontal-splitter.research-splitter-active {
-  background-color: rgba(5, 150, 105, 0.15);
-}
-.research-horizontal-splitter-grip {
-  width: 52px;
-  height: 4px;
-  border-radius: 2px;
-  background-color: var(--color-border);
-  transition: background-color 0.15s ease, width 0.15s ease;
-}
-.research-horizontal-splitter:hover .research-horizontal-splitter-grip,
-.research-horizontal-splitter.research-splitter-active .research-horizontal-splitter-grip {
-  background-color: var(--color-primary);
-  width: 72px;
-}
-
 /* ------------------------------------------------------------
    TRADING TERMINAL (POSITIONS + BUY/SELL TICKET)
    ------------------------------------------------------------ */
@@ -806,19 +937,21 @@
   flex-shrink: 0;
   position: relative;
   z-index: 10;
-  transition: height 0.2s ease, max-height 0.2s ease;
+  width: 100%;
+  transition: height 0.2s cubic-bezier(0.16, 1, 0.3, 1), min-height 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .trading-terminal-open {
-  height: 360px;
-  min-height: 140px;
-  max-height: 85vh;
+  min-height: 100vh;
+  height: 100vh;
 }
-.trading-terminal-resizing {
-  transition: none !important;
-  user-select: none;
+.trading-terminal-maximized {
+  min-height: 100% !important;
+  height: 100% !important;
+  border-top: none;
 }
 .trading-terminal-closed {
   height: 38px;
+  min-height: 38px;
   max-height: 38px;
   overflow: hidden;
 }
@@ -951,6 +1084,26 @@
   margin-right: 4px;
 }
 .positions-jump-btn:hover {
+  color: var(--color-text);
+  background-color: var(--color-surface-3);
+  border-color: var(--color-primary);
+}
+.positions-maximize-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-3);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  margin-right: 4px;
+}
+.positions-maximize-btn:hover {
   color: var(--color-text);
   background-color: var(--color-surface-3);
   border-color: var(--color-primary);

@@ -1,6 +1,9 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
+import CanvasTabs from "@/components/research/CanvasTabs";
+import WorkspaceSelector from "@/components/research/WorkspaceSelector";
+import type { WorkspaceTabType } from "@/types/research";
 import ChatRail from "@/components/research/ChatRail";
 import ChatTabs from "@/components/research/ChatTabs";
 import EmptyResearchState from "@/components/research/EmptyResearchState";
@@ -13,40 +16,41 @@ import { useResearchHub } from "@/hooks/useResearchHub";
 const RAIL_KEY = "pt-research-rail-width";
 const RAIL_MIN = 280;
 const RAIL_MAX = 560;
+const DEFAULT_RAIL_WIDTH = 350;
 
-const TERMINAL_HEIGHT_KEY = "pt-research-terminal-height";
-const TERMINAL_MIN_HEIGHT = 180;
-const TERMINAL_MAX_HEIGHT = 750;
-
-function initialRailWidth(): number {
-  if (typeof window === "undefined") return 350;
-  const raw = Number(window.localStorage.getItem(RAIL_KEY));
-  if (Number.isFinite(raw) && raw >= RAIL_MIN && raw <= RAIL_MAX) {
-    return Math.max(raw, 340);
-  }
-  return 350;
+function subscribeStorage(callback: () => void) {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener("storage", callback);
+  return () => window.removeEventListener("storage", callback);
 }
 
-function initialTerminalHeight(): number {
-  if (typeof window === "undefined") return 360;
-  const raw = Number(window.localStorage.getItem(TERMINAL_HEIGHT_KEY));
-  if (Number.isFinite(raw) && raw >= TERMINAL_MIN_HEIGHT && raw <= TERMINAL_MAX_HEIGHT) {
-    return raw;
+function getStoredRailWidth(): number {
+  if (typeof window === "undefined") return DEFAULT_RAIL_WIDTH;
+  try {
+    const raw = Number(window.localStorage.getItem(RAIL_KEY));
+    if (Number.isFinite(raw) && raw >= RAIL_MIN && raw <= RAIL_MAX) {
+      return Math.max(raw, 340);
+    }
+  } catch {
+    /* ignore */
   }
-  return 360;
+  return DEFAULT_RAIL_WIDTH;
 }
 
 export default function ResearchHub() {
   const hub = useResearchHub();
-  const [railWidth, setRailWidth] = useState(initialRailWidth);
-  const [terminalHeight, setTerminalHeight] = useState(initialTerminalHeight);
-  const [isDraggingTerminal, setIsDraggingTerminal] = useState(false);
+  const storedRailWidth = useSyncExternalStore(subscribeStorage, getStoredRailWidth, () => DEFAULT_RAIL_WIDTH);
+
+  const [activeRailWidth, setActiveRailWidth] = useState<number | null>(null);
+  const railWidth = activeRailWidth ?? storedRailWidth;
+
+  const [isDraggingRail, setIsDraggingRail] = useState(false);
+  const [isTerminalMaximized, setIsTerminalMaximized] = useState(false);
   const [mobileView, setMobileView] = useState<"chat" | "results">("chat");
   const [tradingPanelVisible, setTradingPanelVisible] = useState(true);
   const [tradingTerminalOpen, setTradingTerminalOpen] = useState(true);
+  const [activeTabType, setActiveTabType] = useState<WorkspaceTabType>("wallet_groups");
   const [selectedPosition, setSelectedPosition] = useState<ResearchPosition | null>(null);
-  const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
-  const terminalDragState = useRef<{ startY: number; startHeight: number } | null>(null);
   const activeChat = hub.chats.find((c) => c.chat_id === hub.activeChatId) ?? null;
   const activeId = activeChat?.chat_id ?? null;
 
@@ -58,18 +62,40 @@ export default function ResearchHub() {
 
   const clampRail = (width: number) => {
     const clamped = Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(width)));
-    window.localStorage.setItem(RAIL_KEY, String(clamped));
+    try {
+      window.localStorage.setItem(RAIL_KEY, String(clamped));
+    } catch {
+      /* ignore */
+    }
+    setActiveRailWidth(clamped);
     return clamped;
   };
 
-  const clampTerminalHeight = (h: number) => {
-    const maxH = typeof window !== "undefined" ? Math.max(TERMINAL_MIN_HEIGHT, window.innerHeight - 120) : TERMINAL_MAX_HEIGHT;
-    const clamped = Math.min(maxH, Math.max(TERMINAL_MIN_HEIGHT, Math.round(h)));
-    window.localStorage.setItem(TERMINAL_HEIGHT_KEY, String(clamped));
-    return clamped;
+  const handleStartDragRail = (e: React.PointerEvent) => {
+    e.preventDefault();
+    setIsDraggingRail(true);
+    const startX = e.clientX;
+    const startWidth = railWidth;
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      clampRail(startWidth - deltaX);
+    };
+
+    const handlePointerUp = () => {
+      setIsDraggingRail(false);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
   };
 
-  const allPanels = activeId ? hub.panelsByChat[activeId] ?? [] : [];
+  const activeWorkspaceId = hub.activeWorkspaceId;
+  const allPanels = activeWorkspaceId ? hub.panelsByWorkspace[activeWorkspaceId] ?? [] : [];
   const positions = activeId ? hub.positionsForChat(activeId) : [];
 
   const handleToggleTradingTerminal = () => {
@@ -99,6 +125,22 @@ export default function ResearchHub() {
         onReopen={(id) => hub.reopenChat(id)}
       />
 
+      <div className="research-canvas-controls">
+        <WorkspaceSelector
+          workspaces={hub.workspaces}
+          activeWorkspaceId={hub.activeWorkspaceId}
+          onSelect={hub.selectWorkspace}
+          onCreate={() => hub.createWorkspace()}
+          onRename={hub.renameWorkspace}
+          onDelete={hub.deleteWorkspace}
+        />
+        <CanvasTabs
+          tabs={activeWorkspaceId ? hub.tabsByWorkspace[activeWorkspaceId] : undefined}
+          activeTabType={activeTabType}
+          onSelect={setActiveTabType}
+        />
+      </div>
+
       {/* ── Mobile view switcher (hidden on md+) ── */}
       <div className="research-view-switch" role="group" aria-label="Workspace view">
         {(["chat", "results"] as const).map((view) => (
@@ -119,7 +161,7 @@ export default function ResearchHub() {
       </div>
 
       {/* ── Upper Section: Canvas (Left) | Chat Terminal (Right) ── */}
-      <div className="research-upper-workspace">
+      <div className={`research-upper-workspace ${isTerminalMaximized ? "research-upper-collapsed" : ""}`}>
         {/* Left: Canvas area (directly beside app sidebar) */}
         <section
           aria-label="Results"
@@ -134,14 +176,18 @@ export default function ResearchHub() {
             />
           ) : (
             <div
-              id={`research-panel-${activeChat.chat_id}`}
+              id="research-canvas"
               role="tabpanel"
               aria-label={`Results for ${activeChat.title}`}
               className="research-canvas-scroll"
             >
               <PanelCanvas
+                workspaceId={activeWorkspaceId}
                 panels={allPanels}
-                onPanelState={(panelId, state) => hub.setPanelState(activeId, panelId, state)}
+                onPanelState={(panelId, state) => { if (activeWorkspaceId) void hub.setPanelState(activeWorkspaceId, panelId, state); }}
+                onSaveMutation={async (panelId, mutation) => {
+                  return activeWorkspaceId ? await hub.mutatePanel(activeWorkspaceId, panelId, mutation) : null;
+                }}
               />
             </div>
           )}
@@ -159,23 +205,14 @@ export default function ResearchHub() {
           onKeyDown={(e) => {
             if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
               e.preventDefault();
-              setRailWidth((w) => clampRail(w + (e.key === "ArrowLeft" ? 16 : -16)));
+              clampRail(railWidth + (e.key === "ArrowLeft" ? 16 : -16));
             }
           }}
-          onPointerDown={(e) => {
-            (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-            dragState.current = { startX: e.clientX, startWidth: railWidth };
-          }}
-          onPointerMove={(e) => {
-            const drag = dragState.current;
-            if (!drag || e.buttons === 0) return;
-            setRailWidth(clampRail(drag.startWidth - (e.clientX - drag.startX)));
-          }}
-          onPointerUp={() => {
-            dragState.current = null;
-          }}
-          className="research-splitter hidden md:block"
-        />
+          onPointerDown={handleStartDragRail}
+          className={`research-splitter hidden md:flex ${isDraggingRail ? "research-splitter-active" : ""}`}
+        >
+          <div className="research-splitter-grip" />
+        </div>
 
         {/* Right: Chat rail / terminal */}
         <section
@@ -193,69 +230,24 @@ export default function ResearchHub() {
             error={activeId ? hub.errorByChat[activeId] ?? null : null}
             streamingText={activeId ? hub.streamingTextByChat[activeId] ?? "" : ""}
             restorePrompt={activeId ? hub.restorePromptByChat[activeId] ?? null : null}
-            onSend={(prompt) => activeId && hub.sendPrompt(activeId, prompt)}
+            onSend={async (prompt) => {
+              let targetId = activeId;
+              if (!targetId) {
+                const newChat = await hub.createChat();
+                targetId = newChat.chat_id;
+              }
+              await hub.sendPrompt(targetId, prompt);
+            }}
             onStop={() => activeId && hub.stopRun(activeId)}
             onConsumeRestore={() => activeId && hub.consumeRestorePrompt(activeId)}
           />
         </section>
       </div>
 
-      {/* ── Horizontal Splitter: Resize Trading / Wallet Terminal Height ── */}
-      {tradingTerminalOpen && (
-        <div
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Resize wallet terminal height"
-          aria-valuenow={terminalHeight}
-          aria-valuemin={TERMINAL_MIN_HEIGHT}
-          aria-valuemax={TERMINAL_MAX_HEIGHT}
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-              e.preventDefault();
-              setTerminalHeight((h) => clampTerminalHeight(h + (e.key === "ArrowUp" ? 24 : -24)));
-            }
-          }}
-          onPointerDown={(e) => {
-            (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-            setIsDraggingTerminal(true);
-            terminalDragState.current = { startY: e.clientY, startHeight: terminalHeight };
-          }}
-          onPointerMove={(e) => {
-            const drag = terminalDragState.current;
-            if (!drag || e.buttons === 0) return;
-            setTerminalHeight(clampTerminalHeight(drag.startHeight - (e.clientY - drag.startY)));
-          }}
-          onPointerUp={(e) => {
-            (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
-            terminalDragState.current = null;
-            setIsDraggingTerminal(false);
-          }}
-          onPointerCancel={(e) => {
-            (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
-            terminalDragState.current = null;
-            setIsDraggingTerminal(false);
-          }}
-          className={`research-horizontal-splitter ${isDraggingTerminal ? "research-splitter-active" : ""}`}
-        >
-          <div className="research-horizontal-splitter-grip" />
-        </div>
-      )}
-
       {/* ── Lower Section: Trading Terminal (Positions Bar + Buy/Sell Ticket) ── */}
       <section
         aria-label="Trading terminal"
-        className={`trading-terminal ${tradingTerminalOpen ? "trading-terminal-open" : "trading-terminal-closed"} ${isDraggingTerminal ? "trading-terminal-resizing" : ""}`}
-        style={
-          tradingTerminalOpen
-            ? {
-                height: terminalHeight,
-                minHeight: terminalHeight,
-                maxHeight: terminalHeight,
-                transition: isDraggingTerminal ? "none" : undefined,
-              }
-            : undefined
-        }
+        className={`trading-terminal ${tradingTerminalOpen ? "trading-terminal-open" : "trading-terminal-closed"} ${isTerminalMaximized ? "trading-terminal-maximized" : ""}`}
       >
         {/* Left: Positions dock */}
         <div className="trading-terminal-positions">
@@ -266,6 +258,8 @@ export default function ResearchHub() {
             onSelectPosition={(pos) => setSelectedPosition(pos)}
             isOpen={tradingTerminalOpen}
             onToggleOpen={handleToggleTradingTerminal}
+            isMaximized={isTerminalMaximized}
+            onToggleMaximized={() => setIsTerminalMaximized((m) => !m)}
           />
         </div>
 
