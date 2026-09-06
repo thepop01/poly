@@ -105,6 +105,20 @@ async def test_panel_result_set_must_belong_to_workspace_owner(test_pool, two_us
     )
     assert panel is None
 
+    same_owner_workspace = await repo.create_workspace(two_users.first, "Same owner")
+    other_chat = await repo.create_chat(two_users.first, "Other chat", same_owner_workspace.workspace_id)
+    source_chat = await repo.create_chat(two_users.first, "Source chat", same_owner_workspace.workspace_id)
+    same_owner_result = await repo.save_result_set(
+        two_users.first, source_chat.chat_id, "wallet_set", "Source result", {}, [],
+    )
+    assert same_owner_result is not None
+    mismatched = await repo.upsert_panel(
+        two_users.first, same_owner_workspace.workspace_id, other_chat.chat_id, "mismatched-result",
+        "wallet_table", "Mismatched", same_owner_result.result_set_id,
+        {"col_span": 12, "min_height": 420, "order": 0},
+    )
+    assert mismatched is None
+
 
 @pytest.mark.asyncio
 async def test_uuid_shaped_legacy_panel_key_is_preserved(test_pool, two_users):

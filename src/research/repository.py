@@ -512,6 +512,7 @@ class ResearchRepository:
                      AND ($2 IS NULL OR (c.owner_id = $9::uuid AND c.workspace_id = $1))
                      AND ($3 IS NULL OR (
                          rs.result_set_id IS NOT NULL
+                         AND rs_chat.chat_id = $2
                          AND rs_chat.owner_id = $9::uuid
                          AND rs_chat.workspace_id = $1
                      ))
