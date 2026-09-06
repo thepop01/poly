@@ -13,10 +13,16 @@ const panel = (id: string, workspaceId = workspace.workspace_id): ResearchPanel 
   panel_type: "wallet_table", panel_key: id, title: id, state: "normal",
   layout: { col_span: 4, min_height: 200, order: 0 }, config: {}, created_at: "", updated_at: "",
 });
-const chat = (id: string, archived = false) => ({
-  chat_id: id, workspace_id: workspace.workspace_id, title: id, is_archived: archived,
+const chat = (id: string, archived = false, workspaceId = workspace.workspace_id) => ({
+  chat_id: id, workspace_id: workspaceId, title: id, is_archived: archived,
   created_at: "", updated_at: "",
 });
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -49,6 +55,42 @@ test("stores streamed panel events under panel workspace", async () => {
   });
   await act(async () => result.current.sendPrompt("chat-a", "hello"));
   expect(result.current.panelsByWorkspace["workspace-1"].map((p) => p.panel_id)).toContain("stream-panel");
+});
+
+test("ignores stale overlapping workspace selections", async () => {
+  const workspace2 = { ...workspace, workspace_id: "workspace-2" };
+  mocked.listWorkspaces.mockResolvedValue({ workspaces: [workspace, workspace2] });
+  mocked.listChats.mockResolvedValue({ chats: [chat("chat-a"), chat("chat-b", false, workspace2.workspace_id)] });
+  const first = deferred<{ tabs: []; panels: ResearchPanel[] }>();
+  const second = deferred<{ tabs: []; panels: ResearchPanel[] }>();
+  mocked.listWorkspaceTabs.mockImplementation(async (id) => id === "workspace-1" ? first.promise.then((x) => ({ tabs: x.tabs })) : second.promise.then((x) => ({ tabs: x.tabs })));
+  mocked.listWorkspacePanels.mockImplementation(async (id) => id === "workspace-1" ? first.promise : second.promise);
+  const { result } = renderHook(() => useResearchHub());
+  await waitFor(() => expect(result.current.activeChatId).toBe("chat-a"));
+  const a = result.current.selectWorkspace("workspace-1");
+  const b = result.current.selectWorkspace("workspace-2");
+  second.resolve({ tabs: [], panels: [panel("two", "workspace-2")] });
+  await act(async () => { await b; });
+  first.resolve({ tabs: [], panels: [panel("one")] });
+  await act(async () => { await a; });
+  expect(result.current.activeWorkspaceId).toBe("workspace-2");
+  expect(result.current.activeChatId).toBe("chat-b");
+});
+
+test("serializes concurrent panel mutations without stale rollback", async () => {
+  const first = deferred<ResearchPanel>();
+  const second = deferred<ResearchPanel>();
+  mocked.patchPanel.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+  const { result } = renderHook(() => useResearchHub());
+  await waitFor(() => expect(result.current.activeChatId).toBe("chat-a"));
+  const one = result.current.mutatePanel("workspace-1", "panel-1", { state: "minimized" });
+  const two = result.current.mutatePanel("workspace-1", "panel-1", { state: "maximized" });
+  first.reject(new Error("first failed"));
+  await expect(one).rejects.toThrow("first failed");
+  first.resolve(panel("panel-1"));
+  second.resolve({ ...panel("panel-1"), state: "maximized" });
+  await act(async () => { await two; });
+  expect(result.current.panelsByWorkspace["workspace-1"][0].state).toBe("maximized");
 });
 
 test("rolls back only the mutated workspace", async () => {

@@ -68,6 +68,9 @@ export function useResearchHub() {
   const activeWorkspaceRef = useRef<string | null>(null);
   const chatsRef = useRef<ResearchChat[]>([]);
   const workspaceByChatRef = useRef<Record<string, string>>({});
+  const panelsRef = useRef<Record<string, ResearchPanel[]>>({});
+  const workspaceSelectionVersion = useRef(0);
+  const panelMutationQueues = useRef<Record<string, Promise<void>>>({});
 
   const openChats = chats.filter((c) => !c.is_archived);
   const archivedChats = chats.filter((c) => {
@@ -79,6 +82,7 @@ export function useResearchHub() {
   const refreshWorkspaceData = useCallback(async (workspaceId: string) => {
     const [tabs, panels] = await Promise.all([listWorkspaceTabs(workspaceId), listWorkspacePanels(workspaceId)]);
     setTabsByWorkspace((prev) => ({ ...prev, [workspaceId]: tabs.tabs }));
+    panelsRef.current[workspaceId] = panels.panels;
     setPanelsByWorkspace((prev) => ({ ...prev, [workspaceId]: panels.panels }));
   }, []);
 
@@ -256,28 +260,58 @@ export function useResearchHub() {
   const stopRun = useCallback((chatId: string) => { abortByChat.current[chatId]?.abort(); }, []);
   const consumeRestorePrompt = useCallback((chatId: string) => setRestorePromptByChat((p) => ({ ...p, [chatId]: null })), []);
 
-  const mutatePanel = useCallback(async (workspaceId: string, panelId: string, mutation: PanelMutation): Promise<ResearchPanel> => {
-    const previous = panelsByWorkspace[workspaceId] ?? [];
-    setPanelsByWorkspace((p) => ({ ...p, [workspaceId]: (p[workspaceId] ?? []).map((panel) => panel.panel_id !== panelId ? panel : { ...panel, state: mutation.state ?? panel.state, layout: mutation.floating ? { ...panel.layout, floating: mutation.floating } : panel.layout }) }));
-    try {
-      const updated = await patchPanel(panelId, mutation);
-      setPanelsByWorkspace((p) => ({ ...p, [workspaceId]: (p[workspaceId] ?? []).map((panel) => panel.panel_id === panelId ? updated : panel) }));
-      return updated;
-    } catch (err) {
-      setPanelsByWorkspace((p) => ({ ...p, [workspaceId]: previous }));
-      throw err;
-    }
-  }, [panelsByWorkspace]);
+  const mutatePanel = useCallback((workspaceId: string, panelId: string, mutation: PanelMutation): Promise<ResearchPanel> => {
+    const prior = panelMutationQueues.current[workspaceId] ?? Promise.resolve();
+    let resolveResult!: (panel: ResearchPanel) => void;
+    let rejectResult!: (error: unknown) => void;
+    const result = new Promise<ResearchPanel>((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
+    const operation = prior.catch(() => {}).then(async () => {
+      const previous = panelsRef.current[workspaceId] ?? [];
+      const optimistic = previous.map((panel) => panel.panel_id !== panelId ? panel : {
+        ...panel,
+        state: mutation.state ?? panel.state,
+        layout: mutation.floating ? { ...panel.layout, floating: mutation.floating } : panel.layout,
+      });
+      panelsRef.current[workspaceId] = optimistic;
+      setPanelsByWorkspace((p) => ({ ...p, [workspaceId]: optimistic }));
+      try {
+        const updated = await patchPanel(panelId, mutation);
+        const current = panelsRef.current[workspaceId] ?? [];
+        const next = current.map((panel) => panel.panel_id === panelId ? updated : panel);
+        panelsRef.current[workspaceId] = next;
+        setPanelsByWorkspace((p) => ({ ...p, [workspaceId]: next }));
+        resolveResult(updated);
+      } catch (err) {
+        // This operation is serialized, so the snapshot contains no later mutation.
+        panelsRef.current[workspaceId] = previous;
+        setPanelsByWorkspace((p) => ({ ...p, [workspaceId]: previous }));
+        rejectResult(err);
+      }
+    });
+    panelMutationQueues.current[workspaceId] = operation.then(() => undefined, () => undefined);
+    return result;
+  }, []);
 
   const setPanelState = useCallback(async (workspaceId: string, panelId: string, state: ResearchPanel["state"]) => { await mutatePanel(workspaceId, panelId, { state }); }, [mutatePanel]);
 
   const selectWorkspace = useCallback(async (workspaceId: string) => {
-    activeWorkspaceRef.current = workspaceId; setActiveWorkspaceId(workspaceId);
+    const version = ++workspaceSelectionVersion.current;
     await refreshWorkspaceData(workspaceId);
+    if (version !== workspaceSelectionVersion.current) return;
     const chat = chatsRef.current.find((c) => !c.is_archived && c.workspace_id === workspaceId);
-    if (chat) activate(chat.chat_id);
-    else await handleCreateChat(workspaceId);
-  }, [activate, handleCreateChat, refreshWorkspaceData]);
+    activeWorkspaceRef.current = workspaceId;
+    setActiveWorkspaceId(workspaceId);
+    if (chat) {
+      activate(chat.chat_id);
+      return;
+    }
+    const created = await createChat("New research", workspaceId);
+    if (version !== workspaceSelectionVersion.current) return;
+    workspaceByChatRef.current[created.chat_id] = created.workspace_id;
+    chatsRef.current = [created, ...chatsRef.current];
+    setChats((prev) => [created, ...prev]);
+    activate(created.chat_id);
+  }, [activate, refreshWorkspaceData]);
 
   return {
     chats: openChats, archivedChats, activeChatId, loading, workspaces, activeWorkspaceId, tabsByWorkspace, panelsByWorkspace,
