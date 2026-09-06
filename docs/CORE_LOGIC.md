@@ -20,9 +20,9 @@ For day-to-day operation, start with the [Operations Runbook](rule.md). It conta
 - **Floating panel geometry & persistence:**
   - Panel geometry (`x`, `y`, `width`, `height`) and `z_index` are persisted per panel within its parent **workspace**, not per chat.
   - Frontmost activation ranks are workspace-scoped: when a user clicks or moves a panel, `bring_to_front: true` atomically increments `z_index` above the workspace's highest rank; ranks compact when exceeding 1,000,000.
-  - Coordinate constraints: `x >= 0`, `y >= 0`, `x + width <= stageWidth`, `y + height <= 100,000`, minimum size 320×240, maximum size 4096×4096.
+  - Backend persistence validates `x >= 0`, `y >= 0`, `y + height <= 100,000`, minimum size 320×240, and maximum size 4096×4096. Horizontal `stageWidth` clamping (`x + width <= stageWidth`) is frontend responsive behavior, not a backend persistence invariant.
   - Geometry is preserved during analytical upserts: `upsert_panel` does not overwrite existing `layout` JSONB column values, so a new chat result updates content/provenance without resetting workspace layout.
-  - Responsive fallback: When viewport width < 768px or stage width < 640px, the canvas falls back to standard stacked layout without overwriting stored desktop coordinates.
+  - Responsive fallback: When viewport width < 768px or stage width < 640px, the canvas falls back to standard stacked layout without overwriting stored desktop coordinates; the frontend clamps horizontal placement to the available stage.
 
 
 ---

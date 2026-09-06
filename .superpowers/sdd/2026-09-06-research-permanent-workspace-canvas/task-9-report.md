@@ -591,7 +591,7 @@ Result: PASS. Next.js 16.2.9 production build completed. Node emitted the existi
 
 ## Acceptance pass
 
-Manual browser access was unavailable in this environment, so desktop/tablet/narrow responsive acceptance could not be performed interactively. Existing backend integration tests and frontend component tests cover workspace CRUD, exactly three fixed tabs, owner isolation/404 behavior, shared canvas across chats, panel provenance and deletion behavior, layout persistence/interactions, keyboard semantics, and the mock trading boundary.
+Manual browser access was unavailable in this environment, so desktop/tablet/narrow responsive acceptance could not be performed interactively. Existing backend integration tests and frontend component tests provide automated coverage of selected workspace, panel, keyboard, and mock-boundary behaviors, but they do not replace or establish the unavailable desktop/tablet/narrow manual acceptance.
 
 ## Concerns
 

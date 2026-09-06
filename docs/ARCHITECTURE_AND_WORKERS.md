@@ -19,7 +19,7 @@ chat selector      -> messages/runs/results/research positions
 analysis run(chat) -> immutable chat result + workspace panel upsert
 ```
 
-Workspace and chat IDs are owner-scoped. Cross-owner or foreign workspace/chat/panel references return non-disclosing `404 Not Found`; fixed tabs cannot be renamed or deleted. Analytical upserts preserve existing workspace panel geometry, visual state, and z-index while updating the result/provenance.
+Workspace and chat IDs are owner-scoped. Cross-owner or foreign workspace/chat/panel references return non-disclosing `404 Not Found`; fixed tabs cannot be renamed or deleted. Analytical upserts preserve existing workspace panel geometry/layout and z-index while updating the result/provenance. A closed panel may be reopened to `normal` on an analytical refresh; visual state is not otherwise promised to remain unchanged.
 
 ### Data Flow Pipeline
 
