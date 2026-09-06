@@ -45,9 +45,11 @@ export async function listWorkspaces(): Promise<{ workspaces: ResearchWorkspace[
 }
 
 export async function createWorkspace(name?: string): Promise<ResearchWorkspace> {
+  // The backend requires a non-empty name; keep the optional UI API ergonomic.
+  const workspaceName = name?.trim() || "New workspace";
   return request(`/api/v2/research/workspaces`, {
     method: "POST",
-    body: JSON.stringify(name === undefined ? {} : { name }),
+    body: JSON.stringify({ name: workspaceName }),
   });
 }
 

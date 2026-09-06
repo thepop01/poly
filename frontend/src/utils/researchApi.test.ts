@@ -1,5 +1,10 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { listPositions, splitNdjsonBuffer, streamResearchRun } from "@/utils/researchApi";
+import {
+  createWorkspace,
+  listPositions,
+  splitNdjsonBuffer,
+  streamResearchRun,
+} from "@/utils/researchApi";
 
 function streamResponse(chunks: (string | Uint8Array)[], status = 200): Response {
   const encoder = new TextEncoder();
@@ -79,6 +84,31 @@ describe("streamResearchRun", () => {
     await expect(
       streamResearchRun("chat-1", "hi", () => {}, controller.signal),
     ).rejects.toThrow();
+  });
+});
+
+describe("createWorkspace", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends a valid default name when omitted", async () => {
+    const workspace = {
+      workspace_id: "workspace-1",
+      name: "New workspace",
+      created_at: "2026-09-06T00:00:00Z",
+      updated_at: "2026-09-06T00:00:00Z",
+    };
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify(workspace), { status: 200 }),
+    );
+
+    await expect(createWorkspace()).resolves.toEqual(workspace);
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    expect(init?.body).toBe(JSON.stringify({ name: "New workspace" }));
   });
 });
 

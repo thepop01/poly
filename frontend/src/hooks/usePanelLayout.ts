@@ -59,6 +59,7 @@ export function usePanelLayout({
     setSaveError(null);
     setLocalRects({});
     setLocalZIndices({});
+    highestZRef.current = 10;
     setLastFailedMutation(null);
   }
 
