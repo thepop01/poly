@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from src.api.main import app
 from src.api.routers.auth import create_access_token
 from src.research.llm import FakeLLMProvider, ModelAction
+from src.research.repository import ResearchRepository
 
 
 @pytest_asyncio.fixture
@@ -321,4 +322,198 @@ async def test_positions_endpoint_auth_and_ownership(api_pool, user_a, user_b):
             await conn.execute("DELETE FROM wallet_positions_v2 WHERE condition_id = $1", m_cid)
             await conn.execute("DELETE FROM markets_v2 WHERE condition_id = $1", m_cid)
             await conn.execute("DELETE FROM wallets_v2 WHERE address = ANY($1)", [w_a, w_b])
+
+
+@pytest.mark.asyncio
+async def test_workspace_crud_and_fixed_tabs(api_pool, user_a):
+    async with _client(user_a["token"]) as client:
+        created = await client.post(
+            "/api/v2/research/workspaces", json={"name": "Cricket"}
+        )
+        assert created.status_code == 200
+        workspace = created.json()
+        workspace_id = workspace["workspace_id"]
+        assert workspace["name"] == "Cricket"
+        assert "owner_id" not in workspace
+
+        listed = await client.get("/api/v2/research/workspaces?limit=50")
+        assert listed.status_code == 200
+        assert [item["workspace_id"] for item in listed.json()["workspaces"]] == [workspace_id]
+
+        fetched = await client.get(f"/api/v2/research/workspaces/{workspace_id}")
+        assert fetched.status_code == 200
+        assert fetched.json()["workspace_id"] == workspace_id
+
+        tabs = await client.get(f"/api/v2/research/workspaces/{workspace_id}/tabs")
+        assert tabs.status_code == 200
+        assert [tab["tab_type"] for tab in tabs.json()["tabs"]] == [
+            "wallet_groups", "market_groups", "agents",
+        ]
+
+        renamed = await client.patch(
+            f"/api/v2/research/workspaces/{workspace_id}",
+            json={"name": " Cricket live "},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["name"] == "Cricket live"
+
+        blank = await client.patch(
+            f"/api/v2/research/workspaces/{workspace_id}", json={"name": "   "}
+        )
+        assert blank.status_code == 422
+        blank_create = await client.post(
+            "/api/v2/research/workspaces", json={"name": "   "}
+        )
+        assert blank_create.status_code == 422
+
+        deleted = await client.delete(f"/api/v2/research/workspaces/{workspace_id}")
+        assert deleted.status_code == 200
+        assert deleted.json() == {"deleted": workspace_id}
+        assert (await client.get(f"/api/v2/research/workspaces/{workspace_id}")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_workspace_chat_panel_compatibility_and_delete_conflict(api_pool, user_a):
+    async with _client(user_a["token"]) as client:
+        workspace = (await client.post(
+            "/api/v2/research/workspaces", json={"name": "Workspace panels"}
+        )).json()
+        workspace_id = workspace["workspace_id"]
+        chat_response = await client.post(
+            "/api/v2/research/chats",
+            json={"workspace_id": workspace_id, "title": "Workspace chat"},
+        )
+        assert chat_response.status_code == 200
+        chat = chat_response.json()
+        chat_id = chat["chat_id"]
+        assert chat["workspace_id"] == workspace_id
+
+        repo = ResearchRepository(api_pool)
+        panel = await repo.upsert_panel(
+            user_a["owner_id"], workspace_id, uuid.UUID(chat_id), "panel:workspace",
+            "wallet_table", "Workspace panel", None,
+            {"col_span": 12, "min_height": 420, "order": 0},
+        )
+        assert panel is not None
+
+        workspace_panels = await client.get(f"/api/v2/research/workspaces/{workspace_id}/panels")
+        chat_panels = await client.get(f"/api/v2/research/chats/{chat_id}/panels")
+        assert workspace_panels.status_code == 200
+        assert chat_panels.status_code == 200
+        assert workspace_panels.json()["panels"] == chat_panels.json()["panels"]
+        assert workspace_panels.json()["panels"][0]["source_chat_id"] == chat_id
+
+        assert (await client.delete(f"/api/v2/research/workspaces/{workspace_id}")).status_code == 409
+        assert (await client.delete(f"/api/v2/research/chats/{chat_id}")).status_code == 200
+        assert (await client.delete(f"/api/v2/research/workspaces/{workspace_id}")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_workspace_owner_boundary_and_unauthenticated(api_pool, user_a, user_b):
+    async with _client(user_a["token"]) as client_a:
+        workspace = (await client_a.post(
+            "/api/v2/research/workspaces", json={"name": "Private workspace"}
+        )).json()
+        workspace_id = workspace["workspace_id"]
+        chat = (await client_a.post(
+            "/api/v2/research/chats",
+            json={"workspace_id": workspace_id, "title": "Private chat"},
+        )).json()
+        panel = await ResearchRepository(api_pool).upsert_panel(
+            user_a["owner_id"], uuid.UUID(workspace_id), uuid.UUID(chat["chat_id"]),
+            "panel:private", "wallet_table", "Private panel", None,
+            {"col_span": 12, "min_height": 420, "order": 0},
+        )
+        assert panel is not None
+        panel_id = str(panel.panel_id)
+        chat_id = chat["chat_id"]
+
+    async with _client(user_b["token"]) as client_b:
+        paths = [
+            f"/api/v2/research/workspaces/{workspace_id}",
+            f"/api/v2/research/workspaces/{workspace_id}/tabs",
+            f"/api/v2/research/workspaces/{workspace_id}/panels",
+        ]
+        for path in paths:
+            assert (await client_b.get(path)).status_code == 404
+        assert (await client_b.patch(
+            f"/api/v2/research/workspaces/{workspace_id}",
+            json={"name": "Hijack"},
+        )).status_code == 404
+        assert (await client_b.delete(
+            f"/api/v2/research/workspaces/{workspace_id}")).status_code == 404
+        assert (await client_b.get(
+            f"/api/v2/research/chats/{chat_id}/panels")).status_code == 404
+        assert (await client_b.patch(
+            f"/api/v2/research/panels/{panel_id}",
+            json={"state": "minimized"},
+        )).status_code == 404
+        assert (await client_b.post(
+            "/api/v2/research/chats",
+            json={"workspace_id": workspace_id, "title": "Nope"},
+        )).status_code == 404
+
+    async with _client() as client:
+        assert (await client.get("/api/v2/research/workspaces")).status_code == 401
+        assert (await client.post(
+            "/api/v2/research/workspaces", json={"name": "No auth"}
+        )).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_patch_panel_geometry_and_bring_to_front(api_pool, user_a, user_b):
+    repo = ResearchRepository(api_pool)
+    chat = await repo.create_chat(user_a["owner_id"], "Chat Panels API")
+    layout = {"col_span": 12, "min_height": 420, "order": 0}
+    panel = await repo.upsert_panel(
+        user_a["owner_id"], chat.chat_id, "panel:api", "wallet_table", "API Panel", None, layout
+    )
+    assert panel is not None
+
+    # Unauthenticated
+    async with _client() as client:
+        res = await client.patch(f"/api/v2/research/panels/{panel.panel_id}", json={"state": "minimized"})
+        assert res.status_code == 401
+
+    # Foreign user -> 404
+    async with _client(user_b["token"]) as client_b:
+        res = await client_b.patch(f"/api/v2/research/panels/{panel.panel_id}", json={"state": "minimized"})
+        assert res.status_code == 404
+
+    # Invalid payload (empty mutation) -> 422
+    async with _client(user_a["token"]) as client_a:
+        res = await client_a.patch(f"/api/v2/research/panels/{panel.panel_id}", json={})
+        assert res.status_code == 422
+
+        # Invalid payload (width < 320) -> 422
+        res = await client_a.patch(
+            f"/api/v2/research/panels/{panel.panel_id}",
+            json={"floating": {"x": 0, "y": 0, "width": 200, "height": 300}},
+        )
+        assert res.status_code == 422
+
+        # Valid geometry update + bring_to_front
+        res = await client_a.patch(
+            f"/api/v2/research/panels/{panel.panel_id}",
+            json={
+                "floating": {"x": 50, "y": 80, "width": 640, "height": 480},
+                "bring_to_front": True,
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["panel_id"] == str(panel.panel_id)
+        assert data["layout"]["floating"] == {"x": 50, "y": 80, "width": 640, "height": 480}
+        assert data["layout"]["z_index"] == 1
+
+        # State-only update preserves geometry
+        res = await client_a.patch(
+            f"/api/v2/research/panels/{panel.panel_id}",
+            json={"state": "minimized"},
+        )
+        assert res.status_code == 200
+        data2 = res.json()
+        assert data2["state"] == "minimized"
+        assert data2["layout"]["floating"] == {"x": 50, "y": 80, "width": 640, "height": 480}
+
 

@@ -22,7 +22,7 @@ from slowapi.util import get_remote_address
 from src.api.limiter import limiter
 from src.api.routers.auth import get_current_user
 from src.research.analytics import ResearchAnalytics
-from src.research.contracts import PanelState
+from src.research.contracts import PanelMutation
 from src.research.llm import build_provider_from_env
 from src.research.orchestrator import ResearchOrchestrator
 from src.research.repository import ResearchRepository
@@ -57,8 +57,17 @@ def _orchestrator(request: Request) -> ResearchOrchestrator:
     )
 
 
+class WorkspaceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class WorkspacePatch(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
 class ChatCreate(BaseModel):
     title: str = Field(default="New research", min_length=1, max_length=120)
+    workspace_id: UUID | None = None
 
 
 class ChatPatch(BaseModel):
@@ -66,8 +75,8 @@ class ChatPatch(BaseModel):
     is_archived: Optional[bool] = None
 
 
-class PanelPatch(BaseModel):
-    state: PanelState
+class PanelPatch(PanelMutation):
+    pass
 
 
 class RunCreate(BaseModel):
@@ -88,9 +97,102 @@ def _run_rate_key(request: Request) -> str:
     return f"research-run:{get_remote_address(request)}"
 
 
+def _workspace_name(name: str) -> str:
+    value = name.strip()
+    if not value:
+        raise HTTPException(status_code=422, detail="workspace name must not be blank")
+    return value
+
+
+@router.post("/workspaces")
+async def create_workspace(
+    request: Request, body: WorkspaceCreate, user: dict = Depends(get_current_user)
+):
+    name = _workspace_name(body.name)
+    try:
+        workspace = await _repo(request).create_workspace(_uid(user), name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return workspace.model_dump(mode="json")
+
+
+@router.get("/workspaces")
+async def list_workspaces(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=100),
+    user: dict = Depends(get_current_user),
+):
+    workspaces = await _repo(request).list_workspaces(_uid(user), limit)
+    return {"workspaces": [workspace.model_dump(mode="json") for workspace in workspaces]}
+
+
+@router.get("/workspaces/{workspace_id}")
+async def get_workspace(
+    workspace_id: UUID, request: Request, user: dict = Depends(get_current_user)
+):
+    workspace = await _repo(request).get_workspace(_uid(user), workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return workspace.model_dump(mode="json")
+
+
+@router.patch("/workspaces/{workspace_id}")
+async def patch_workspace(
+    workspace_id: UUID,
+    body: WorkspacePatch,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    name = _workspace_name(body.name)
+    try:
+        workspace = await _repo(request).rename_workspace(_uid(user), workspace_id, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return workspace.model_dump(mode="json")
+
+
+@router.delete("/workspaces/{workspace_id}")
+async def delete_workspace(
+    workspace_id: UUID, request: Request, user: dict = Depends(get_current_user)
+):
+    repo = _repo(request)
+    owner_id = _uid(user)
+    if await repo.get_workspace(owner_id, workspace_id) is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    if not await repo.delete_workspace(owner_id, workspace_id):
+        raise HTTPException(status_code=409, detail="workspace has chats")
+    return {"deleted": str(workspace_id)}
+
+
+@router.get("/workspaces/{workspace_id}/tabs")
+async def list_workspace_tabs(
+    workspace_id: UUID, request: Request, user: dict = Depends(get_current_user)
+):
+    tabs = await _repo(request).list_workspace_tabs(_uid(user), workspace_id)
+    if tabs is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return {"tabs": [tab.model_dump(mode="json") for tab in tabs]}
+
+
+@router.get("/workspaces/{workspace_id}/panels")
+async def list_workspace_panels(
+    workspace_id: UUID, request: Request, user: dict = Depends(get_current_user)
+):
+    panels = await _repo(request).list_workspace_panels(_uid(user), workspace_id)
+    if panels is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return {"panels": [panel.model_dump(mode="json") for panel in panels]}
+
+
 @router.post("/chats")
 async def create_chat(request: Request, body: ChatCreate, user: dict = Depends(get_current_user)):
-    chat = await _repo(request).create_chat(_uid(user), body.title)
+    try:
+        chat = await _repo(request).create_chat(_uid(user), body.title, body.workspace_id)
+    except ValueError as exc:
+        # A supplied workspace must not reveal whether it belongs to another user.
+        raise HTTPException(status_code=404, detail="workspace not found") from exc
     return chat.model_dump(mode="json")
 
 
@@ -179,7 +281,7 @@ async def list_panels(chat_id: UUID, request: Request, user: dict = Depends(get_
 async def patch_panel(
     panel_id: UUID, body: PanelPatch, request: Request, user: dict = Depends(get_current_user)
 ):
-    panel = await _repo(request).update_panel_state(_uid(user), panel_id, body.state)
+    panel = await _repo(request).update_panel(_uid(user), panel_id, body)
     if panel is None:
         raise HTTPException(status_code=404, detail="panel not found")
     return panel.model_dump(mode="json")
