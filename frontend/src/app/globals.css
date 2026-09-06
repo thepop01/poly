@@ -577,6 +577,7 @@
 .research-workspace-action:disabled { cursor: not-allowed; opacity: 0.5; }
 .research-workspace-rename { display: flex; gap: 4px; align-items: center; }
 .research-workspace-rename input { width: 130px; padding: 4px 6px; border: 1px solid var(--color-border); border-radius: var(--radius); }
+.research-workspace-error { color: var(--color-danger); font-size: 11px; white-space: nowrap; }
 .research-canvas-tabs { display: flex; align-items: center; gap: 2px; min-width: max-content; overflow-x: auto; }
 .research-canvas-tab { padding: 6px 10px; border: 1px solid transparent; border-radius: var(--radius); color: var(--color-text-3); background: transparent; font-size: 12px; cursor: pointer; }
 .research-canvas-tab:hover { background: var(--color-surface-2); color: var(--color-text); }
@@ -941,8 +942,8 @@
   transition: height 0.2s cubic-bezier(0.16, 1, 0.3, 1), min-height 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .trading-terminal-open {
-  min-height: 100vh;
-  height: 100vh;
+  min-height: 180px;
+  height: 320px;
 }
 .trading-terminal-maximized {
   min-height: 100% !important;
@@ -1351,6 +1352,7 @@
     display: none;
   }
   .trading-terminal-open {
+    min-height: 180px;
     height: 180px;
     max-height: 180px;
   }

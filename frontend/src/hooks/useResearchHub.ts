@@ -65,6 +65,7 @@ export function useResearchHub() {
   const [streamingTextByChat, setStreamingTextByChat] = useState<Record<string, string>>({});
   const [restorePromptByChat, setRestorePromptByChat] = useState<Record<string, string | null>>({});
   const [loading, setLoading] = useState(true);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const abortByChat = useRef<Record<string, AbortController>>({});
   const activeIdRef = useRef<string | null>(null);
   const activeWorkspaceRef = useRef<string | null>(null);
@@ -299,8 +300,14 @@ export function useResearchHub() {
   const setPanelState = useCallback(async (workspaceId: string, panelId: string, state: ResearchPanel["state"]) => { await mutatePanel(workspaceId, panelId, { state }); }, [mutatePanel]);
 
   const renameWorkspace = useCallback(async (workspaceId: string, name: string) => {
-    const updated = await patchWorkspace(workspaceId, { name });
-    setWorkspaces((previous) => previous.map((workspace) => workspace.workspace_id === workspaceId ? updated : workspace));
+    setWorkspaceError(null);
+    try {
+      const updated = await patchWorkspace(workspaceId, { name });
+      setWorkspaces((previous) => previous.map((workspace) => workspace.workspace_id === workspaceId ? updated : workspace));
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Unable to rename workspace.");
+      throw error;
+    }
   }, []);
 
   const selectWorkspace = useCallback(async (workspaceId: string) => {
@@ -323,24 +330,40 @@ export function useResearchHub() {
   }, [activate, refreshWorkspaceData]);
 
   const createWorkspaceAndSelect = useCallback(async () => {
-    const workspace = await createWorkspace("New workspace");
-    setWorkspaces((previous) => [...previous, workspace]);
-    await selectWorkspace(workspace.workspace_id);
-    return workspace;
+    setWorkspaceError(null);
+    try {
+      const workspace = await createWorkspace("New workspace");
+      setWorkspaces((previous) => [...previous, workspace]);
+      await selectWorkspace(workspace.workspace_id);
+      return workspace;
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Unable to create workspace.");
+      throw error;
+    }
   }, [selectWorkspace]);
 
   const deleteWorkspace = useCallback(async (workspaceId: string) => {
-    await removeWorkspace(workspaceId);
-    const remaining = workspaces.filter((workspace) => workspace.workspace_id !== workspaceId);
-    setWorkspaces(remaining);
-    if (activeWorkspaceRef.current === workspaceId && remaining[0]) {
-      await selectWorkspace(remaining[0].workspace_id);
+    setWorkspaceError(null);
+    try {
+      await removeWorkspace(workspaceId);
+      const remaining = workspaces.filter((workspace) => workspace.workspace_id !== workspaceId);
+      setWorkspaces(remaining);
+      if (activeWorkspaceRef.current === workspaceId) {
+        const replacement = remaining[0];
+        activeWorkspaceRef.current = replacement?.workspace_id ?? null;
+        setActiveWorkspaceId(replacement?.workspace_id ?? null);
+        if (replacement) await selectWorkspace(replacement.workspace_id);
+        else activate(null);
+      }
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Unable to delete workspace. It may still contain chats.");
+      throw error;
     }
-  }, [selectWorkspace, workspaces]);
+  }, [activate, selectWorkspace, workspaces]);
 
   return {
     chats: openChats, archivedChats, activeChatId, loading, workspaces, activeWorkspaceId, tabsByWorkspace, panelsByWorkspace,
-    messagesByChat, resultsByChat, busyByChat, statusByChat, errorByChat, streamingTextByChat, restorePromptByChat,
+    messagesByChat, resultsByChat, busyByChat, statusByChat, errorByChat, streamingTextByChat, restorePromptByChat, workspaceError,
     resultsForChat: (chatId: string) => resultsByChat[chatId] ?? EMPTY_RESULTS,
     positionsByChat, positionsForChat: (chatId: string | null) => chatId ? positionsByChat[chatId] ?? EMPTY_POSITIONS : EMPTY_POSITIONS,
     selectChat, selectWorkspace, renameWorkspace, deleteWorkspace, createWorkspace: createWorkspaceAndSelect, createChat: handleCreateChat, renameChat: handleRenameChat, closeChat: handleCloseChat,

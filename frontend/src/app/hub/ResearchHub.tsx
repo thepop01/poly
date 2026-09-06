@@ -6,7 +6,6 @@ import WorkspaceSelector from "@/components/research/WorkspaceSelector";
 import type { WorkspaceTabType } from "@/types/research";
 import ChatRail from "@/components/research/ChatRail";
 import ChatTabs from "@/components/research/ChatTabs";
-import EmptyResearchState from "@/components/research/EmptyResearchState";
 import PanelCanvas from "@/components/research/PanelCanvas";
 import TradingPanel from "@/components/research/TradingPanel";
 import PositionsBar from "@/components/research/PositionsBar";
@@ -134,6 +133,7 @@ export default function ResearchHub() {
           onRename={hub.renameWorkspace}
           onDelete={hub.deleteWorkspace}
         />
+        {hub.workspaceError && <p role="alert" className="research-workspace-error">{hub.workspaceError}</p>}
         <CanvasTabs
           tabs={activeWorkspaceId ? hub.tabsByWorkspace[activeWorkspaceId] : undefined}
           activeTabType={activeTabType}
@@ -167,18 +167,10 @@ export default function ResearchHub() {
           aria-label="Results"
           className={`research-canvas ${mobileView === "results" ? "flex" : "hidden"} md:flex`}
         >
-          {!activeChat || !activeId ? (
-            <EmptyResearchState
-              onPick={async (prompt) => {
-                const chat = await hub.createChat();
-                await hub.sendPrompt(chat.chat_id, prompt);
-              }}
-            />
-          ) : (
-            <div
+          <div
               id="research-canvas"
               role="tabpanel"
-              aria-label={`Results for ${activeChat.title}`}
+              aria-label={activeChat ? `Results for ${activeChat.title}` : "Workspace canvas"}
               className="research-canvas-scroll"
             >
               <PanelCanvas
@@ -190,7 +182,6 @@ export default function ResearchHub() {
                 }}
               />
             </div>
-          )}
         </section>
 
         {/* Drag splitter between Canvas and Chat Terminal */}

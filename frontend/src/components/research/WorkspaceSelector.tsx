@@ -23,6 +23,16 @@ export default function WorkspaceSelector({
   const active = workspaces.find((workspace) => workspace.workspace_id === activeWorkspaceId) ?? null;
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async (operation: () => void | Promise<void>, message: string) => {
+    setError(null);
+    try {
+      await operation();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : message);
+    }
+  };
 
   const beginRename = () => {
     if (!active) return;
@@ -31,8 +41,9 @@ export default function WorkspaceSelector({
   };
 
   const commitRename = () => {
-    if (editingId && draft.trim()) onRename(editingId, draft.trim());
-    setEditingId(null);
+    if (!editingId || !draft.trim()) return;
+    const workspaceId = editingId;
+    void run(() => onRename(workspaceId, draft.trim()), "Unable to rename workspace.").then(() => setEditingId(null));
   };
 
   return (
@@ -58,7 +69,7 @@ export default function WorkspaceSelector({
           ))
         )}
       </select>
-      <button type="button" onClick={onCreate} className="research-workspace-action" aria-label="Create workspace">
+      <button type="button" onClick={() => void run(onCreate, "Unable to create workspace.")} className="research-workspace-action" aria-label="Create workspace">
         +
       </button>
       <button
@@ -72,13 +83,14 @@ export default function WorkspaceSelector({
       </button>
       <button
         type="button"
-        onClick={() => active && onDelete(active.workspace_id)}
+        onClick={() => active && void run(() => onDelete(active.workspace_id), "Unable to delete workspace. It may still contain chats.")}
         disabled={!active}
         className="research-workspace-action research-workspace-delete"
         aria-label={active ? `Delete ${active.name}` : "Delete workspace"}
       >
         Delete
       </button>
+      {error && <p role="alert" className="research-workspace-error">{error}</p>}
       {editingId && (
         <div className="research-workspace-rename" role="group" aria-label="Rename workspace">
           <input
