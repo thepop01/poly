@@ -2,9 +2,12 @@
 
 import { getAuthToken } from "@/utils/api";
 import type {
+  PanelMutation,
   PositionsPage,
   ResearchChat,
   ResearchMessage,
+  ResearchWorkspace,
+  ResearchWorkspaceTab,
   ResearchPanel,
   ResultMember,
   ResultSetSummary,
@@ -37,10 +40,51 @@ export async function listChats(includeArchived = false): Promise<{ chats: Resea
   return request(`/api/v2/research/chats?include_archived=${includeArchived}`);
 }
 
-export async function createChat(title?: string): Promise<ResearchChat> {
+export async function listWorkspaces(): Promise<{ workspaces: ResearchWorkspace[] }> {
+  return request(`/api/v2/research/workspaces`);
+}
+
+export async function createWorkspace(name?: string): Promise<ResearchWorkspace> {
+  return request(`/api/v2/research/workspaces`, {
+    method: "POST",
+    body: JSON.stringify(name === undefined ? {} : { name }),
+  });
+}
+
+export async function patchWorkspace(
+  workspaceId: string,
+  patch: { name: string },
+): Promise<ResearchWorkspace> {
+  return request(`/api/v2/research/workspaces/${workspaceId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteWorkspace(workspaceId: string): Promise<{ deleted: string }> {
+  return request(`/api/v2/research/workspaces/${workspaceId}`, { method: "DELETE" });
+}
+
+export async function listWorkspaceTabs(
+  workspaceId: string,
+): Promise<{ tabs: ResearchWorkspaceTab[] }> {
+  return request(`/api/v2/research/workspaces/${workspaceId}/tabs`);
+}
+
+export async function listWorkspacePanels(
+  workspaceId: string,
+): Promise<{ panels: ResearchPanel[] }> {
+  return request(`/api/v2/research/workspaces/${workspaceId}/panels`);
+}
+
+export async function createChat(title?: string, workspaceId?: string): Promise<ResearchChat> {
+  const body = {
+    ...(title === undefined ? {} : { title }),
+    ...(workspaceId === undefined ? {} : { workspace_id: workspaceId }),
+  };
   return request(`/api/v2/research/chats`, {
     method: "POST",
-    body: JSON.stringify(title ? { title } : {}),
+    body: JSON.stringify(body),
   });
 }
 
@@ -78,12 +122,19 @@ export async function listPanels(chatId: string): Promise<{ panels: ResearchPane
 
 export async function patchPanel(
   panelId: string,
-  state: ResearchPanel["state"],
+  mutation: PanelMutation,
 ): Promise<ResearchPanel> {
   return request(`/api/v2/research/panels/${panelId}`, {
     method: "PATCH",
-    body: JSON.stringify({ state }),
+    body: JSON.stringify(mutation),
   });
+}
+
+export async function setPanelState(
+  panelId: string,
+  state: ResearchPanel["state"],
+): Promise<ResearchPanel> {
+  return patchPanel(panelId, { state });
 }
 
 export async function listResults(chatId: string): Promise<{ results: ResultSetSummary[] }> {
