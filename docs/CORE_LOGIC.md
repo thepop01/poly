@@ -15,8 +15,15 @@ For day-to-day operation, start with the [Operations Runbook](rule.md). It conta
 - **Eligible history:** historical same-market/same-outcome analysis uses only `wallet_closed_positions_v2.metrics_eligible = TRUE`; open rows join only when explicitly requested, and each row carries its source.
 - **Outcome labels:** consensus groups by the market's stored outcome label. Binary markets may summarize as YES/NO; multi-outcome markets retain actual labels. Historical overlap is descriptive and never labels wallets coordinated/copied/collusive.
 - **No fabrication:** monetary and win-rate values come from database fields only. The model explains values but never invents, rescales, or repairs them. Missing database fields render as em dash (`—`).
-- **Chat-scoped open positions:** Positions shown in the Research Hub dock are strictly read-only and derived from `wallet_positions_v2` joined via `research_result_members` for wallet entities persisted in the active authenticated chat (`COALESCE(current_value, 0) > 0` AND `COALESCE(is_resolved, FALSE) = FALSE`). Cross-chat or cross-owner wallets are excluded.
+- **Chat-scoped open positions:** Positions shown in the Research Hub dock are strictly read-only and derived from `wallet_positions_v2` joined via `research_result_members` for wallet entities persisted in the active authenticated chat (`COALESCE(current_value, 0) > 0` AND `COALESCE(is_resolved, FALSE) = FALSE`). Cross-chat or cross-owner wallets are excluded. These chat-derived research positions are **not connected-wallet live positions** and must never be presented as a live account portfolio.
 - **Mock trading ticket boundary:** The right-hand trading panel in the Research Hub is strictly a frontend UI prototype/mock ticket. It makes no network requests, does not connect to any exchange, CLOB, or execution broker, does not sign transactions, and places no live orders. Displayed mock prices, balances, expiration dates, and estimated returns are illustrative only and not authoritative financial quotes.
+- **Floating panel geometry & persistence:**
+  - Panel geometry (`x`, `y`, `width`, `height`) and `z_index` are persisted per panel within its parent **workspace**, not per chat.
+  - Frontmost activation ranks are workspace-scoped: when a user clicks or moves a panel, `bring_to_front: true` atomically increments `z_index` above the workspace's highest rank; ranks compact when exceeding 1,000,000.
+  - Coordinate constraints: `x >= 0`, `y >= 0`, `x + width <= stageWidth`, `y + height <= 100,000`, minimum size 320×240, maximum size 4096×4096.
+  - Geometry is preserved during analytical upserts: `upsert_panel` does not overwrite existing `layout` JSONB column values, so a new chat result updates content/provenance without resetting workspace layout.
+  - Responsive fallback: When viewport width < 768px or stage width < 640px, the canvas falls back to standard stacked layout without overwriting stored desktop coordinates.
+
 
 ---
 

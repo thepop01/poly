@@ -9,6 +9,18 @@ This document outlines the PolyTracker architecture and background worker ecosys
 3. **Database**: PostgreSQL (managed via Alembic).
 4. **Data Sources**: Polymarket API (Leaderboard, Positions, Trades) and Alchemy (Polygon RPC).
 
+### Research Hub Ownership and Canvas Flow
+
+The Research Hub is workspace-first: a user's named workspace owns its permanent canvas, panels, and exactly three fixed tabs (`Wallet Groups`, `Market Groups`, and `Agents`). A chat owns conversational messages, run state, immutable result snapshots, and chat-scoped research positions. A panel is workspace-owned and may retain nullable source-chat/result provenance after its source chat is closed or deleted.
+
+```text
+workspace selector -> workspace/tabs/panels
+chat selector      -> messages/runs/results/research positions
+analysis run(chat) -> immutable chat result + workspace panel upsert
+```
+
+Workspace and chat IDs are owner-scoped. Cross-owner or foreign workspace/chat/panel references return non-disclosing `404 Not Found`; fixed tabs cannot be renamed or deleted. Analytical upserts preserve existing workspace panel geometry, visual state, and z-index while updating the result/provenance.
+
 ### Data Flow Pipeline
 
 ```text
@@ -72,7 +84,7 @@ All workers write to the v2 schema (`wallets_v2`, `wallet_sources_v2`, `wallet_m
 The metrics computation layer is modularized into 3 dedicated standalone workers with individual CLI controls and dedicated concurrency profiles:
 - **Worker A (`src/workers/compute_core_metrics.py`)**: Computes per-market paired win rates (`by_condition`), resolved/winning counts, 6 price-bucket matrices (<15c .. >75c), parlay stats, total volume, and anchors `total_pnl` to `pm_pnl` with **250 concurrency** into `wallet_metrics_v2`.
 - **Worker B (`src/workers/compute_category_stats.py`)**: Computes multi-tier hierarchical category, subcategory, and competition league returns with proportional PnL scaling so that $\sum \text{Root Categories} \equiv \text{Total PnL}$ (`Delta = $0.00`) into `category_stats_v2`.
-- **Worker C (`src/workers/compute_historical_windows.py`)**: Computes the 10 rolling trade progression windows (`pnl_100`..`pnl_5000`) chronologically from real resolved closed trades (`is_redeemable = FALSE`) into `wallet_metrics_v2`.
+- **Worker C (`src/workers/compute_historical_windows.py`)**: Computes the 10 rolling trade progression windows (`pnl_100`..`pnl_5000`) chronologically from all eligible resolved closed rows, including redeemable-synced rows, into `wallet_metrics_v2`.
 - **Master Coordinator (`src/workers/positions_metrics_compute.py`)**: Unified entrypoint orchestrating Workers A, B, and C in parallel across all active wallets.
 
 ---

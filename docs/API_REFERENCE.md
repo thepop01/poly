@@ -435,6 +435,22 @@ These lessons reflect practical verification from real-world trading and indexin
 
 ## 12. AI Research Hub API (Internal Platform API)
 
+All Research Hub endpoints require the authenticated bearer identity. Workspace, chat, tab, panel, and result access is owner-scoped; a foreign or nonexistent ID returns `404 Not Found` without disclosing whether the resource exists.
+
+### Workspace and Canvas Endpoints
+
+| Method & Endpoint | Purpose | Notes |
+| :--- | :--- | :--- |
+| `POST /api/v2/research/workspaces` | Create a named workspace | Authenticated; creates exactly three fixed tabs: `Wallet Groups`, `Market Groups`, and `Agents`. |
+| `GET /api/v2/research/workspaces` | List the caller's workspaces | Owner-scoped. |
+| `GET /api/v2/research/workspaces/{workspace_id}` | Retrieve one workspace | Foreign IDs return `404`. |
+| `PATCH /api/v2/research/workspaces/{workspace_id}` | Rename a workspace | Workspace name only; fixed tabs are not renamed through this endpoint. |
+| `DELETE /api/v2/research/workspaces/{workspace_id}` | Delete an empty workspace | A workspace with chats is protected (`409`). |
+| `GET /api/v2/research/workspaces/{workspace_id}/tabs` | Retrieve fixed tabs | Returns exactly the three database-backed tabs. Fixed tabs cannot be renamed or deleted. |
+| `GET /api/v2/research/workspaces/{workspace_id}/panels` | List the permanent workspace canvas panels | Panels include nullable `source_chat_id`/`result_set_id` provenance and persisted layout/state/z-index. |
+
+`POST /api/v2/research/chats` accepts optional `workspace_id` in its JSON body. When supplied, the workspace must belong to the caller; a foreign workspace returns `404`. If omitted, the service selects or creates the caller's default workspace. Chats remain the owner of messages, runs, immutable result snapshots, and chat-derived research positions; analytical runs upsert their panel into the selected workspace canvas rather than creating a chat-local canvas copy. Closing or deleting a source chat does not delete its workspace panel; its source-chat provenance becomes nullable.
+
 ### Positions Endpoint: `GET /api/v2/research/chats/{chat_id}/positions`
 
 - **URL**: `/api/v2/research/chats/{chat_id}/positions`
@@ -472,5 +488,25 @@ These lessons reflect practical verification from real-world trading and indexin
     "limit": 100
   }
   ```
+
+### Panel Mutation Endpoint: `PATCH /api/v2/research/panels/{panel_id}`
+
+- **URL**: `/api/v2/research/panels/{panel_id}`
+- **Method**: `PATCH`
+- **Authentication**: Authenticated Bearer token (`get_current_user`). Unauthenticated requests return `401 Unauthorized`.
+- **Authorization & Scoping**:
+  - `panel_id` must belong to a workspace owned by the caller (`owner_id = user["sub"]`). Cross-user or foreign-workspace mutations return `404 Not Found`.
+- **Request Body (`application/json`)**:
+  - `state` (string, optional, enum: `"normal"`, `"minimized"`, `"maximized"`, `"closed"`): Updates visual presentation state.
+  - `floating` (object, optional): Explicit 2D geometry rectangle:
+    - `x` (integer, required, min 0, max 100000)
+    - `y` (integer, required, min 0, max 100000)
+    - `width` (integer, required, min 320, max 4096)
+    - `height` (integer, required, min 240, max 4096)
+  - `bring_to_front` (boolean, optional): When `true`, bumps panel's `z_index` atomically to `max(z_index) + 1` across all panels in the same workspace. If `z_index >= 1,000,000`, ranks are automatically compacted to dense positive ranks starting from 1.
+- **Analytical Re-run Preservation**:
+  - When background runs stream fresh analytical snapshots via `upsert_panel`, existing user geometry (`layout`) is strictly preserved (does not overwrite `layout`).
+- **Response Format (`application/json`)**: Full `ResearchPanel` object with updated `state` and `layout`.
+
 
 
