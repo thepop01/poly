@@ -115,13 +115,13 @@ async def test_archiving_empty_workspace_chat_returns_typed_deleted_chat(api_poo
         )).json()
         response = await client.patch(
             f"/api/v2/research/chats/{chat['chat_id']}",
-            json={"is_archived": True},
+            json={"title": "Renamed empty chat", "is_archived": True},
         )
         assert response.status_code == 200
         archived = response.json()
         assert archived["chat_id"] == chat["chat_id"]
         assert archived["workspace_id"] == workspace["workspace_id"]
-        assert archived["title"] == "Empty chat"
+        assert archived["title"] == "Renamed empty chat"
         assert archived["is_archived"] is True
         assert (await client.get(
             f"/api/v2/research/chats/{chat['chat_id']}"

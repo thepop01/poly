@@ -226,6 +226,10 @@ async def patch_chat(
         raise HTTPException(status_code=404, detail="chat not found")
     if body.title is not None:
         chat = await repo.rename_chat(owner_id, chat_id, body.title)
+        if chat is None:
+            # Another request may have deleted the chat after the initial read.
+            # Do not continue into the archive fallback with no typed snapshot.
+            raise HTTPException(status_code=404, detail="chat not found")
     if body.is_archived is not None:
         chat_before_archive = chat
         chat = await repo.archive_chat(owner_id, chat_id, body.is_archived)
