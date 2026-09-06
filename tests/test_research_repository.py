@@ -133,3 +133,257 @@ async def test_runs_are_owner_scoped(test_pool, two_users):
     running = await repo.set_run_status(two_users.first, run.run_id, "running")
     assert running is not None and running.status.value == "running"
     assert await repo.set_run_status(two_users.second, run.run_id, "cancelled") is None
+
+
+def test_panel_contracts():
+    from pydantic import ValidationError
+    from src.research.contracts import FloatingRect, PanelLayout, PanelMutation, PanelState
+
+    # Accept state-only mutation
+    m1 = PanelMutation(state=PanelState.NORMAL)
+    assert m1.state == PanelState.NORMAL
+    assert m1.floating is None
+    assert m1.bring_to_front is None
+
+    # Accept valid floating + bring_to_front mutation
+    m2 = PanelMutation(
+        floating=FloatingRect(x=0, y=12, width=500, height=320),
+        bring_to_front=True,
+    )
+    assert m2.floating.x == 0
+    assert m2.floating.y == 12
+    assert m2.floating.width == 500
+    assert m2.floating.height == 320
+    assert m2.bring_to_front is True
+
+    # Reject empty mutation
+    with pytest.raises(ValidationError):
+        PanelMutation.model_validate({})
+
+    # Reject unknown fields (extra="forbid")
+    with pytest.raises(ValidationError):
+        PanelMutation.model_validate({"unknown": 123, "state": "normal"})
+
+    # Reject negative coordinates
+    with pytest.raises(ValidationError):
+        FloatingRect(x=-1, y=0, width=500, height=320)
+    with pytest.raises(ValidationError):
+        FloatingRect(x=0, y=-5, width=500, height=320)
+
+    # Reject non-finite/fractional coordinates (strict integers)
+    with pytest.raises(ValidationError):
+        FloatingRect.model_validate({"x": 10.5, "y": 0, "width": 500, "height": 320})
+
+    # Reject width below 320 or height below 240
+    with pytest.raises(ValidationError):
+        FloatingRect(x=0, y=0, width=319, height=320)
+    with pytest.raises(ValidationError):
+        FloatingRect(x=0, y=0, width=400, height=239)
+
+    # Reject dimensions above 4096
+    with pytest.raises(ValidationError):
+        FloatingRect(x=0, y=0, width=4097, height=320)
+    with pytest.raises(ValidationError):
+        FloatingRect(x=0, y=0, width=500, height=4097)
+
+    # Reject y + height > 100000
+    with pytest.raises(ValidationError):
+        FloatingRect(x=0, y=99800, width=500, height=300)
+
+    # Old layout JSON without floating fields still parses
+    old_layout = PanelLayout.model_validate({"col_span": 6, "min_height": 380, "order": 1})
+    assert old_layout.floating is None
+    assert old_layout.z_index == 0
+
+
+@pytest.mark.asyncio
+async def test_panel_geometry_persists_and_survives_analytical_upsert(test_pool, two_users):
+    from src.research.contracts import FloatingRect, PanelMutation
+
+    repo = ResearchRepository(test_pool)
+    chat = await repo.create_chat(two_users.first, "Geometry Chat")
+    default_layout = {"col_span": 12, "min_height": 420, "order": 0}
+
+    panel = await repo.upsert_panel(
+        two_users.first, chat.chat_id, "wallets:geometry", "wallet_table",
+        "Wallets", None, default_layout, {"scope": "Sports"},
+    )
+    assert panel is not None
+
+    # Apply floating geometry and bring_to_front
+    updated = await repo.update_panel(
+        two_users.first,
+        panel.panel_id,
+        PanelMutation(
+            floating=FloatingRect(x=100, y=150, width=640, height=480),
+            bring_to_front=True,
+        ),
+    )
+    assert updated is not None
+    assert updated.layout.floating is not None
+    assert updated.layout.floating.x == 100
+    assert updated.layout.floating.y == 150
+    assert updated.layout.floating.width == 640
+    assert updated.layout.floating.height == 480
+    assert updated.layout.z_index == 1
+
+    # Analytical upsert happens with same panel_key, new result_set_id and title
+    rs = await repo.save_result_set(
+        two_users.first, chat.chat_id, "wallet_set", "Top wallets",
+        {"tool": "find_wallets"}, [{"entity_type": "wallet", "entity_key": "0x123", "payload": {}}],
+    )
+    assert rs is not None
+    new_result_id = rs.result_set_id
+    upserted = await repo.upsert_panel(
+        two_users.first, chat.chat_id, "wallets:geometry", "wallet_table",
+        "Wallets Updated Results", new_result_id, default_layout, {"scope": "Updated Scope"},
+    )
+    assert upserted is not None
+    assert upserted.panel_id == panel.panel_id
+    assert upserted.title == "Wallets Updated Results"
+    assert upserted.result_set_id == new_result_id
+    assert upserted.config["scope"] == "Updated Scope"
+    # CRITICAL: user floating geometry and z_index MUST survive analytical upsert!
+    assert upserted.layout.floating is not None
+    assert upserted.layout.floating.x == 100
+    assert upserted.layout.floating.y == 150
+    assert upserted.layout.floating.width == 640
+    assert upserted.layout.floating.height == 480
+    assert upserted.layout.z_index == 1
+
+    # State-only update preserves geometry
+    minimized = await repo.update_panel(
+        two_users.first, panel.panel_id, PanelMutation(state="minimized")
+    )
+    assert minimized is not None
+    assert minimized.state.value == "minimized"
+    assert minimized.layout.floating.x == 100
+
+    # Geometry-only update preserves state
+    moved = await repo.update_panel(
+        two_users.first,
+        panel.panel_id,
+        PanelMutation(floating=FloatingRect(x=120, y=180, width=600, height=450)),
+    )
+    assert moved is not None
+    assert moved.state.value == "minimized"
+    assert moved.layout.floating.x == 120
+    assert moved.layout.floating.y == 180
+
+    # Foreign user cannot update panel
+    assert await repo.update_panel(
+        two_users.second, panel.panel_id, PanelMutation(state="closed")
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_panel_bring_to_front_stacking_and_compaction(test_pool, two_users):
+    from src.research.contracts import PanelMutation
+
+    repo = ResearchRepository(test_pool)
+    chat = await repo.create_chat(two_users.first, "Stacking Chat")
+    default_layout = {"col_span": 12, "min_height": 420, "order": 0}
+
+    panel_a = await repo.upsert_panel(
+        two_users.first, chat.chat_id, "panel:a", "wallet_table", "A", None, default_layout
+    )
+    panel_b = await repo.upsert_panel(
+        two_users.first, chat.chat_id, "panel:b", "wallet_table", "B", None, default_layout
+    )
+    assert panel_a is not None and panel_b is not None
+
+    # Raise A -> rank 1
+    up_a = await repo.update_panel(two_users.first, panel_a.panel_id, PanelMutation(bring_to_front=True))
+    assert up_a is not None and up_a.layout.z_index == 1
+
+    # Raise B -> rank 2
+    up_b = await repo.update_panel(two_users.first, panel_b.panel_id, PanelMutation(bring_to_front=True))
+    assert up_b is not None and up_b.layout.z_index == 2
+
+    # Raise A again -> rank 3
+    up_a2 = await repo.update_panel(two_users.first, panel_a.panel_id, PanelMutation(bring_to_front=True))
+    assert up_a2 is not None and up_a2.layout.z_index == 3
+
+    # Test compaction when max rank >= 1,000,000
+    async with test_pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE research_panels
+               SET layout = jsonb_set(layout, '{z_index}', '1000000'::jsonb)
+               WHERE panel_id = $1""",
+            panel_a.panel_id,
+        )
+    # Now raising B should compact chat panels in order and assign next rank
+    up_b2 = await repo.update_panel(two_users.first, panel_b.panel_id, PanelMutation(bring_to_front=True))
+    assert up_b2 is not None
+    # Prior to raising B, B had rank 2 and A had 1000000.
+    # Compaction ordered by z_index ASC: B gets 1, A gets 2.
+    # Then B is raised to max_rank + 1 = 3!
+    assert up_b2.layout.z_index == 3
+    panel_a_fresh = (await repo.list_panels(two_users.first, chat.chat_id))[0]
+    # A was compacted down from 1000000 to 2
+    assert panel_a_fresh.layout.z_index == 2
+
+
+@pytest.mark.asyncio
+async def test_workspace_creation_seeds_exactly_three_tabs(test_pool, two_users):
+    repo = ResearchRepository(test_pool)
+    workspace = await repo.create_workspace(two_users.first, "Cricket")
+    tabs = await repo.list_workspace_tabs(two_users.first, workspace.workspace_id)
+    assert tabs is not None
+    assert [tab.tab_type.value for tab in tabs] == ["wallet_groups", "market_groups", "agents"]
+    assert len(tabs) == 3
+    assert await repo.list_workspace_tabs(two_users.second, workspace.workspace_id) is None
+
+
+@pytest.mark.asyncio
+async def test_workspace_panel_upsert_is_shared_across_chats_and_preserves_geometry(test_pool, two_users):
+    from src.research.contracts import FloatingRect, PanelMutation
+
+    repo = ResearchRepository(test_pool)
+    workspace = await repo.create_workspace(two_users.first, "Shared canvas")
+    first_chat = await repo.create_chat(two_users.first, "First", workspace.workspace_id)
+    second_chat = await repo.create_chat(two_users.first, "Second", workspace.workspace_id)
+    layout = {"col_span": 12, "min_height": 420, "order": 0}
+    first = await repo.upsert_panel(
+        two_users.first, workspace.workspace_id, first_chat.chat_id, "same", "wallet_table",
+        "First", None, layout,
+    )
+    assert first is not None
+    moved = await repo.update_panel(
+        two_users.first, first.panel_id,
+        PanelMutation(floating=FloatingRect(x=10, y=20, width=500, height=320), bring_to_front=True),
+    )
+    assert moved is not None
+    second = await repo.upsert_panel(
+        two_users.first, workspace.workspace_id, second_chat.chat_id, "same", "wallet_table",
+        "Second", None, layout,
+    )
+    assert second is not None
+    assert second.panel_id == first.panel_id
+    assert second.workspace_id == workspace.workspace_id
+    assert second.source_chat_id == second_chat.chat_id
+    assert second.layout.floating is not None
+    assert second.layout.floating.x == 10
+    assert second.layout.z_index == 1
+
+    assert await repo.get_workspace(two_users.second, workspace.workspace_id) is None
+    assert await repo.rename_workspace(two_users.second, workspace.workspace_id, "Nope") is None
+    assert await repo.list_workspace_panels(two_users.second, workspace.workspace_id) is None
+    assert await repo.update_panel(two_users.second, first.panel_id, PanelMutation(state="closed")) is None
+
+
+@pytest.mark.asyncio
+async def test_deleted_source_chat_keeps_workspace_panel(test_pool, two_users):
+    repo = ResearchRepository(test_pool)
+    workspace = await repo.create_workspace(two_users.first, "Preserve")
+    chat = await repo.create_chat(two_users.first, "Source", workspace.workspace_id)
+    panel = await repo.upsert_panel(
+        two_users.first, workspace.workspace_id, chat.chat_id, "orphan", "wallet_table",
+        "Orphan", None, {"col_span": 12, "min_height": 420, "order": 0},
+    )
+    assert panel is not None
+    async with test_pool.acquire() as conn:
+        await conn.execute("DELETE FROM research_chats WHERE chat_id = $1", chat.chat_id)
+    panels = await repo.list_workspace_panels(two_users.first, workspace.workspace_id)
+    assert panels is not None and len(panels) == 1
+    assert panels[0].source_chat_id is None

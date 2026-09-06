@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt, model_validator
 
 
 class ResultKind(StrEnum):
@@ -131,8 +131,30 @@ class SameOutcomeHistoryArgs(Scope):
     limit: int = Field(default=100, ge=1, le=500)
 
 
+class WorkspaceTabType(StrEnum):
+    WALLET_GROUPS = "wallet_groups"
+    MARKET_GROUPS = "market_groups"
+    AGENTS = "agents"
+
+
+class ResearchWorkspace(BaseModel):
+    workspace_id: UUID
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchWorkspaceTab(BaseModel):
+    workspace_tab_id: UUID
+    workspace_id: UUID
+    tab_type: WorkspaceTabType
+    label: str
+    created_at: datetime
+
+
 class ResearchChat(BaseModel):
     chat_id: UUID
+    workspace_id: UUID
     title: str
     is_archived: bool = False
     created_at: datetime
@@ -174,15 +196,47 @@ class ResultSetSummary(BaseModel):
     created_at: datetime
 
 
+class FloatingRect(BaseModel):
+    x: StrictInt = Field(ge=0)
+    y: StrictInt = Field(ge=0)
+    width: StrictInt = Field(ge=320, le=4096)
+    height: StrictInt = Field(ge=240, le=4096)
+
+    @model_validator(mode="after")
+    def check_bounds(self) -> "FloatingRect":
+        if self.y + self.height > 100_000:
+            raise ValueError(f"y + height cannot exceed 100000: got {self.y + self.height}")
+        return self
+
+
 class PanelLayout(BaseModel):
     col_span: Literal[4, 6, 8, 12] = 12
     min_height: int = Field(default=420, ge=100, le=2000)
     order: int = Field(default=0, ge=0)
+    floating: FloatingRect | None = None
+    z_index: int = Field(default=0, ge=0)
+
+
+class PanelMutation(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    state: PanelState | None = None
+    floating: FloatingRect | None = None
+    bring_to_front: bool | None = None
+
+    @model_validator(mode="after")
+    def check_effective_operation(self) -> "PanelMutation":
+        if self.state is None and self.floating is None and not self.bring_to_front:
+            raise ValueError(
+                "Mutation must contain at least one effective operation: state, floating, or bring_to_front"
+            )
+        return self
 
 
 class ResearchPanel(BaseModel):
     panel_id: UUID
-    chat_id: UUID
+    workspace_id: UUID
+    source_chat_id: UUID | None = None
     result_set_id: UUID | None = None
     panel_type: str
     panel_key: str
