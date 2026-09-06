@@ -16,21 +16,28 @@ depends_on = None
 
 
 def _add_constraint_if_missing(table: str, constraint: str, definition: str) -> None:
-    """Add a named constraint without failing a retried/partial upgrade."""
+    """Add a named constraint, rejecting same-name definition drift."""
+    normalized_definition = " ".join(definition.lower().split())
     op.execute(
         f"""
 DO $$
+DECLARE
+    actual_definition text;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint c
-        JOIN pg_class t ON t.oid = c.conrelid
-        JOIN pg_namespace n ON n.oid = t.relnamespace
-        WHERE n.nspname = 'public'
-          AND t.relname = '{table}'
-          AND c.conname = '{constraint}'
-    ) THEN
+    SELECT regexp_replace(lower(pg_get_constraintdef(c.oid)), '[[:space:]]+', ' ', 'g')
+      INTO actual_definition
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = 'public'
+      AND t.relname = '{table}'
+      AND c.conname = '{constraint}';
+
+    IF actual_definition IS NULL THEN
         ALTER TABLE {table} ADD CONSTRAINT {constraint} {definition};
+    ELSIF actual_definition <> '{normalized_definition}' THEN
+        RAISE EXCEPTION 'Constraint {constraint} on {table} has unexpected definition: %',
+            actual_definition;
     END IF;
 END $$;
 """
@@ -102,8 +109,10 @@ CREATE TABLE IF NOT EXISTS research_workspace_tabs (
     # stopped after creating the workspace tables.
     op.execute("ALTER TABLE research_chats ADD COLUMN IF NOT EXISTS workspace_id UUID")
 
-    # Every legacy chat gets a stable, chat-derived workspace.  The explicit
-    # conflict clauses make this block safe to run again after a partial upgrade.
+    # Every legacy chat with no workspace gets a stable, chat-derived
+    # workspace. Existing assignments are never rewritten: a retry may see a
+    # workspace selected by a later application migration, and moving that chat
+    # back to its deterministic workspace would split its canvas.
     op.execute(
         """
 INSERT INTO research_workspaces (workspace_id, owner_id, name, created_at, updated_at)
@@ -113,9 +122,13 @@ SELECT md5('research-workspace:' || c.chat_id::text)::uuid,
        c.created_at,
        c.updated_at
 FROM research_chats c
+WHERE c.workspace_id IS NULL
 ON CONFLICT (workspace_id) DO NOTHING
 """
     )
+    # Seed every workspace, not only deterministic legacy-chat workspaces.
+    # This also repairs a partial run and covers workspaces created by later
+    # application code before a retry reaches this migration.
     op.execute(
         """
 INSERT INTO research_workspace_tabs (workspace_id, tab_type, label)
@@ -127,19 +140,62 @@ CROSS JOIN (
         ('market_groups'::varchar(32), 'Market Groups'::varchar(80)),
         ('agents'::varchar(32), 'Agents'::varchar(80))
 ) AS tabs(tab_type, label)
-WHERE EXISTS (
-    SELECT 1
-    FROM research_chats c
-    WHERE md5('research-workspace:' || c.chat_id::text)::uuid = w.workspace_id
-)
 ON CONFLICT (workspace_id, tab_type) DO NOTHING
+"""
+    )
+    op.execute(
+        """
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM research_workspaces w
+        WHERE NOT EXISTS (
+            SELECT 1 FROM research_workspace_tabs t
+            WHERE t.workspace_id = w.workspace_id AND t.tab_type = 'wallet_groups'
+        )
+        OR NOT EXISTS (
+            SELECT 1 FROM research_workspace_tabs t
+            WHERE t.workspace_id = w.workspace_id AND t.tab_type = 'market_groups'
+        )
+        OR NOT EXISTS (
+            SELECT 1 FROM research_workspace_tabs t
+            WHERE t.workspace_id = w.workspace_id AND t.tab_type = 'agents'
+        )
+    ) THEN
+        RAISE EXCEPTION 'Cannot backfill workspace tabs: every workspace must have all three fixed tabs';
+    END IF;
+END $$;
 """
     )
     op.execute(
         """
 UPDATE research_chats
 SET workspace_id = md5('research-workspace:' || chat_id::text)::uuid
-WHERE workspace_id IS DISTINCT FROM md5('research-workspace:' || chat_id::text)::uuid
+WHERE workspace_id IS NULL
+"""
+    )
+    op.execute(
+        """
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM research_chats c
+        LEFT JOIN research_workspaces w ON w.workspace_id = c.workspace_id
+        WHERE c.workspace_id IS NOT NULL AND w.workspace_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'Cannot backfill research_chats.workspace_id: existing assignment has no workspace';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM research_chats c
+        JOIN research_workspaces w ON w.workspace_id = c.workspace_id
+        WHERE c.owner_id <> w.owner_id
+    ) THEN
+        RAISE EXCEPTION 'Cannot backfill research_chats.workspace_id: chat and workspace owners differ';
+    END IF;
+END $$;
 """
     )
     _add_constraint_if_missing(
@@ -178,15 +234,24 @@ UPDATE research_panels p
 SET workspace_id = c.workspace_id
 FROM research_chats c
 WHERE p.source_chat_id = c.chat_id
-  AND p.workspace_id IS DISTINCT FROM c.workspace_id
+  AND p.workspace_id IS NULL
 """
     )
-    # A legacy panel always has a source chat.  Fail loudly rather than assign
-    # it to an arbitrary workspace if the source data is inconsistent.
+    # A legacy panel always has a source chat. Fail loudly rather than assign
+    # it to an arbitrary workspace if the source data is inconsistent, and do
+    # not rewrite an ownership assignment made by a partial/later upgrade.
     op.execute(
         """
 DO $$
 BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM research_panels p
+        JOIN research_chats c ON c.chat_id = p.source_chat_id
+        WHERE p.workspace_id <> c.workspace_id
+    ) THEN
+        RAISE EXCEPTION 'Cannot backfill research_panels.workspace_id: existing assignment conflicts with source chat workspace';
+    END IF;
     IF EXISTS (SELECT 1 FROM research_panels WHERE workspace_id IS NULL) THEN
         RAISE EXCEPTION 'Cannot backfill research_panels.workspace_id: panel has no source chat workspace';
     END IF;

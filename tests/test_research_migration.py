@@ -1,4 +1,14 @@
+from pathlib import Path
+
 import pytest
+
+
+MIGRATION_SOURCE = (
+    Path(__file__).parents[1]
+    / "alembic"
+    / "versions"
+    / "a0b1c2d3e4f5_add_research_workspaces.py"
+).read_text()
 
 
 @pytest.mark.asyncio
@@ -90,6 +100,19 @@ async def test_workspace_tabs_use_fixed_allow_list_and_are_complete(test_pool):
             assert row["tab_count"] == 3
             assert row["distinct_tab_count"] == 3
             assert row["tab_types"] == expected
+
+
+def test_workspace_backfill_does_not_reassign_or_skip_workspaces():
+    assert "WHERE c.workspace_id IS NULL" in MIGRATION_SOURCE
+    assert "WHERE workspace_id IS DISTINCT FROM" not in MIGRATION_SOURCE
+    assert "FROM research_workspaces w\nCROSS JOIN" in MIGRATION_SOURCE
+    assert "every workspace must have all three fixed tabs" in MIGRATION_SOURCE
+
+
+def test_same_name_constraint_definition_drift_is_rejected():
+    assert "actual_definition <>" in MIGRATION_SOURCE
+    assert "unexpected definition" in MIGRATION_SOURCE
+    assert "ON DELETE SET NULL" in MIGRATION_SOURCE
 
 
 @pytest.mark.asyncio
