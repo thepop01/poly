@@ -164,8 +164,14 @@ class ResearchRepository:
                         owner_id,
                     )
                 if workspace_id is not None:
+                    # Serialize workspace-owned chat creation with workspace
+                    # deletion. If deletion wins, this returns no row and the
+                    # route can deterministically translate the ownership miss
+                    # to a non-disclosing 404 instead of leaking an FK error.
                     owns = await conn.fetchval(
-                        "SELECT 1 FROM research_workspaces WHERE workspace_id = $1 AND owner_id = $2::uuid",
+                        """SELECT workspace_id FROM research_workspaces
+                           WHERE workspace_id = $1 AND owner_id = $2::uuid
+                           FOR UPDATE""",
                         workspace_id, owner_id,
                     )
                     if not owns:
@@ -173,7 +179,8 @@ class ResearchRepository:
                 else:
                     workspace_id = await conn.fetchval(
                         """SELECT workspace_id FROM research_workspaces
-                           WHERE owner_id = $1::uuid ORDER BY created_at ASC LIMIT 1""", owner_id,
+                           WHERE owner_id = $1::uuid ORDER BY created_at ASC LIMIT 1
+                           FOR UPDATE""", owner_id,
                     )
                     if workspace_id is None:
                         row = await conn.fetchrow(

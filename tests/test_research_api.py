@@ -104,6 +104,31 @@ async def test_chat_crud_roundtrip(api_pool, user_a):
 
 
 @pytest.mark.asyncio
+async def test_archiving_empty_workspace_chat_returns_typed_deleted_chat(api_pool, user_a):
+    async with _client(user_a["token"]) as client:
+        workspace = (await client.post(
+            "/api/v2/research/workspaces", json={"name": "Archive response"}
+        )).json()
+        chat = (await client.post(
+            "/api/v2/research/chats",
+            json={"workspace_id": workspace["workspace_id"], "title": "Empty chat"},
+        )).json()
+        response = await client.patch(
+            f"/api/v2/research/chats/{chat['chat_id']}",
+            json={"is_archived": True},
+        )
+        assert response.status_code == 200
+        archived = response.json()
+        assert archived["chat_id"] == chat["chat_id"]
+        assert archived["workspace_id"] == workspace["workspace_id"]
+        assert archived["title"] == "Empty chat"
+        assert archived["is_archived"] is True
+        assert (await client.get(
+            f"/api/v2/research/chats/{chat['chat_id']}"
+        )).status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_cross_owner_ids_return_404(api_pool, user_a, user_b):
     async with _client(user_a["token"]) as client_a:
         created = await client_a.post("/api/v2/research/chats", json={"title": "Private"})

@@ -227,15 +227,17 @@ async def patch_chat(
     if body.title is not None:
         chat = await repo.rename_chat(owner_id, chat_id, body.title)
     if body.is_archived is not None:
+        chat_before_archive = chat
         chat = await repo.archive_chat(owner_id, chat_id, body.is_archived)
         if chat is None:
-            return {
-                "chat_id": str(chat_id),
-                "title": "",
-                "is_archived": True,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
+            # Empty chats are intentionally deleted when archived, but preserve
+            # the normal typed response shape for compatibility with clients.
+            chat = chat_before_archive.model_copy(
+                update={
+                    "is_archived": True,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
     assert chat is not None
     return chat.model_dump(mode="json")
 
