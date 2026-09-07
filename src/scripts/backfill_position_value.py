@@ -11,6 +11,10 @@ logger = logging.getLogger(__name__)
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
 
 async def backfill():
+    raise RuntimeError(
+        "backfill_position_value is retired: open source fields are owned by "
+        "positions_open_backfill"
+    )
     logger.info("Connecting to database...")
     conn = await asyncpg.connect(DB_URL)
     

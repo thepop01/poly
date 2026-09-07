@@ -102,13 +102,13 @@ async def add_wallets_to_tracked(
                 WHERE address = $1
             """, address, username)
             await conn.execute("""
-                INSERT INTO wallet_metrics_v2 (address, pm_pnl, pm_volume, pm_rank, computed_at)
+                INSERT INTO wallet_metrics_v2 (address, pm_pnl, pm_volume, pm_rank, pm_synced_at)
                 VALUES ($1, $2, $3, $4, NOW())
                 ON CONFLICT (address) DO UPDATE SET
                     pm_pnl = GREATEST(COALESCE(wallet_metrics_v2.pm_pnl, 0), $2),
                     pm_volume = GREATEST(COALESCE(wallet_metrics_v2.pm_volume, 0), $3),
                     pm_rank = $4,
-                    computed_at = NOW()
+                    pm_synced_at = NOW()
             """, address, pnl, volume, rank)
         else:
             # New wallet from leaderboard.
@@ -121,7 +121,7 @@ async def add_wallets_to_tracked(
             """, address, username)
             
             await conn.execute("""
-                INSERT INTO wallet_metrics_v2 (address, pm_pnl, pm_volume, pm_rank, computed_at)
+                INSERT INTO wallet_metrics_v2 (address, pm_pnl, pm_volume, pm_rank, pm_synced_at)
                 VALUES ($1, $2, $3, $4, NOW())
                 ON CONFLICT (address) DO NOTHING
             """, address, pnl, volume, rank)
@@ -144,33 +144,17 @@ async def store_category_stats(
     entries: list[dict],
     category: str,
 ) -> tuple[int, int]:
-    """Store per-category PnL/volume and remove wallets that dropped off.
-    Returns (upserted, removed) counts."""
-    current_addresses = set()
-    upserted = 0
-    for entry in entries:
-        address = (entry.get("proxyWallet") or "").lower()
-        if not address or len(address) != 42:
-            continue
-        pnl = float(entry.get("pnl") or 0)
-        volume = float(entry.get("vol") or 0)
-        if pnl == 0 and volume == 0:
-            continue
+    """Skip official category snapshots until the separate Task 2 table exists.
 
-        current_addresses.add(address)
-        await conn.execute("""
-            INSERT INTO category_stats_v2 (address, category, subcategory, window_size, pnl, volume, computed_at)
-            VALUES ($1, $2, '', 0, $3, $4, NOW())
-            ON CONFLICT (address, category, subcategory, window_size) DO UPDATE SET
-                pnl = EXCLUDED.pnl,
-                volume = EXCLUDED.volume,
-                computed_at = NOW()
-        """, address, category, pnl, volume)
-        upserted += 1
-
-    # User requirement: Do NOT remove any wallets or category stats from database
-    removed_count = 0
-    return upserted, removed_count
+    This worker may publish only ``pm_*`` wallet fields; returning zero keeps
+    the weekly discovery job safe without destroying existing canonical rows.
+    """
+    logger.info(
+        "Skipping official %s category rows; category_stats_v2 is canonical "
+        "and the official snapshot table is deferred to Task 2",
+        category,
+    )
+    return 0, 0
 
 
 async def run_weekly_sync(pool: asyncpg.Pool | None = None, db_url: str = DB_URL):

@@ -77,28 +77,21 @@ async def compute_core_metrics_for_wallet(
           AND COALESCE(c.metrics_eligible, TRUE)
     """, address)
 
-    # Read existing pm_pnl / pm_volume / portfolio metrics
-    m_row = await conn.fetchrow("""
-        SELECT pm_pnl, pm_volume, balance, position_value,
-               parlay_open_count, parlay_open_value, redeemable_count, redeemable_winning_count
-        FROM wallet_metrics_v2 WHERE address = $1
-    """, address)
-    
-    pm_pnl = float(m_row["pm_pnl"]) if m_row and m_row["pm_pnl"] is not None else None
-    pm_volume = float(m_row["pm_volume"]) if m_row and m_row["pm_volume"] is not None else None
-    balance = float(m_row["balance"]) if m_row and m_row["balance"] is not None else None
-    pos_val = float(m_row["position_value"]) if m_row and m_row["position_value"] is not None else None
-
+    # Official pm_* and capital fields are read-only inputs to this pass.  Do
+    # not use them as fallbacks for internal totals.
     if not closed_rows:
         await conn.execute("""
             INSERT INTO wallet_metrics_v2 (address, total_pnl, total_volume, win_rate, resolved_count, winning_count, computed_at)
-            VALUES ($1, $2, $3, 0.0, 0, 0, NOW())
+            VALUES ($1, NULL, NULL, NULL, 0, 0, NOW())
             ON CONFLICT (address) DO UPDATE SET
-                total_pnl = COALESCE(EXCLUDED.total_pnl, wallet_metrics_v2.total_pnl),
-                total_volume = COALESCE(EXCLUDED.total_volume, wallet_metrics_v2.total_volume),
+                total_pnl = NULL,
+                total_volume = NULL,
+                win_rate = NULL,
+                resolved_count = 0,
+                winning_count = 0,
                 computed_at = NOW();
-        """, address, pm_pnl, pm_volume)
-        return {"address": address, "resolved": 0, "win_rate": 0.0}
+        """, address)
+        return {"address": address, "resolved": 0, "win_rate": None}
 
     # Sum of raw closed positions strictly from database ledger
     total_raw_pnl = sum(_parse_realized_pnl(cp) for cp in closed_rows)
@@ -109,7 +102,7 @@ async def compute_core_metrics_for_wallet(
         for cp in closed_rows
         if _parse(cp.get("avg_buy_price")) > 0
     )
-    total_volume = calc_volume if calc_volume > 0 else pm_volume
+    total_volume = calc_volume if calc_volume > 0 else None
 
     resolved = len(closed_rows)
     wins = sum(1 for cp in closed_rows if is_winning_pnl(_parse_realized_pnl(cp)))

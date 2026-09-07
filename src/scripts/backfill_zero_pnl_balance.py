@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://poly_user:poly_password@localhost:5432/poly_db")
 
 async def backfill():
+    raise RuntimeError(
+        "backfill_zero_pnl_balance is retired: official PnL must remain in "
+        "pm_pnl and canonical totals come from the position ledger"
+    )
     logger.info("Connecting to database...")
     pool = await asyncpg.create_pool(DB_URL, min_size=5, max_size=20)
     

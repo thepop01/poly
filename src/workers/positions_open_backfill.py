@@ -291,10 +291,11 @@ async def process_wallet_open(
     # `balance` made balance a duplicate of position_value for 90k wallets and
     # double-counted open value in every equity formula. Preserve whatever a
     # genuine cash source wrote; never synthesise it from portfolio value.
+    # This source worker owns open-position evidence only.  Capital sync owns
+    # balance; preserve it instead of overwriting it with a position snapshot.
     existing_balance = await conn.fetchval(
         "SELECT balance FROM wallet_metrics_v2 WHERE address = $1", address
     )
-    balance = float(existing_balance) if existing_balance is not None else 0.0
 
     pos_val = sum(_parse(p.get("currentValue", 0)) for p in positions)
     unrealised = sum(
@@ -361,23 +362,21 @@ async def process_wallet_open(
 
     await conn.execute("""
         INSERT INTO wallet_metrics_v2 (
-            address, position_value, balance,
+            address, position_value,
             parlay_open_count, parlay_open_value,
             redeemable_count, redeemable_winning_count,
-            open_synced_at, unrealised_pnl
+            open_synced_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $8 THEN NOW() ELSE NULL END, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN NOW() ELSE NULL END)
         ON CONFLICT (address) DO UPDATE SET
             position_value=EXCLUDED.position_value,
-            balance=EXCLUDED.balance,
             parlay_open_count=EXCLUDED.parlay_open_count,
             parlay_open_value=EXCLUDED.parlay_open_value,
             redeemable_count=EXCLUDED.redeemable_count,
             redeemable_winning_count=EXCLUDED.redeemable_winning_count,
-            unrealised_pnl=EXCLUDED.unrealised_pnl,
-            open_synced_at=CASE WHEN $8 THEN NOW() ELSE wallet_metrics_v2.open_synced_at END
-    """, address, pos_val, balance, parlay_open_count, parlay_open_value,
-         redeemable_count, redeemable_winning_count, positions_complete, unrealised)
+            open_synced_at=CASE WHEN $7 THEN NOW() ELSE wallet_metrics_v2.open_synced_at END
+    """, address, pos_val, parlay_open_count, parlay_open_value,
+         redeemable_count, redeemable_winning_count, positions_complete)
 
     max_db_trade = await conn.fetchval("""
         SELECT max(traded_at) FROM wallet_trades_v2

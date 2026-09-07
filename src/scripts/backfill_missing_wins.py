@@ -64,6 +64,10 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
     ''', resolved_count, winning_count, win_rate, address)
 
 async def main():
+    raise RuntimeError(
+        "backfill_missing_wins is retired: counts are reconstructed from "
+        "eligible wallet_closed_positions_v2 by positions_metrics_compute"
+    )
     logger.info("Connecting to database...")
     pool = await asyncpg.create_pool(DB_URL, min_size=5, max_size=20)
     

@@ -132,20 +132,13 @@ def main():
             LIMIT 5
         """)
 
-        # ════════════════════════════════════════════════════════════════════
-        # STEP 1: Fix count anomalies where winning_count > resolved_count
-        # ════════════════════════════════════════════════════════════════════
+        # Count anomalies are diagnostics only.  Never repair a count by
+        # copying winning_count: both values must be reconstructed from
+        # eligible wallet_closed_positions_v2 rows by the canonical coordinator.
         print("\n" + "=" * 75)
-        print("STEP 1: Fix winning_count > resolved_count anomalies")
+        print("STEP 1: Report count anomalies (no repair)")
         print("=" * 75)
-
-        cur.execute("""
-            UPDATE wallet_metrics_v2
-            SET resolved_count = winning_count
-            WHERE winning_count > resolved_count AND winning_count > 0;
-        """)
-        c_counts = cur.rowcount
-        print(f"    -> Corrected: {c_counts:,}")
+        print(f"    -> Deferred to canonical eligible-row reconstruction: {bad_counts:,}")
 
         # ════════════════════════════════════════════════════════════════════
         # STEP 2: Normalize win_rate to 0..100% scale
@@ -278,9 +271,10 @@ def main():
 
         # Fix count integrity first, then compute win_rate from corrected counts
         cur.execute("""
+            -- Count anomalies are reported, never repaired by copying wins.
             UPDATE category_stats_v2
-            SET resolved_count = GREATEST(COALESCE(resolved_count, 0), COALESCE(winning_count, 0))
-            WHERE winning_count > resolved_count;
+            SET resolved_count = resolved_count
+            WHERE FALSE;
         """)
         c_cat_fix = cur.rowcount
         print(f"    -> Fixed count anomalies: {c_cat_fix:,}")
@@ -336,8 +330,8 @@ def main():
             if pnl_col:
                 cur.execute(f"""
                     UPDATE wallet_subcategory_stats
-                    SET resolved_count = GREATEST(COALESCE(resolved_count, 0), COALESCE(winning_count, 0))
-                    WHERE winning_count > resolved_count;
+                    SET resolved_count = resolved_count
+                    WHERE FALSE;
                 """)
                 c_sub_fix = cur.rowcount
                 print(f"    -> Fixed count anomalies: {c_sub_fix:,}")

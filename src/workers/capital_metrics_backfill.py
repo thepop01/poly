@@ -1,22 +1,10 @@
 # src/workers/capital_metrics_backfill.py
-"""
-Worker 2: Capital Metrics & ROI Backfill
-==========================================
-Fetches deposit/withdrawal history from Polymarket's activity API
-(the source of truth) and computes ROI.
+"""Capital/deposit synchronization worker.
 
-Falls back to Alchemy on-chain tracking when the API is unavailable.
-
-Runs independently from Worker 1 at low concurrency (default=4).
-
-What it writes to wallet_metrics_v2:
-  - deposits        (total USDC ever deposited into Polymarket)
-  - withdrawals     (total USDC ever withdrawn)
-  - peak_capital    (max capital deployed at any point)
-  - roi_pct         (total_pnl / peak_capital * 100)
-  - capital_synced_at (its own cursor — independent from computed_at)
-
-Worker 1 must have already written total_pnl for roi_pct to be meaningful.
+This worker owns capital/deposit/withdrawal fields only.  Internal accounting
+outputs are owned by the canonical metrics coordinator;
+Polymarket ``pm_*`` snapshots and Activity API PnL are never used as a
+fallback for those fields.
 """
 
 import asyncio
@@ -41,11 +29,10 @@ async def fetch_activity_deposits_withdrawals(
 ) -> tuple[float | None, float | None, float | None]:
     """
     Fetch total deposits and withdrawals from Polymarket's activity tool API.
-    Returns (deposits, withdrawals, total_pnl) or (None, None, None) on failure.
+    Returns (deposits, withdrawals, activity_pnl) or (None, None, None) on failure.
 
-    This is the source of truth — Alchemy on-chain tracking misses deposits
-    from intermediate wallets (CEX -> intermediate -> Polymarket) and position
-    transfers that carry value but no USDC.
+    Activity PnL is retained as a raw observation for diagnostics only.  It is
+    deliberately not consumed by ``process_capital_metrics`` for internal ROI.
     """
     payload = {
         "wallets": [address],
@@ -86,57 +73,40 @@ async def fetch_activity_deposits_withdrawals(
 
 
 async def process_capital_metrics(conn: asyncpg.Connection, session: aiohttp.ClientSession, address: str):
-    """Update roi_pct using pnl / volume * 100.
-    
-    Also updates deposits/withdrawals from Polymarket activity API for informational purposes.
-    """
+    """Synchronize capital fields without touching canonical accounting fields."""
     row = await conn.fetchrow(
         """
-        SELECT total_pnl, deposits, withdrawals, total_volume, pm_pnl
+        SELECT deposits, withdrawals
         FROM wallet_metrics_v2 WHERE address = $1
         """,
         address,
     )
-    
-    total_pnl = float(row["total_pnl"]) if row and row["total_pnl"] is not None else None
-    pm_pnl = float(row["pm_pnl"]) if row and row["pm_pnl"] is not None else None
-    tot_vol = float(row["total_volume"]) if row and row["total_volume"] is not None else 0.0
 
-    effective_pnl = pm_pnl if pm_pnl is not None else total_pnl
-
-    # Update deposits/withdrawals from activity API (informational)
-    act_dep, act_wdw, act_pnl = await fetch_activity_deposits_withdrawals(session, address)
+    # Activity PnL is intentionally ignored: it is an official/activity
+    # snapshot, not the eligible position-ledger source for internal ROI.
+    act_dep, act_wdw, _activity_pnl = await fetch_activity_deposits_withdrawals(session, address)
     if act_dep is not None:
         deposits = act_dep
         withdrawals = act_wdw or 0.0
-        if act_pnl is not None:
-            effective_pnl = act_pnl
     else:
         deposits = float(row["deposits"]) if row and row["deposits"] is not None else 0.0
         withdrawals = float(row["withdrawals"]) if row and row["withdrawals"] is not None else 0.0
-
-    # ROI = pnl / volume * 100
-    roi_pct = None
-    if effective_pnl is not None and tot_vol >= 10.0:
-        raw_roi = (effective_pnl / tot_vol) * 100.0
-        roi_pct = max(-100.0, min(raw_roi, 10000.0))
 
     await asyncio.sleep(0.5)
 
     await conn.execute("""
         INSERT INTO wallet_metrics_v2
-            (address, deposits, withdrawals, roi_pct, capital_synced_at)
-        VALUES ($1, $2, $3, $4, NOW())
+            (address, deposits, withdrawals, capital_synced_at)
+        VALUES ($1, $2, $3, NOW())
         ON CONFLICT (address) DO UPDATE SET
             deposits          = EXCLUDED.deposits,
             withdrawals       = EXCLUDED.withdrawals,
-            roi_pct           = EXCLUDED.roi_pct,
             capital_synced_at = NOW()
-    """, address, deposits, withdrawals, roi_pct)
+    """, address, deposits, withdrawals)
 
     logger.info(
         f"Done {address[:12]}... dep=${deposits:.0f} wdw=${withdrawals:.0f} "
-        f"pnl=${effective_pnl or 0:.0f} vol=${tot_vol:.0f} roi={roi_pct or 0:.1f}%"
+        "(canonical internal ROI left untouched)"
     )
 
 

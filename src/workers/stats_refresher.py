@@ -212,13 +212,12 @@ async def refresh_tracked_wallets(pool: asyncpg.Pool, session: aiohttp.ClientSes
                 async with pool.acquire() as wconn:
                     # Upsert into wallet_metrics_v2
                     await wconn.execute("""
-                        INSERT INTO wallet_metrics_v2 (address, balance, position_value, capital_synced_at)
-                        VALUES ($1, $2, $3, NOW())
+                        INSERT INTO wallet_metrics_v2 (address, balance, capital_synced_at)
+                        VALUES ($1, $2, NOW())
                         ON CONFLICT (address) DO UPDATE SET
                             balance = EXCLUDED.balance,
-                            position_value = EXCLUDED.position_value,
                             capital_synced_at = NOW()
-                    """, address, balance, position_value)
+                    """, address, balance)
 
                     # Reclassify on fresh numbers (canonical model:
                     # LOW_BALANCE / NEW / STANDARD; CURATED never auto-demoted,
