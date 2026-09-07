@@ -82,24 +82,19 @@ async def process_wallet_pnl_balance(
     session: aiohttp.ClientSession,
     address: str,
 ):
-    # Fetch Leaderboard stats and Balance in parallel
-    lb_task = fetch_leaderboard_stats(session, address)
-    bal_task = fetch_wallet_balance(session, address)
-    lb, balance = await asyncio.gather(lb_task, bal_task)
-
-    # 1. Update wallet_metrics_v2
+    # Official synchronization publishes only the Polymarket snapshot.  The
+    # capital worker owns balance and its freshness cursor.
+    lb = await fetch_leaderboard_stats(session, address)
     await conn.execute("""
         INSERT INTO wallet_metrics_v2 (
-            address, balance, pm_pnl, pm_volume, pm_rank, pm_synced_at, capital_synced_at
-        ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+            address, pm_pnl, pm_volume, pm_rank, pm_synced_at
+        ) VALUES ($1, $2, $3, $4, NOW())
         ON CONFLICT (address) DO UPDATE SET
-            balance = EXCLUDED.balance,
             pm_pnl = EXCLUDED.pm_pnl,
             pm_volume = EXCLUDED.pm_volume,
             pm_rank = COALESCE(EXCLUDED.pm_rank, wallet_metrics_v2.pm_rank),
-            pm_synced_at = NOW(),
-            capital_synced_at = NOW()
-    """, address, balance, lb["pnl"], lb["volume"], lb["rank"])
+            pm_synced_at = NOW()
+    """, address, lb["pnl"], lb["volume"], lb["rank"])
 
     # 2. Update username in wallets_v2 if available
     if lb["username"]:

@@ -38,6 +38,7 @@ BALANCE_THRESHOLD = 1000.0  # $1k minimum balance to qualify for global list
 CONCURRENCY = int(os.environ.get("STATS_WORKER_CONCURRENCY", "10"))
 WALLET_TIMEOUT = int(os.environ.get("STATS_WALLET_TIMEOUT", "600"))
 API_DELAY = 0.03  # 30ms between sequential API calls within a wallet
+RETIREMENT_MARKER = "RETIRED_METRIC_REPAIR_NO_DB_ACCESS"
 
 # Per-fetch position cap. Each API call fetches at most 5,000 most-recent positions
 # (open or closed). This aligns with our largest analysis window (pnl_5000).
@@ -892,6 +893,10 @@ async def _fetch_category_pnl_batch(session: aiohttp.ClientSession, address: str
 # ── Process a single wallet ──────────────────────────────────────────────
 
 async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSession, address: str):
+    raise RuntimeError(
+        f"{RETIREMENT_MARKER}: leaderboard_stats.process_wallet is retired; "
+        "use canonical position-ledger workers"
+    )
     row = await conn.fetchrow(
         """
         SELECT added_at, added_at as start_stats_at, tier = 'CURATED' as is_curated, last_trade_at as last_active,
@@ -1532,6 +1537,10 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
 # ── Parallel runner ──────────────────────────────────────────────────────
 
 async def run_leaderboard_stats(db_url: str = DB_URL):
+    raise RuntimeError(
+        f"{RETIREMENT_MARKER}: leaderboard_stats runner is retired; "
+        "use poly_leaderboard_sync and positions_metrics_compute"
+    )
     logger.info("Starting Leaderboard Stats worker (concurrency=%d, interval=%ds)...", CONCURRENCY, POLL_INTERVAL)
     try:
         pool = await asyncpg.create_pool(db_url, min_size=2, max_size=15)
@@ -1585,6 +1594,9 @@ async def run_leaderboard_stats(db_url: str = DB_URL):
 
 
 async def main():
+    raise RuntimeError(
+        f"{RETIREMENT_MARKER}: use poly_leaderboard_sync and positions_metrics_compute"
+    )
     shutdown = asyncio.Event()
     def _handler():
         logger.info("Shutdown signal received")

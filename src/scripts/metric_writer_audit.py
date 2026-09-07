@@ -67,9 +67,15 @@ CAPITAL_FIELDS = frozenset({
     "capital_synced_at",
 })
 SOURCE_FRESHNESS_FIELDS = frozenset({"open_synced_at", "closed_synced_at"})
+KEY_FIELDS = frozenset({"address"})
+CATEGORY_KEY_FIELDS = frozenset({
+    "address", "category", "subcategory", "league", "window_size",
+})
+OPERATIONAL_FIELDS = frozenset({"onchain_verify_pending", "onchain_verified_at"})
 
 # A legacy writer is safer when it cannot be accidentally invoked during the
-# ownership transition.  The audit reports disabled writers separately.
+# ownership transition.  Disabled files remain visible to the audit; they are
+# valid only when they contain a verifiable retired entry point.
 DISABLED_WRITERS = frozenset({
     "src/workers/leaderboard_stats.py",
     "src/scripts/audit_and_recalc_metrics.py",
@@ -81,7 +87,20 @@ DISABLED_WRITERS = frozenset({
     "src/scripts/backfill_missing_wins.py",
     "src/scripts/backfill_position_value.py",
     "src/scripts/backfill_zero_pnl_balance.py",
+    "src/scripts/backfill_window_stats.py",
+    "src/scripts/repair_and_sync_wallet.py",
+    "src/workers/hibernated_wallets_backfill.py",
 })
+
+# These files retain compatibility helpers or historical SQL for imports, so
+# a module-level marker alone is insufficient.  Every executable write helper
+# must fail before its first query.
+RETIRED_ENTRY_GUARDS: dict[str, tuple[str, ...]] = {
+    "src/workers/leaderboard_stats.py": (
+        "leaderboard_stats.process_wallet is retired",
+        "leaderboard_stats runner is retired",
+    ),
+}
 
 CANONICAL_WRITERS = frozenset({
     "src/workers/compute_core_metrics.py",
@@ -90,14 +109,13 @@ CANONICAL_WRITERS = frozenset({
     "src/workers/positions_metrics_compute.py",
 })
 
-# Official snapshots are allowed to write only pm_* fields and their own
-# freshness cursor.  Capital workers may write only capital fields.  Source
-# workers may write source freshness, but not accounting outputs.
+# Each policy has an explicit table-specific allow-list.  Key columns are
+# included deliberately: an upsert must be able to establish the row identity,
+# but no writer may silently publish another owner's field.
 OFFICIAL_WRITERS = frozenset({
     "src/workers/poly_leaderboard_sync.py",
     "src/workers/pnl_balance_refetch.py",
     "src/workers/wallet_trade_history.py",
-    "src/workers/wallet_discovery.py",
 })
 CAPITAL_WRITERS = frozenset({
     "src/workers/capital_metrics_backfill.py",
@@ -107,7 +125,31 @@ SOURCE_WRITERS = frozenset({
     "src/workers/positions_open_backfill.py",
     "src/workers/positions_closed_backfill.py",
     "src/workers/positions_winrate_backfill.py",
+    "src/scripts/backfill_deep_closed_history.py",
 })
+AUXILIARY_WRITERS = frozenset({"src/workers/onchain_verifier.py"})
+
+POLICY_ALLOWED_WALLET_FIELDS: dict[str, frozenset[str]] = {
+    "canonical": KEY_FIELDS | INTERNAL_METRIC_FIELDS | frozenset({
+        "computed_at", "categories_computed_at",
+    }),
+    "official": KEY_FIELDS | OFFICIAL_FIELDS,
+    "capital": KEY_FIELDS | CAPITAL_FIELDS,
+    "source": KEY_FIELDS | SOURCE_FRESHNESS_FIELDS | frozenset({
+        "position_value", "parlay_open_count", "parlay_open_value",
+        "redeemable_count", "redeemable_winning_count",
+    }),
+    "auxiliary": KEY_FIELDS | OPERATIONAL_FIELDS,
+    "disabled": frozenset(),
+}
+POLICY_ALLOWED_CATEGORY_FIELDS: dict[str, frozenset[str]] = {
+    "canonical": CATEGORY_KEY_FIELDS | CATEGORY_METRIC_FIELDS,
+    "official": frozenset(),
+    "capital": frozenset(),
+    "source": frozenset(),
+    "auxiliary": frozenset(),
+    "disabled": frozenset(),
+}
 
 _INSERT_RE = re.compile(
     r"INSERT\s+INTO\s+([a-zA-Z_][\w]*)\s*\((.*?)\)", re.IGNORECASE | re.DOTALL
@@ -145,8 +187,8 @@ def extract_sql_writes(source: str) -> list[dict[str, Any]]:
     return writes
 
 
-def _policy_for(path: Path) -> str:
-    relative = path.relative_to(ROOT).as_posix()
+def _policy_for(path: Path, root: Path = ROOT) -> str:
+    relative = path.relative_to(root).as_posix()
     if relative in DISABLED_WRITERS:
         return "disabled"
     if relative in CANONICAL_WRITERS:
@@ -157,7 +199,23 @@ def _policy_for(path: Path) -> str:
         return "capital"
     if relative in SOURCE_WRITERS:
         return "source"
+    if relative in AUXILIARY_WRITERS:
+        return "auxiliary"
     return "unknown"
+
+
+def _retired_entry_point(source: str, relative: str) -> bool:
+    """Recognize a source-level fail-closed retirement contract.
+
+    A marker in ``main`` is not enough when a module exposes callable writer
+    helpers.  Known compatibility modules therefore require guards at every
+    retained executable write entry point.
+    """
+    marker = "RETIRED_METRIC_REPAIR_NO_DB_ACCESS" in source or (
+        "is retired" in source.lower() and "raise RuntimeError" in source
+    )
+    required_guards = RETIRED_ENTRY_GUARDS.get(relative, ())
+    return marker and all(guard in source for guard in required_guards)
 
 
 def audit_writers(root: Path = ROOT) -> dict[str, Any]:
@@ -168,27 +226,39 @@ def audit_writers(root: Path = ROOT) -> dict[str, Any]:
         if path.name == "metric_writer_audit.py":
             continue
         source = path.read_text(encoding="utf-8")
-        policy = _policy_for(path)
+        policy = _policy_for(path, root)
         statements = extract_sql_writes(source)
-        if not statements:
-            continue
         relative = path.relative_to(root).as_posix()
         entry = {"path": relative, "policy": policy, "writes": []}
+        if policy == "disabled" and not _retired_entry_point(source, relative):
+            violations.append({
+                "path": relative,
+                "table": "*",
+                "fields": ["active_writer_without_retirement_marker"],
+                "kind": "retirement",
+            })
         for statement in statements:
             table = statement["table"]
             fields = sorted(statement["fields"])
             if table not in {"wallet_metrics_v2", "category_stats_v2"}:
                 continue
             entry["writes"].append({"table": table, "fields": fields, "kind": statement["kind"]})
-            if policy == "disabled":
-                continue
-            owned = INTERNAL_METRIC_FIELDS if table == "wallet_metrics_v2" else CATEGORY_METRIC_FIELDS
-            forbidden = sorted(set(fields) & owned)
-            if not forbidden and policy == "unknown" and table == "category_stats_v2":
+            allowed = (
+                POLICY_ALLOWED_WALLET_FIELDS.get(policy, frozenset())
+                if table == "wallet_metrics_v2"
+                else POLICY_ALLOWED_CATEGORY_FIELDS.get(policy, frozenset())
+            )
+            forbidden = sorted(set(fields) - allowed)
+            # A disabled module is intentionally retained for historical
+            # imports, but its entry point must fail closed before any query;
+            # the retirement check above is the guard that makes this safe.
+            if policy == "disabled" and _retired_entry_point(source, relative):
+                forbidden = []
+            if policy == "unknown":
                 forbidden = fields
-            if policy in {"official", "capital", "source", "unknown"} and forbidden:
+            if forbidden:
                 violations.append({"path": relative, "table": table, "fields": forbidden, "kind": statement["kind"]})
-        if entry["writes"]:
+        if entry["writes"] or policy == "disabled":
             writers.append(entry)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -232,12 +302,12 @@ async def _checksum(conn: Any, table: str, columns: list[str], where: str = "TRU
     return await conn.fetchval(query)
 
 
-async def _count(conn: Any, query: str, *args: Any) -> int | None:
-    try:
-        value = await conn.fetchval(query, *args)
-        return int(value or 0)
-    except Exception:
-        return None
+async def _count(conn: Any, query: str, *args: Any) -> int:
+    """Run a required anomaly/count query without hiding schema failures."""
+    value = await conn.fetchval(query, *args)
+    if value is None:
+        raise RuntimeError(f"baseline count returned NULL: {query.strip()}")
+    return int(value)
 
 
 async def baseline(database_url: str, output: Path) -> dict[str, Any]:
@@ -254,6 +324,12 @@ async def baseline(database_url: str, output: Path) -> dict[str, Any]:
         metrics_internal = [c for c in sorted(metrics_columns & INTERNAL_METRIC_FIELDS)]
         metrics_official = [c for c in sorted(metrics_columns & OFFICIAL_FIELDS)]
         category_identity = [c for c in ("address", "category", "subcategory", "league", "window_size") if c in category_columns]
+        source_timestamp_columns = sorted(
+            closed_columns & {"closed_at", "resolved_at", "opened_at", "created_at", "updated_at"}
+        )
+        category_timestamp_columns = sorted(
+            category_columns & {"computed_at", "last_active", "created_at", "updated_at"}
+        )
         result: dict[str, Any] = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "read_only": True,
@@ -275,12 +351,20 @@ async def baseline(database_url: str, output: Path) -> dict[str, Any]:
                 "row_count": await _count(conn, "SELECT count(*) FROM category_stats_v2"),
                 "checksum": await _checksum(conn, "category_stats_v2", [*category_identity, *sorted(category_columns & CATEGORY_METRIC_FIELDS)]),
                 "window_sizes": [dict(row) for row in await conn.fetch("SELECT window_size, count(*) AS row_count FROM category_stats_v2 GROUP BY window_size ORDER BY window_size")],
+                "null_timestamps": {
+                    c: await _count(conn, f"SELECT count(*) FROM category_stats_v2 WHERE \"{c}\" IS NULL")
+                    for c in category_timestamp_columns
+                },
             }
         if closed_columns:
             identity = [c for c in ("address", "condition_id", "outcome") if c in closed_columns]
             result["tables"]["wallet_closed_positions_v2"] = {
                 "row_count": await _count(conn, "SELECT count(*) FROM wallet_closed_positions_v2"),
                 "checksum": await _checksum(conn, "wallet_closed_positions_v2", sorted(closed_columns)),
+                "null_timestamps": {
+                    c: await _count(conn, f"SELECT count(*) FROM wallet_closed_positions_v2 WHERE \"{c}\" IS NULL")
+                    for c in source_timestamp_columns
+                },
             }
             if len(identity) == 3:
                 result["anomalies"]["duplicate_closed_identities"] = await _count(

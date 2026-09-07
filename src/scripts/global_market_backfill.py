@@ -112,6 +112,9 @@ async def resolve_single_condition_id(
 
 
 async def run_global_backfill():
+    raise RuntimeError(
+        "RETIRED_METRIC_REPAIR_NO_DB_ACCESS: global category backfill is retired"
+    )
     logger.info("Connecting to database...")
     conn = await asyncpg.connect(DB_URL)
     try:

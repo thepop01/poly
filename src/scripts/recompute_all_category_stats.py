@@ -15,6 +15,9 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0
 
 
 async def recompute():
+    raise RuntimeError(
+        "RETIRED_METRIC_REPAIR_NO_DB_ACCESS: canonical category coordinator owns these rows"
+    )
     logger.info("Connecting to database...")
     conn = await asyncpg.connect(DB_URL)
     try:

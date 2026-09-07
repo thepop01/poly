@@ -44,6 +44,9 @@ def refine_crypto_subcategory(title: str, current_subcat: str) -> str:
 
 
 async def fix_subcategories():
+    raise RuntimeError(
+        "RETIRED_METRIC_REPAIR_NO_DB_ACCESS: legacy category repair is retired"
+    )
     conn = await asyncpg.connect(DB_URL)
     try:
         print("1. Fetching all markets with redundant or generic subcategories...")

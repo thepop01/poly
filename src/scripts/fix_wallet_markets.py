@@ -14,6 +14,9 @@ from src.utils.category_classifier import classify_tags, flatten_subcategory
 DB_URL = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0.1:5432/poly_db").replace("localhost", "127.0.0.1")
 
 async def fix_wallet(address: str):
+    raise RuntimeError(
+        "RETIRED_METRIC_REPAIR_NO_DB_ACCESS: legacy category repair is retired"
+    )
     addr = address.lower()
     conn = await asyncpg.connect(DB_URL)
     try:

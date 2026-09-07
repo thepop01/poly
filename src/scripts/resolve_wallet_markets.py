@@ -15,6 +15,9 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0
 ADDR = "0xf0318c32136c2db7fec88b84869aee6a1106c80c".lower()
 
 async def resolve_wallet_markets():
+    raise RuntimeError(
+        "RETIRED_METRIC_REPAIR_NO_DB_ACCESS: legacy category repair is retired"
+    )
     conn = await asyncpg.connect(DB_URL)
     try:
         print(f"1. Finding all unique condition_ids for wallet {ADDR}...")

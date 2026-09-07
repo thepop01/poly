@@ -26,6 +26,8 @@ logger = logging.getLogger("repair_and_sync_wallet")
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0.1:5432/poly_db").replace("localhost", "127.0.0.1").replace("postgres://", "postgresql://")
 
+RETIREMENT_MARKER = "RETIRED_METRIC_REPAIR_NO_DB_ACCESS"
+
 TARGET_WALLETS = [
     "0x7c1ee865a785de4c00ee90ed86a38489fb8bbab3",
     "0x84dbb7103982e3617704a2ed7d5b39691952aeeb",
@@ -155,6 +157,10 @@ async def repair_single_wallet(
     logger.info(f"------------------------------------------------------------\n")
 
 async def main():
+    raise RuntimeError(
+        f"{RETIREMENT_MARKER}: repair_and_sync_wallet is retired; "
+        "use source backfills and positions_metrics_compute"
+    )
     parser = argparse.ArgumentParser(description="Safely rebuild one or more wallet position ledgers")
     parser.add_argument("wallets", nargs="*", help="Wallet addresses (defaults to the audited targets)")
     parser.add_argument("--apply", action="store_true", help="Commit the replacement; default is read-only")

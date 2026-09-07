@@ -102,7 +102,9 @@ async def compute_core_metrics_for_wallet(
         for cp in closed_rows
         if _parse(cp.get("avg_buy_price")) > 0
     )
-    total_volume = calc_volume if calc_volume > 0 else None
+    # A complete eligible history with no measurable buy basis has an explicit
+    # zero canonical volume.  Never preserve an older/official volume value.
+    total_volume = calc_volume
 
     resolved = len(closed_rows)
     wins = sum(1 for cp in closed_rows if is_winning_pnl(_parse_realized_pnl(cp)))
@@ -185,8 +187,8 @@ async def compute_core_metrics_for_wallet(
             $38, NOW()
         )
         ON CONFLICT (address) DO UPDATE SET
-            total_volume = COALESCE(EXCLUDED.total_volume, wallet_metrics_v2.total_volume),
-            total_pnl = COALESCE(EXCLUDED.total_pnl, wallet_metrics_v2.total_pnl),
+            total_volume = EXCLUDED.total_volume,
+            total_pnl = EXCLUDED.total_pnl,
             roi_pct = EXCLUDED.roi_pct,
             win_rate = EXCLUDED.win_rate,
             resolved_count = EXCLUDED.resolved_count,

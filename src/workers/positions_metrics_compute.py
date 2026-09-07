@@ -66,12 +66,32 @@ async def main():
     async with pool.acquire() as conn:
         limit_clause = f"LIMIT {args.limit}" if args.limit else ""
         rows = await conn.fetch(f"""
-            SELECT m.address
-            FROM wallet_metrics_v2 m
-            JOIN wallets_v2 w ON w.address=m.address
+            SELECT w.address
+            FROM wallets_v2 w
+            LEFT JOIN wallet_metrics_v2 m ON m.address = w.address
             WHERE NOT w.is_dormant
-              AND (m.resolved_count > 0 OR m.position_value > 0)
-            ORDER BY COALESCE(m.pm_volume, m.total_volume, 0) DESC
+              AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM wallet_closed_positions_v2 c
+                        WHERE c.address = w.address
+                          AND COALESCE(c.metrics_eligible, TRUE)
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM wallet_positions_v2 p
+                        WHERE p.address = w.address
+                    )
+              )
+              AND (
+                    m.computed_at IS NULL
+                    OR m.closed_synced_at IS NULL
+                    OR m.open_synced_at IS NULL
+                    OR m.closed_synced_at > m.computed_at
+                    OR m.open_synced_at > m.computed_at
+              )
+            ORDER BY COALESCE(m.closed_synced_at, m.open_synced_at, '1970-01-01'::timestamptz) DESC,
+                     w.address
             {limit_clause};
         """)
         wallets = [r["address"] for r in rows]

@@ -976,19 +976,14 @@ async def process_batch(conn: asyncpg.Connection, session: aiohttp.ClientSession
             ON CONFLICT (address, source) DO NOTHING
         """, address, canonical_source(queue_source), queue_source if queue_source else 'Unknown')
 
+        # Discovery may establish the identity row, but it must not publish
+        # metric ownership domains.  Official and capital snapshots are synced
+        # by their dedicated workers; source/coordinator workers own the rest.
         await conn.execute("""
-            INSERT INTO wallet_metrics_v2 (
-                address, balance, deposits, withdrawals, position_value,
-                pm_pnl, pm_volume, pm_rank, computed_at
-            ) VALUES ($1, $2, 0, 0, $3, $4, $5, $6, NOW())
-            ON CONFLICT (address) DO UPDATE SET
-                balance = EXCLUDED.balance,
-                position_value = EXCLUDED.position_value,
-                pm_pnl = EXCLUDED.pm_pnl,
-                pm_volume = EXCLUDED.pm_volume,
-                pm_rank = EXCLUDED.pm_rank,
-                computed_at = NOW()
-        """, address, balance, position_value, website_pnl, website_volume, website_rank)
+            INSERT INTO wallet_metrics_v2 (address)
+            VALUES ($1)
+            ON CONFLICT (address) DO NOTHING
+        """, address)
 
 
 async def run_discovery(pool: asyncpg.Pool | None = None, db_url: str = DB_URL):

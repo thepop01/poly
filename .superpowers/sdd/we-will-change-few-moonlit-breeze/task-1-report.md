@@ -9,8 +9,12 @@
 - `src/workers/positions_open_backfill.py` — source worker no longer overwrites capital `balance` or internal unrealized PnL.
 - `src/workers/stats_refresher.py` — capital refresh no longer overwrites open-position `position_value`.
 - `src/workers/poly_leaderboard_sync.py` — official sync writes only `pm_*` and `pm_synced_at`; official category snapshots are skipped pending the Task 2 table.
-- `src/scripts/audit_and_recalc_metrics.py` — count repairs are diagnostics only; removed the `resolved_count = winning_count` repair and equivalent category/subcategory repairs.
+- `src/scripts/audit_and_recalc_metrics.py` — fully retired before DB access; the old `resolved_count = winning_count` repair is unavailable.
+- `src/scripts/repair_and_sync_wallet.py`, `src/workers/hibernated_wallets_backfill.py`, and legacy category/leaderboard scripts — fail-closed retired entry points.
 - `src/scripts/backfill_missing_wins.py`, `src/scripts/backfill_position_value.py`, `src/scripts/backfill_zero_pnl_balance.py` — hard-disabled overlapping legacy mutators with migration-path errors.
+- `src/workers/positions_metrics_compute.py` — queue uses eligible source-row existence and freshness rather than derived metric values.
+- `src/scripts/backfill_window_stats.py` — retired the indirect delegation to `leaderboard_stats.process_wallet` before any database work.
+- `src/workers/leaderboard_stats.py` — retained compatibility imports but guards `process_wallet`, `run_leaderboard_stats`, and `main` before database access.
 
 No production migration or database write was run.
 
@@ -32,6 +36,8 @@ The static audit treats legacy category/recompute scripts and `leaderboard_stats
 - Disabled legacy `backfill_missing_wins`, `backfill_position_value`, and `backfill_zero_pnl_balance` entry points. Their error messages identify the canonical/source owner.
 - Replaced official leaderboard `computed_at` updates with `pm_synced_at` and disabled writes to `category_stats_v2`.
 - Prevented source open-position and capital refresher workers from clobbering capital or canonical internal fields.
+- Canonical volume is published explicitly as zero when a complete eligible history has no measurable buy basis; upserts never preserve stale or official volume.
+- The static audit now applies explicit table-specific allow-lists (including keys and freshness fields), inspects disabled files for retirement markers, rejects unknown/rogue writers, and requires guards for known compatibility helpers with reachable SQL.
 
 ## Baseline command and output
 
@@ -41,7 +47,7 @@ Static baseline/audit command:
 python -m src.scripts.metric_writer_audit audit
 ```
 
-Output verification: `violations=0`, `writers=25` (JSON output was inspected and not committed as an artifact).
+Output verification: `violations=0` after explicit per-policy allow-list and retirement-marker checks (JSON output was inspected and not committed as an artifact).
 
 Read-only database baseline command:
 
@@ -53,7 +59,7 @@ Database access was unavailable in this worktree: no `DATABASE_URL` was configur
 
 ## Tests run
 
-- `python -m pytest -q tests/test_metric_writer_ownership.py` — 6 passed.
+- `python -m pytest -q tests/test_metric_writer_ownership.py` — 13 passed (rogue-writer, retirement-marker, indirect-delegation, helper-guard, isolation, and baseline rollback coverage included).
 - `python -m pytest -q tests/test_ledger_metrics.py tests/test_pnl_reconcile.py tests/test_pnl_rules.py tests/test_metric_writer_ownership.py` — 71 passed.
 - `python -m compileall -q` on all changed Python modules — passed.
 - `python -m src.scripts.metric_writer_audit audit` — passed with zero violations.
@@ -66,3 +72,4 @@ Database access was unavailable in this worktree: no `DATABASE_URL` was configur
 3. `category_stats_v2` official snapshots are intentionally skipped until Task 2 supplies a separate table.
 4. The unrelated existing parlay heuristic test failure remains outside Task 1 scope.
 5. Dynamic SQL outside the static extractor's patterns requires manual review; the audit reports recognized SQL writes conservatively.
+6. Baseline query failures now propagate and fail the command; timestamp null checks cover wallet freshness, source lifecycle timestamps, and category timestamps where columns exist.
