@@ -134,6 +134,8 @@ def _normalize_token(value: Any) -> str | None:
         return None
     if isinstance(value, float):
         return None  # a float cannot guarantee a 77-digit token's identity
+    if not isinstance(value, (str, int)):
+        return None
     text = str(value).strip()
     if not text:
         return None
@@ -268,7 +270,11 @@ def normalize_closed_row(row: Any) -> dict[str, Any]:
     raw_token = _first(source, "asset_token_id", "assetTokenId", default=_MISSING)
     token = _normalize_token(raw_token)
     asset_raw = _first(source, "asset", "asset_id", "assetId", default=_MISSING)
-    source_asset = _text(_first(source, "source_asset", "sourceAsset", default=asset_raw))
+    # Missing provenance identifiers are stable empty values, never the
+    # internal sentinel (which would leak a process-dependent object repr).
+    source_asset = _text(_first(source, "source_asset", "sourceAsset", default=""))
+    if not source_asset and asset_raw is not _MISSING:
+        source_asset = _text(asset_raw)
     if token is None and _looks_like_token(asset_raw):
         token = _normalize_token(asset_raw)
 

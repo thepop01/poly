@@ -260,6 +260,15 @@ def test_identity_uses_source_asset_only_when_token_is_absent():
     assert position_identity(row)[-1] == "fallback"
 
 
+def test_missing_asset_identifiers_use_stable_empty_identity_not_sentinel_repr():
+    first = {"address": "0x1", "conditionId": "c", "outcome": "Yes"}
+    second = {"address": "0x1", "conditionId": "c", "outcome": "Yes"}
+    identity = position_identity(first)
+    assert identity == ("0x1", "c", "Yes", "")
+    assert position_identity(first) == position_identity(second)
+    assert "object at" not in repr(identity)
+
+
 def test_ordering_is_closed_at_descending_nulls_last_without_resolved_fallback():
     rows = [
         {"address": "0x1", "conditionId": "missing", "outcome": "Yes", "resolvedAt": "2099-01-01T00:00:00Z"},
