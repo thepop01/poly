@@ -144,13 +144,13 @@ def _ensure_base_tables() -> None:
             category VARCHAR(50) NOT NULL,
             subcategory VARCHAR(100) NOT NULL DEFAULT '',
             window_size INTEGER NOT NULL DEFAULT 0,
-            pnl NUMERIC,
-            volume NUMERIC,
-            win_rate NUMERIC,
-            roi_pct NUMERIC,
-            resolved_count INTEGER,
-            winning_count INTEGER,
-            computed_at TIMESTAMPTZ,
+            pnl NUMERIC DEFAULT 0,
+            volume NUMERIC DEFAULT 0,
+            win_rate NUMERIC DEFAULT 0,
+            roi_pct NUMERIC DEFAULT 0,
+            resolved_count INTEGER DEFAULT 0,
+            winning_count INTEGER DEFAULT 0,
+            computed_at TIMESTAMPTZ DEFAULT NOW(),
             PRIMARY KEY (address, category, subcategory, window_size)
         )
         """
