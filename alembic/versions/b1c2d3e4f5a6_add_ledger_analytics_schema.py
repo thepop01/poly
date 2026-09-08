@@ -110,13 +110,30 @@ def _ensure_base_tables() -> None:
         """
         CREATE TABLE IF NOT EXISTS wallet_metrics_v2 (
             address VARCHAR(42) PRIMARY KEY REFERENCES wallets_v2(address),
-            total_pnl NUMERIC,
-            total_volume NUMERIC,
-            roi_pct NUMERIC,
-            win_rate NUMERIC,
-            resolved_count INTEGER,
-            winning_count INTEGER,
-            computed_at TIMESTAMPTZ
+            total_pnl NUMERIC DEFAULT 0,
+            total_volume NUMERIC DEFAULT 0,
+            roi_pct NUMERIC DEFAULT 0,
+            win_rate NUMERIC DEFAULT 0,
+            resolved_count INTEGER DEFAULT 0,
+            winning_count INTEGER DEFAULT 0,
+            balance NUMERIC DEFAULT 0,
+            deposits NUMERIC DEFAULT 0,
+            withdrawals NUMERIC DEFAULT 0,
+            position_value NUMERIC DEFAULT 0,
+            peak_capital NUMERIC DEFAULT 0,
+            avg_position_size NUMERIC,
+            avg_buy_price NUMERIC,
+            avg_hold_time_hours NUMERIC,
+            biggest_win NUMERIC,
+            biggest_loss NUMERIC,
+            active_days INTEGER DEFAULT 0,
+            trades_2x INTEGER DEFAULT 0,
+            trades_1_5x INTEGER DEFAULT 0,
+            pm_pnl NUMERIC,
+            pm_volume NUMERIC,
+            pm_rank INTEGER,
+            computed_at TIMESTAMPTZ DEFAULT NOW(),
+            pm_synced_at TIMESTAMPTZ
         )
         """
     )
@@ -447,16 +464,22 @@ def _ensure_table_contract(
         )
     check_defs = _constraint_definitions(table, "c")
     for expected in checks:
-        normalized = re.sub(r"\\s+", " ", expected.lower()).strip()
+        normalized = re.sub(r"\s+", " ", expected.lower()).strip()
         def equivalent(definition: str) -> bool:
             if normalized in definition:
                 return True
-            # PostgreSQL deparses varchar CHECK ... IN (...) as a text cast
-            # compared with an ANY(ARRAY[...]) expression.
-            definition_for_match = definition.replace("(status)::text", "status::text")
-            if normalized.startswith("status in (") and "status::text = any (array[" in definition_for_match:
-                values = re.findall(r"'([^']+)'", definition_for_match)
-                return set(values) == {"queued", "running", "completed", "failed"}
+            # PostgreSQL deparses varchar CHECK ... IN (...) as a casted
+            # status expression compared with ANY over a typed ARRAY.  Match
+            # the semantic shape rather than one parenthesis layout.
+            if normalized.startswith("status in ("):
+                compact = re.sub(r"\s+", " ", definition.lower()).strip()
+                has_status_any = re.search(
+                    r"status\s*\)?\s*::text.*=\s*any\s*\(\s*\(?array\[",
+                    compact,
+                )
+                if has_status_any:
+                    values = re.findall(r"'([^']+)'", compact)
+                    return set(values) == {"queued", "running", "completed", "failed"}
             return False
         if not any(equivalent(definition) for definition in check_defs):
             raise RuntimeError(
@@ -634,6 +657,28 @@ def _validate_base_contracts() -> None:
             ("address", "VARCHAR(42)", True, None),
             ("total_pnl", "NUMERIC", False, "0"),
             ("total_volume", "NUMERIC", False, "0"),
+            ("roi_pct", "NUMERIC", False, "0"),
+            ("win_rate", "NUMERIC", False, "0"),
+            ("resolved_count", "INTEGER", False, "0"),
+            ("winning_count", "INTEGER", False, "0"),
+            ("balance", "NUMERIC", False, "0"),
+            ("deposits", "NUMERIC", False, "0"),
+            ("withdrawals", "NUMERIC", False, "0"),
+            ("position_value", "NUMERIC", False, "0"),
+            ("peak_capital", "NUMERIC", False, "0"),
+            ("avg_position_size", "NUMERIC", False, None),
+            ("avg_buy_price", "NUMERIC", False, None),
+            ("avg_hold_time_hours", "NUMERIC", False, None),
+            ("biggest_win", "NUMERIC", False, None),
+            ("biggest_loss", "NUMERIC", False, None),
+            ("active_days", "INTEGER", False, "0"),
+            ("trades_2x", "INTEGER", False, "0"),
+            ("trades_1_5x", "INTEGER", False, "0"),
+            ("pm_pnl", "NUMERIC", False, None),
+            ("pm_volume", "NUMERIC", False, None),
+            ("pm_rank", "INTEGER", False, None),
+            ("computed_at", "TIMESTAMPTZ", False, "now()"),
+            ("pm_synced_at", "TIMESTAMPTZ", False, None),
         ),
         "category_stats_v2": (
             ("address", "VARCHAR(42)", True, None),
@@ -937,7 +982,23 @@ def upgrade() -> None:
         "win_rate": "NUMERIC",
         "resolved_count": "INTEGER",
         "winning_count": "INTEGER",
+        "balance": "NUMERIC",
+        "deposits": "NUMERIC",
+        "withdrawals": "NUMERIC",
+        "position_value": "NUMERIC",
+        "peak_capital": "NUMERIC",
+        "avg_position_size": "NUMERIC",
         "avg_buy_price": "NUMERIC",
+        "avg_hold_time_hours": "NUMERIC",
+        "biggest_win": "NUMERIC",
+        "biggest_loss": "NUMERIC",
+        "active_days": "INTEGER",
+        "trades_2x": "INTEGER",
+        "trades_1_5x": "INTEGER",
+        "pm_pnl": "NUMERIC",
+        "pm_volume": "NUMERIC",
+        "pm_rank": "INTEGER",
+        "pm_synced_at": "TIMESTAMPTZ",
         "data_completeness_pct": "NUMERIC",
         "parlay_pnl": "NUMERIC",
         "parlay_volume": "NUMERIC",
