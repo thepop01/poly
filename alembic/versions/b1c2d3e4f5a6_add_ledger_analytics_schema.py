@@ -453,8 +453,9 @@ def _ensure_table_contract(
                 return True
             # PostgreSQL deparses varchar CHECK ... IN (...) as a text cast
             # compared with an ANY(ARRAY[...]) expression.
-            if normalized.startswith("status in (") and "status::text = any (array[" in definition:
-                values = re.findall(r"'([^']+)'", definition)
+            definition_for_match = definition.replace("(status)::text", "status::text")
+            if normalized.startswith("status in (") and "status::text = any (array[" in definition_for_match:
+                values = re.findall(r"'([^']+)'", definition_for_match)
                 return set(values) == {"queued", "running", "completed", "failed"}
             return False
         if not any(equivalent(definition) for definition in check_defs):
