@@ -140,7 +140,7 @@ def _ensure_base_tables() -> None:
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS category_stats_v2 (
-            address VARCHAR(42) NOT NULL REFERENCES wallets_v2(address),
+            address VARCHAR(42) REFERENCES wallets_v2(address),
             category VARCHAR(50) NOT NULL,
             subcategory VARCHAR(100) NOT NULL DEFAULT '',
             window_size INTEGER NOT NULL DEFAULT 0,
@@ -158,9 +158,9 @@ def _ensure_base_tables() -> None:
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS wallet_positions_v2 (
-            address VARCHAR(42) NOT NULL REFERENCES wallets_v2(address),
-            condition_id VARCHAR(255) NOT NULL REFERENCES markets_v2(condition_id),
-            outcome VARCHAR(255) NOT NULL,
+            address VARCHAR(42) REFERENCES wallets_v2(address),
+            condition_id VARCHAR(255) REFERENCES markets_v2(condition_id),
+            outcome VARCHAR(255),
             size NUMERIC,
             avg_price NUMERIC,
             current_value NUMERIC,
@@ -174,9 +174,9 @@ def _ensure_base_tables() -> None:
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS wallet_closed_positions_v2 (
-            address VARCHAR(42) NOT NULL REFERENCES wallets_v2(address),
-            condition_id VARCHAR(255) NOT NULL REFERENCES markets_v2(condition_id),
-            outcome VARCHAR(255) NOT NULL,
+            address VARCHAR(42) REFERENCES wallets_v2(address),
+            condition_id VARCHAR(255) REFERENCES markets_v2(condition_id),
+            outcome VARCHAR(255),
             avg_buy_price NUMERIC,
             avg_sell_price NUMERIC,
             total_bought NUMERIC,
@@ -681,23 +681,29 @@ def _validate_base_contracts() -> None:
             ("pm_synced_at", "TIMESTAMPTZ", False, None),
         ),
         "category_stats_v2": (
-            ("address", "VARCHAR(42)", True, None),
+            ("address", "VARCHAR(42)", False, None),
             ("category", "VARCHAR(50)", True, None),
             ("subcategory", "VARCHAR(100)", True, "''::character varying"),
             ("window_size", "INTEGER", True, "0"),
             ("pnl", "NUMERIC", False, "0"),
             ("volume", "NUMERIC", False, "0"),
+            ("win_rate", "NUMERIC", False, "0"),
+            ("roi_pct", "NUMERIC", False, "0"),
+            ("resolved_count", "INTEGER", False, "0"),
+            ("winning_count", "INTEGER", False, "0"),
+            ("last_active", "TIMESTAMPTZ", False, None),
+            ("computed_at", "TIMESTAMPTZ", False, "now()"),
         ),
         "wallet_positions_v2": (
-            ("address", "VARCHAR(42)", True, None),
-            ("condition_id", "VARCHAR(255)", True, None),
-            ("outcome", "VARCHAR(255)", True, None),
+            ("address", "VARCHAR(42)", False, None),
+            ("condition_id", "VARCHAR(255)", False, None),
+            ("outcome", "VARCHAR(255)", False, None),
             ("size", "NUMERIC", False, None),
         ),
         "wallet_closed_positions_v2": (
-            ("address", "VARCHAR(42)", True, None),
-            ("condition_id", "VARCHAR(255)", True, None),
-            ("outcome", "VARCHAR(255)", True, None),
+            ("address", "VARCHAR(42)", False, None),
+            ("condition_id", "VARCHAR(255)", False, None),
+            ("outcome", "VARCHAR(255)", False, None),
             ("realized_pnl", "NUMERIC", False, None),
             ("closed_at", "TIMESTAMPTZ", False, None),
         ),

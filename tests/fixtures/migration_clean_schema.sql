@@ -41,25 +41,31 @@ CREATE TABLE wallet_metrics_v2 (
     pm_synced_at TIMESTAMPTZ
 );
 CREATE TABLE category_stats_v2 (
-    address VARCHAR(42) NOT NULL REFERENCES wallets_v2(address),
+    address VARCHAR(42) REFERENCES wallets_v2(address),
     category VARCHAR(50) NOT NULL,
     subcategory VARCHAR(100) NOT NULL DEFAULT '',
     window_size INTEGER NOT NULL DEFAULT 0,
     pnl NUMERIC DEFAULT 0,
     volume NUMERIC DEFAULT 0,
+    win_rate NUMERIC DEFAULT 0,
+    roi_pct NUMERIC DEFAULT 0,
+    resolved_count INTEGER DEFAULT 0,
+    winning_count INTEGER DEFAULT 0,
+    last_active TIMESTAMPTZ,
+    computed_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (address, category, subcategory, window_size)
 );
 CREATE TABLE wallet_positions_v2 (
-    address VARCHAR(42) NOT NULL,
-    condition_id VARCHAR(255) NOT NULL,
-    outcome VARCHAR(255) NOT NULL,
+    address VARCHAR(42),
+    condition_id VARCHAR(255),
+    outcome VARCHAR(255),
     size NUMERIC,
     PRIMARY KEY (address, condition_id, outcome)
 );
 CREATE TABLE wallet_closed_positions_v2 (
-    address VARCHAR(42) NOT NULL,
-    condition_id VARCHAR(255) NOT NULL,
-    outcome VARCHAR(255) NOT NULL,
+    address VARCHAR(42),
+    condition_id VARCHAR(255),
+    outcome VARCHAR(255),
     realized_pnl NUMERIC,
     closed_at TIMESTAMPTZ,
     PRIMARY KEY (address, condition_id, outcome)
