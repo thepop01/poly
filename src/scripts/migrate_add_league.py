@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 
 ROOT = Path(__file__).resolve().parents[2]
-_ALLOWED_SCHEMES = {"postgresql", "postgres", "postgresql+asyncpg", "postgresql+psycopg2"}
+_ALLOWED_SCHEMES = {"postgresql", "postgres", "postgresql+asyncpg"}
 
 
 def _database_url() -> str:
@@ -36,8 +36,9 @@ def _database_url() -> str:
 def migrate(argv: list[str] | None = None) -> int:
     """Validate configuration, then execute Alembic's canonical upgrade.
 
-    Extra arguments are passed to Alembic after ``upgrade head`` so existing
-    operator wrappers can still add Alembic flags.  No credentials are logged.
+    The compatibility entry point accepts no Alembic subcommands or flags;
+    callers must use the canonical ``alembic`` CLI for those operations. No
+    credentials are logged.
     """
     database_url = _database_url()
     args = ["-m", "alembic", "upgrade", "head"]

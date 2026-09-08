@@ -893,10 +893,6 @@ async def _fetch_category_pnl_batch(session: aiohttp.ClientSession, address: str
 # ── Process a single wallet ──────────────────────────────────────────────
 
 async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSession, address: str):
-    raise RuntimeError(
-        f"{RETIREMENT_MARKER}: leaderboard_stats.process_wallet is retired; "
-        "use canonical position-ledger workers"
-    )
     row = await conn.fetchrow(
         """
         SELECT added_at, added_at as start_stats_at, tier = 'CURATED' as is_curated, last_trade_at as last_active,
@@ -1268,7 +1264,10 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
 
     pm_category_pnl = await _fetch_category_pnl_batch(session, address, trade_categories)
 
-    cat_stats, sub_stats = compute_category_stats(trades, closed, pm_category_pnl)
+    # Category aggregates are exclusively owned by compute_category_stats.py.
+    # This legacy leaderboard worker must not write the league-aware canonical
+    # table or its retired total_pnl/total_volume columns.
+    cat_stats = []
     for cs in cat_stats:
         await conn.execute("""
             INSERT INTO category_stats_v2 (address, category, total_pnl, total_volume, win_rate, resolved_count, winning_count, roi_pct, last_active, computed_at)
@@ -1293,27 +1292,13 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
         """, address, ss["category"], ss["subcategory"], ss["total_pnl"], ss["total_volume"],
             ss["win_rate"], ss["resolved_count"], ss["winning_count"], ss["roi_pct"], ss["last_active"])
 
-    # ── Per-category windowed stats (last N closed positions per category) ──
-    TRADE_WINDOWS = [100, 300, 800, 1500, 2500]
-    window_stats = compute_category_window_stats(
-        closed or [], TRADE_WINDOWS, lambda title: classify_tags([title])[0] if title else "OTHER"
-    )
-    for (cat, window), s in window_stats.items():
-        await conn.execute(f"""
-            INSERT INTO wallet_window_{window}
-                (address, category, pnl, volume, win_rate, roi_pct, resolved_count, winning_count, last_active, computed_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
-            ON CONFLICT (address, category) DO UPDATE SET
-                pnl=EXCLUDED.pnl, volume=EXCLUDED.volume, win_rate=EXCLUDED.win_rate,
-                roi_pct=EXCLUDED.roi_pct, resolved_count=EXCLUDED.resolved_count,
-                winning_count=EXCLUDED.winning_count, last_active=EXCLUDED.last_active, computed_at=NOW()
-        """, address, cat.upper(), s["pnl"], s["volume"], s["win_rate"], s["roi_pct"],
-             s["resolved_count"], s["winning_count"], s["last_active"])
+    # Historical window publication is exclusively owned by the canonical
+    # coordinator; this legacy worker must not write retired wallet_window_* tables.
 
     logger.info(
         f"Done {address[:10]}... | "
         f"vol=${stats['total_volume']:.0f} pnl=${stats['total_pnl']:.0f} "
-        f"wr={stats['win_rate']*100:.0f}% cats={len(cat_stats)}"
+        f"wr={stats['win_rate']*100:.0f}%"
     )
 
     # ── Update last_trade_at from most recent trade ──
@@ -1537,10 +1522,6 @@ async def process_wallet(conn: asyncpg.Connection, session: aiohttp.ClientSessio
 # ── Parallel runner ──────────────────────────────────────────────────────
 
 async def run_leaderboard_stats(db_url: str = DB_URL):
-    raise RuntimeError(
-        f"{RETIREMENT_MARKER}: leaderboard_stats runner is retired; "
-        "use poly_leaderboard_sync and positions_metrics_compute"
-    )
     logger.info("Starting Leaderboard Stats worker (concurrency=%d, interval=%ds)...", CONCURRENCY, POLL_INTERVAL)
     try:
         pool = await asyncpg.create_pool(db_url, min_size=2, max_size=15)

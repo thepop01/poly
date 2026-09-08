@@ -143,6 +143,7 @@ def _ensure_base_tables() -> None:
             address VARCHAR(42) REFERENCES wallets_v2(address),
             category VARCHAR(50) NOT NULL,
             subcategory VARCHAR(100) NOT NULL DEFAULT '',
+            league VARCHAR(100) NOT NULL DEFAULT '',
             window_size INTEGER NOT NULL DEFAULT 0,
             pnl NUMERIC DEFAULT 0,
             volume NUMERIC DEFAULT 0,
@@ -150,6 +151,7 @@ def _ensure_base_tables() -> None:
             roi_pct NUMERIC DEFAULT 0,
             resolved_count INTEGER DEFAULT 0,
             winning_count INTEGER DEFAULT 0,
+            last_active TIMESTAMPTZ,
             computed_at TIMESTAMPTZ DEFAULT NOW(),
             PRIMARY KEY (address, category, subcategory, window_size)
         )
@@ -515,7 +517,8 @@ def _converge_category_identity() -> None:
     """Adopt the league-aware key, rejecting unknown uniqueness contracts."""
     # The old helper used an empty-string default.  Keep that identity stable
     # for old rows and make the column non-null before rebuilding the key.
-    op.execute("ALTER TABLE category_stats_v2 ADD COLUMN IF NOT EXISTS league VARCHAR(100)")
+    op.execute("ALTER TABLE category_stats_v2 ADD COLUMN IF NOT EXISTS league VARCHAR(100) DEFAULT ''")
+    op.execute("ALTER TABLE category_stats_v2 ALTER COLUMN league SET DEFAULT ''")
     op.execute("UPDATE category_stats_v2 SET league = '' WHERE league IS NULL")
     op.execute(
         """
@@ -657,6 +660,8 @@ def _validate_base_contracts() -> None:
             ("image_url", "TEXT", False, None),
             ("category", "VARCHAR(50)", False, None),
             ("subcategory", "VARCHAR(100)", False, None),
+            ("league", "VARCHAR(100)", False, "''::character varying"),
+            ("event_slug", "VARCHAR(255)", False, "''::character varying"),
             ("status", "VARCHAR(20)", False, "'ACTIVE'::character varying"),
             ("winning_outcome", "VARCHAR(255)", False, None),
             ("winning_index", "INTEGER", False, None),
@@ -694,6 +699,7 @@ def _validate_base_contracts() -> None:
             ("address", "VARCHAR(42)", False, None),
             ("category", "VARCHAR(50)", True, None),
             ("subcategory", "VARCHAR(100)", True, "''::character varying"),
+            ("league", "VARCHAR(100)", True, "''::character varying"),
             ("window_size", "INTEGER", True, "0"),
             ("pnl", "NUMERIC", False, "0"),
             ("volume", "NUMERIC", False, "0"),
@@ -714,6 +720,8 @@ def _validate_base_contracts() -> None:
             ("unrealized_pnl", "NUMERIC", False, None),
             ("entry_at", "TIMESTAMPTZ", False, None),
             ("computed_at", "TIMESTAMPTZ", False, "now()"),
+            ("is_parlay", "BOOLEAN", False, None),
+            ("is_resolved", "BOOLEAN", False, None),
         ),
         "wallet_closed_positions_v2": (
             ("address", "VARCHAR(42)", False, None),
@@ -727,6 +735,14 @@ def _validate_base_contracts() -> None:
             ("opened_at", "TIMESTAMPTZ", False, None),
             ("closed_at", "TIMESTAMPTZ", False, None),
             ("n_trades", "INTEGER", False, "1"),
+            ("is_parlay", "BOOLEAN", False, None),
+            ("is_redeemable", "BOOLEAN", False, None),
+            ("resolved_at", "TIMESTAMPTZ", False, None),
+            ("data_quality_flag", "TEXT", False, None),
+            ("metrics_eligible", "BOOLEAN", False, None),
+            ("exclusion_reason", "TEXT", False, None),
+            ("excluded_at", "TIMESTAMPTZ", False, None),
+            ("source_asset", "TEXT", False, None),
         ),
     }
     for table, columns in contracts.items():
@@ -953,6 +969,9 @@ def upgrade() -> None:
     )
     op.execute("ALTER TABLE markets_v2 ALTER COLUMN league SET DEFAULT ''")
     op.execute("ALTER TABLE markets_v2 ALTER COLUMN event_slug SET DEFAULT ''")
+    op.execute("ALTER TABLE category_stats_v2 ALTER COLUMN subcategory SET DEFAULT ''")
+    op.execute("ALTER TABLE category_stats_v2 ALTER COLUMN league SET DEFAULT ''")
+    op.execute("ALTER TABLE category_stats_v2 ALTER COLUMN window_size SET DEFAULT 0")
     _add_columns(
         "category_stats_v2",
         {
