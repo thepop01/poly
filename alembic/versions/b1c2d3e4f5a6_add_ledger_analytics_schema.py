@@ -307,7 +307,7 @@ def _ensure_ownership_table() -> None:
         },
     )
     _assert_primary_key_contract(OWNERSHIP_TABLE, ("object_name",))
-    op.execute(
+    op.get_bind().execute(
         sa.text(
             f"""
             INSERT INTO {OWNERSHIP_TABLE}
@@ -326,7 +326,7 @@ def _ensure_ownership_table() -> None:
 
 
 def _record_object(name: str, kind: str, preexisting: bool) -> None:
-    op.execute(
+    op.get_bind().execute(
         sa.text(
             f"""
             INSERT INTO {OWNERSHIP_TABLE}
@@ -348,7 +348,7 @@ def _assert_index_contract(name: str, table: str, expected_definition: str) -> N
     row = op.get_bind().execute(
         sa.text(
             """
-            SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid)
+            SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid), indisvalid
             FROM pg_index
             WHERE indexrelid = to_regclass(:qualified)
               AND indrelid = to_regclass(:table)
@@ -358,6 +358,8 @@ def _assert_index_contract(name: str, table: str, expected_definition: str) -> N
     ).first()
     if not row:
         raise RuntimeError(f"{name} is missing or targets the wrong table")
+    if not bool(row[2]):
+        raise RuntimeError(f"{name} is invalid; concurrent index build did not complete")
     actual = re.sub(r"\s+", " ", str(row[1]).strip().lower())
     expected = re.sub(r"\s+", " ", expected_definition.strip().lower())
     if actual != expected:
@@ -445,8 +447,17 @@ def _ensure_table_contract(
         )
     check_defs = _constraint_definitions(table, "c")
     for expected in checks:
-        normalized = expected.lower().replace("  ", " ")
-        if not any(normalized in definition for definition in check_defs):
+        normalized = re.sub(r"\\s+", " ", expected.lower()).strip()
+        def equivalent(definition: str) -> bool:
+            if normalized in definition:
+                return True
+            # PostgreSQL deparses varchar CHECK ... IN (...) as a text cast
+            # compared with an ANY(ARRAY[...]) expression.
+            if normalized.startswith("status in (") and "status::text = any (array[" in definition:
+                values = re.findall(r"'([^']+)'", definition)
+                return set(values) == {"queued", "running", "completed", "failed"}
+            return False
+        if not any(equivalent(definition) for definition in check_defs):
             raise RuntimeError(
                 f"{table} is missing required check constraint containing {expected!r}"
             )
@@ -607,8 +618,8 @@ def _validate_base_contracts() -> None:
         "wallets_v2": (
             ("address", "VARCHAR(42)", True, None),
             ("username", "VARCHAR(255)", False, None),
-            ("tier", "VARCHAR(20)", False, None),
-            ("is_dormant", "BOOLEAN", False, None),
+            ("tier", "VARCHAR(20)", True, "'UNCLASSIFIED'::character varying"),
+            ("is_dormant", "BOOLEAN", False, "false"),
             ("last_trade_at", "TIMESTAMPTZ", False, None),
         ),
         "markets_v2": (
@@ -616,12 +627,12 @@ def _validate_base_contracts() -> None:
             ("title", "TEXT", False, None),
             ("category", "VARCHAR(50)", False, None),
             ("subcategory", "VARCHAR(100)", False, None),
-            ("status", "VARCHAR(20)", False, None),
+            ("status", "VARCHAR(20)", False, "'ACTIVE'::character varying"),
         ),
         "wallet_metrics_v2": (
             ("address", "VARCHAR(42)", True, None),
-            ("total_pnl", "NUMERIC", False, None),
-            ("total_volume", "NUMERIC", False, None),
+            ("total_pnl", "NUMERIC", False, "0"),
+            ("total_volume", "NUMERIC", False, "0"),
         ),
         "category_stats_v2": (
             ("address", "VARCHAR(42)", True, None),

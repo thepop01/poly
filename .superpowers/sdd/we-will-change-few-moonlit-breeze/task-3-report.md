@@ -25,4 +25,4 @@ The PostgreSQL replay remains opt-in and was not executable without a disposable
 
 ## Commit
 
-Pending final commit with the required co-author trailer.
+Follow-up fixes verified and committed with the required co-author trailer. PostgreSQL replay remains skipped because `MIGRATION_TEST_DATABASE_URL` is not configured.

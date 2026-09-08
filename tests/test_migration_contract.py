@@ -161,6 +161,19 @@ def test_exact_token_identity_accepts_text_and_bounded_varchar_but_not_numeric(m
             module._assert_exact_token_identity("wallet_positions_v2")
 
 
+def test_index_contract_rejects_invalid_index(monkeypatch):
+    module = _load_migration()
+    class Result:
+        def first(self):
+            return ("idx", "CREATE INDEX idx ON public.t (x)", False)
+    class Bind:
+        def execute(self, *_args, **_kwargs):
+            return Result()
+    monkeypatch.setattr(module.op, "get_bind", lambda: Bind())
+    with pytest.raises(RuntimeError, match="invalid"):
+        module._assert_index_contract("idx", "t", "CREATE INDEX idx ON public.t USING btree (x)")
+
+
 def test_exact_token_identity_preserves_nullable_no_default_contract(monkeypatch):
     module = _load_migration()
     for notnull, default in ((True, None), (False, "'0'::text")):
