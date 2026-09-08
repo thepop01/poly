@@ -3,17 +3,27 @@ CREATE TABLE wallets_v2 (
     address VARCHAR(42) PRIMARY KEY,
     username VARCHAR(255),
     tier VARCHAR(20) NOT NULL DEFAULT 'UNCLASSIFIED',
+    tier_reason VARCHAR(50),
+    might_cook_type VARCHAR(20),
     is_dormant BOOLEAN DEFAULT FALSE,
-    last_trade_at TIMESTAMPTZ
+    last_trade_at TIMESTAMPTZ,
+    added_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE TABLE markets_v2 (
     condition_id VARCHAR(255) PRIMARY KEY,
     title TEXT,
+    description TEXT,
+    image_url TEXT,
     category VARCHAR(50),
     subcategory VARCHAR(100),
     league VARCHAR(100) DEFAULT '',
     event_slug VARCHAR(255) DEFAULT '',
-    status VARCHAR(20) DEFAULT 'ACTIVE'
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    winning_outcome VARCHAR(255),
+    winning_index INTEGER,
+    resolved_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE TABLE wallet_metrics_v2 (
     address VARCHAR(42) PRIMARY KEY REFERENCES wallets_v2(address),
@@ -63,6 +73,11 @@ CREATE TABLE wallet_positions_v2 (
     condition_id VARCHAR(255),
     outcome VARCHAR(255),
     size NUMERIC,
+    avg_price NUMERIC,
+    current_value NUMERIC,
+    unrealized_pnl NUMERIC,
+    entry_at TIMESTAMPTZ,
+    computed_at TIMESTAMPTZ DEFAULT NOW(),
     is_parlay BOOLEAN,
     is_resolved BOOLEAN,
     asset_token_id TEXT,
@@ -72,8 +87,14 @@ CREATE TABLE wallet_closed_positions_v2 (
     address VARCHAR(42),
     condition_id VARCHAR(255),
     outcome VARCHAR(255),
+    avg_buy_price NUMERIC,
+    avg_sell_price NUMERIC,
+    total_bought NUMERIC,
+    total_sold NUMERIC,
     realized_pnl NUMERIC,
+    opened_at TIMESTAMPTZ,
     closed_at TIMESTAMPTZ,
+    n_trades INTEGER DEFAULT 1,
     is_parlay BOOLEAN,
     is_redeemable BOOLEAN,
     resolved_at TIMESTAMPTZ,

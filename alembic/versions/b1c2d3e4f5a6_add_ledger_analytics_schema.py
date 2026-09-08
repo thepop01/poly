@@ -79,13 +79,13 @@ def _ensure_base_tables() -> None:
         CREATE TABLE IF NOT EXISTS wallets_v2 (
             address VARCHAR(42) PRIMARY KEY,
             username VARCHAR(255),
-            tier VARCHAR(20),
+            tier VARCHAR(20) NOT NULL DEFAULT 'UNCLASSIFIED',
             tier_reason VARCHAR(50),
             might_cook_type VARCHAR(20),
-            is_dormant BOOLEAN,
+            is_dormant BOOLEAN DEFAULT FALSE,
             last_trade_at TIMESTAMPTZ,
-            added_at TIMESTAMPTZ,
-            updated_at TIMESTAMPTZ
+            added_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
         )
         """
     )
@@ -98,11 +98,11 @@ def _ensure_base_tables() -> None:
             image_url TEXT,
             category VARCHAR(50),
             subcategory VARCHAR(100),
-            status VARCHAR(20),
+            status VARCHAR(20) DEFAULT 'ACTIVE',
             winning_outcome VARCHAR(255),
             winning_index INTEGER,
             resolved_at TIMESTAMPTZ,
-            updated_at TIMESTAMPTZ
+            updated_at TIMESTAMPTZ DEFAULT NOW()
         )
         """
     )
@@ -166,7 +166,7 @@ def _ensure_base_tables() -> None:
             current_value NUMERIC,
             unrealized_pnl NUMERIC,
             entry_at TIMESTAMPTZ,
-            computed_at TIMESTAMPTZ,
+            computed_at TIMESTAMPTZ DEFAULT NOW(),
             PRIMARY KEY (address, condition_id, outcome)
         )
         """
@@ -184,7 +184,7 @@ def _ensure_base_tables() -> None:
             realized_pnl NUMERIC,
             opened_at TIMESTAMPTZ,
             closed_at TIMESTAMPTZ,
-            n_trades INTEGER,
+            n_trades INTEGER DEFAULT 1,
             PRIMARY KEY (address, condition_id, outcome)
         )
         """
@@ -643,15 +643,25 @@ def _validate_base_contracts() -> None:
             ("address", "VARCHAR(42)", True, None),
             ("username", "VARCHAR(255)", False, None),
             ("tier", "VARCHAR(20)", True, "'UNCLASSIFIED'::character varying"),
+            ("tier_reason", "VARCHAR(50)", False, None),
+            ("might_cook_type", "VARCHAR(20)", False, None),
             ("is_dormant", "BOOLEAN", False, "false"),
             ("last_trade_at", "TIMESTAMPTZ", False, None),
+            ("added_at", "TIMESTAMPTZ", False, "now()"),
+            ("updated_at", "TIMESTAMPTZ", False, "now()"),
         ),
         "markets_v2": (
             ("condition_id", "VARCHAR(255)", True, None),
             ("title", "TEXT", False, None),
+            ("description", "TEXT", False, None),
+            ("image_url", "TEXT", False, None),
             ("category", "VARCHAR(50)", False, None),
             ("subcategory", "VARCHAR(100)", False, None),
             ("status", "VARCHAR(20)", False, "'ACTIVE'::character varying"),
+            ("winning_outcome", "VARCHAR(255)", False, None),
+            ("winning_index", "INTEGER", False, None),
+            ("resolved_at", "TIMESTAMPTZ", False, None),
+            ("updated_at", "TIMESTAMPTZ", False, "now()"),
         ),
         "wallet_metrics_v2": (
             ("address", "VARCHAR(42)", True, None),
@@ -699,13 +709,24 @@ def _validate_base_contracts() -> None:
             ("condition_id", "VARCHAR(255)", False, None),
             ("outcome", "VARCHAR(255)", False, None),
             ("size", "NUMERIC", False, None),
+            ("avg_price", "NUMERIC", False, None),
+            ("current_value", "NUMERIC", False, None),
+            ("unrealized_pnl", "NUMERIC", False, None),
+            ("entry_at", "TIMESTAMPTZ", False, None),
+            ("computed_at", "TIMESTAMPTZ", False, "now()"),
         ),
         "wallet_closed_positions_v2": (
             ("address", "VARCHAR(42)", False, None),
             ("condition_id", "VARCHAR(255)", False, None),
             ("outcome", "VARCHAR(255)", False, None),
+            ("avg_buy_price", "NUMERIC", False, None),
+            ("avg_sell_price", "NUMERIC", False, None),
+            ("total_bought", "NUMERIC", False, None),
+            ("total_sold", "NUMERIC", False, None),
             ("realized_pnl", "NUMERIC", False, None),
+            ("opened_at", "TIMESTAMPTZ", False, None),
             ("closed_at", "TIMESTAMPTZ", False, None),
+            ("n_trades", "INTEGER", False, "1"),
         ),
     }
     for table, columns in contracts.items():

@@ -80,8 +80,10 @@ def test_migration_has_additive_guards_and_concurrent_index_autocommit():
 def test_fixture_shapes_are_present_and_distinct():
     clean = ROOT / "tests" / "fixtures" / "migration_clean_schema.sql"
     league = ROOT / "tests" / "fixtures" / "migration_league_modified_schema.sql"
+    numeric = ROOT / "tests" / "fixtures" / "migration_numeric_token_schema.sql"
     assert clean.is_file()
     assert league.is_file()
+    assert numeric.is_file()
     clean_text = clean.read_text(encoding="utf-8")
     league_text = league.read_text(encoding="utf-8")
     assert "CREATE TABLE wallets_v2" in clean_text
@@ -96,8 +98,11 @@ def test_fixture_shapes_are_present_and_distinct():
     assert "pnl NUMERIC DEFAULT 0" in clean_text
     assert "league VARCHAR(100) DEFAULT ''" in league_text
     assert "PRIMARY KEY (address, category, subcategory, league, window_size)" in league_text
+    numeric_text = numeric.read_text(encoding="utf-8")
     assert "asset_token_id NUMERIC" not in clean_text
     assert "asset_token_id NUMERIC" not in league_text
+    assert "asset_token_id NUMERIC" in numeric_text
+    assert "numeric legacy values cannot recover leading zeros" in MIGRATION_PATH.read_text(encoding="utf-8")
     assert clean_text != league_text
 
 
