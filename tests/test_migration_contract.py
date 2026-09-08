@@ -89,6 +89,10 @@ def test_fixture_shapes_are_present_and_distinct():
     assert "tier VARCHAR(20) NOT NULL DEFAULT 'UNCLASSIFIED'" in league_text
     assert "is_dormant BOOLEAN DEFAULT FALSE" in clean_text
     assert "status VARCHAR(20) DEFAULT 'ACTIVE'" in clean_text
+    assert "total_pnl NUMERIC DEFAULT 0" in clean_text
+    assert "total_volume NUMERIC DEFAULT 0" in clean_text
+    assert "total_pnl NUMERIC DEFAULT 0" in league_text
+    assert "total_volume NUMERIC DEFAULT 0" in league_text
     assert "pnl NUMERIC DEFAULT 0" in clean_text
     assert "league VARCHAR(100) DEFAULT ''" in league_text
     assert "PRIMARY KEY (address, category, subcategory, league, window_size)" in league_text

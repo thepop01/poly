@@ -17,8 +17,8 @@ CREATE TABLE markets_v2 (
 );
 CREATE TABLE wallet_metrics_v2 (
     address VARCHAR(42) PRIMARY KEY REFERENCES wallets_v2(address),
-    total_pnl NUMERIC,
-    total_volume NUMERIC,
+    total_pnl NUMERIC DEFAULT 0,
+    total_volume NUMERIC DEFAULT 0,
     computed_at TIMESTAMPTZ
 );
 CREATE TABLE category_stats_v2 (
