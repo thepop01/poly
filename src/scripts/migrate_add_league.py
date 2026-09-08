@@ -1,52 +1,52 @@
-import asyncio
+"""Validate the database URL and delegate schema changes to Alembic.
+
+The historical script issued unconditional schema statements.
+This compatibility entry point now performs no schema mutation itself.  Use
+``python -m src.scripts.migrate_add_league`` to run ``alembic upgrade head``;
+the migration is replayable on both clean and league-modified databases.
+"""
+from __future__ import annotations
+
 import os
-import asyncpg
+from pathlib import Path
+import subprocess
+import sys
+from urllib.parse import urlsplit
+
 from dotenv import load_dotenv
 
-load_dotenv()
-DB_URL = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0.1:5432/poly_db").replace("localhost", "127.0.0.1")
 
-async def migrate():
-    print(f"Connecting to database...")
-    conn = await asyncpg.connect(DB_URL)
-    try:
-        print("1. Updating markets_v2 columns...")
-        await conn.execute("""
-            ALTER TABLE markets_v2 ADD COLUMN IF NOT EXISTS league VARCHAR(100) DEFAULT '';
-            ALTER TABLE markets_v2 ADD COLUMN IF NOT EXISTS event_slug VARCHAR(255) DEFAULT '';
-        """)
-        print("markets_v2 updated.")
+ROOT = Path(__file__).resolve().parents[2]
+_ALLOWED_SCHEMES = {"postgresql", "postgres", "postgresql+asyncpg", "postgresql+psycopg2"}
 
-        print("2. Updating category_stats_v2 columns and primary key...")
-        # Check if league column exists
-        has_league = await conn.fetchval("""
-            SELECT count(*) FROM information_schema.columns 
-            WHERE table_name = 'category_stats_v2' AND column_name = 'league'
-        """)
-        if not has_league:
-            await conn.execute("ALTER TABLE category_stats_v2 ADD COLUMN league VARCHAR(100) NOT NULL DEFAULT '';")
 
-        # Drop old constraint and recreate PK with league
-        print("Recreating primary key on category_stats_v2...")
-        try:
-            await conn.execute("ALTER TABLE category_stats_v2 DROP CONSTRAINT IF EXISTS category_stats_v2_pkey;")
-            await conn.execute("""
-                ALTER TABLE category_stats_v2 
-                ADD PRIMARY KEY (address, category, subcategory, league, window_size);
-            """)
-            print("Primary key updated successfully.")
-        except Exception as e:
-            print(f"PK update warning: {e}")
+def _database_url() -> str:
+    load_dotenv(ROOT / ".env")
+    value = os.environ.get("DATABASE_URL", "").strip()
+    if not value:
+        raise SystemExit("DATABASE_URL is required; no credentials are embedded")
+    parsed = urlsplit(value)
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        raise SystemExit("DATABASE_URL must use a PostgreSQL scheme")
+    if not parsed.hostname or not parsed.path.strip("/"):
+        raise SystemExit("DATABASE_URL must include a PostgreSQL host and database")
+    return value
 
-        # Check indexes
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_catstats_league_v2 ON category_stats_v2 (category, subcategory, league);
-        """)
-        print("Indexes created.")
 
-        print("Migration complete!")
-    finally:
-        await conn.close()
+def migrate(argv: list[str] | None = None) -> int:
+    """Validate configuration, then execute Alembic's canonical upgrade.
+
+    Extra arguments are passed to Alembic after ``upgrade head`` so existing
+    operator wrappers can still add Alembic flags.  No credentials are logged.
+    """
+    database_url = _database_url()
+    args = ["-m", "alembic", "upgrade", "head"]
+    if argv:
+        raise SystemExit("unsupported arguments; migration only supports upgrade head")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    return subprocess.call([sys.executable, *args], cwd=ROOT, env=env)
+
 
 if __name__ == "__main__":
-    asyncio.run(migrate())
+    raise SystemExit(migrate(sys.argv[1:]))
