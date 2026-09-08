@@ -2,8 +2,8 @@
 CREATE TABLE wallets_v2 (
     address VARCHAR(42) PRIMARY KEY,
     username VARCHAR(255),
-    tier VARCHAR(20),
-    is_dormant BOOLEAN,
+    tier VARCHAR(20) NOT NULL DEFAULT 'UNCLASSIFIED',
+    is_dormant BOOLEAN DEFAULT FALSE,
     last_trade_at TIMESTAMPTZ
 );
 CREATE TABLE markets_v2 (
@@ -11,7 +11,7 @@ CREATE TABLE markets_v2 (
     title TEXT,
     category VARCHAR(50),
     subcategory VARCHAR(100),
-    status VARCHAR(20)
+    status VARCHAR(20) DEFAULT 'ACTIVE'
 );
 CREATE TABLE wallet_metrics_v2 (
     address VARCHAR(42) PRIMARY KEY REFERENCES wallets_v2(address),
@@ -24,8 +24,8 @@ CREATE TABLE category_stats_v2 (
     category VARCHAR(50) NOT NULL,
     subcategory VARCHAR(100) NOT NULL DEFAULT '',
     window_size INTEGER NOT NULL DEFAULT 0,
-    pnl NUMERIC,
-    volume NUMERIC,
+    pnl NUMERIC DEFAULT 0,
+    volume NUMERIC DEFAULT 0,
     PRIMARY KEY (address, category, subcategory, window_size)
 );
 CREATE TABLE wallet_positions_v2 (

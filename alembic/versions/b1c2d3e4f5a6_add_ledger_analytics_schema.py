@@ -639,8 +639,8 @@ def _validate_base_contracts() -> None:
             ("category", "VARCHAR(50)", True, None),
             ("subcategory", "VARCHAR(100)", True, "''::character varying"),
             ("window_size", "INTEGER", True, "0"),
-            ("pnl", "NUMERIC", False, None),
-            ("volume", "NUMERIC", False, None),
+            ("pnl", "NUMERIC", False, "0"),
+            ("volume", "NUMERIC", False, "0"),
         ),
         "wallet_positions_v2": (
             ("address", "VARCHAR(42)", True, None),

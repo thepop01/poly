@@ -85,6 +85,11 @@ def test_fixture_shapes_are_present_and_distinct():
     clean_text = clean.read_text(encoding="utf-8")
     league_text = league.read_text(encoding="utf-8")
     assert "CREATE TABLE wallets_v2" in clean_text
+    assert "tier VARCHAR(20) NOT NULL DEFAULT 'UNCLASSIFIED'" in clean_text
+    assert "tier VARCHAR(20) NOT NULL DEFAULT 'UNCLASSIFIED'" in league_text
+    assert "is_dormant BOOLEAN DEFAULT FALSE" in clean_text
+    assert "status VARCHAR(20) DEFAULT 'ACTIVE'" in clean_text
+    assert "pnl NUMERIC DEFAULT 0" in clean_text
     assert "league VARCHAR(100) DEFAULT ''" in league_text
     assert "PRIMARY KEY (address, category, subcategory, league, window_size)" in league_text
     assert "asset_token_id NUMERIC" not in clean_text

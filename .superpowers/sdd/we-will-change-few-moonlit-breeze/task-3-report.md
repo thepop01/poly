@@ -25,4 +25,4 @@ The PostgreSQL replay remains opt-in and was not executable without a disposable
 
 ## Commit
 
-Follow-up fixes verified and committed with the required co-author trailer. PostgreSQL replay remains skipped because `MIGRATION_TEST_DATABASE_URL` is not configured.
+Follow-up fixes verified and committed with the required co-author trailer. Parent `category_stats_v2` numeric defaults, wallet tier defaults, dormant/status defaults, and fixture helper prerequisites are represented in validation and both replay fixtures. PostgreSQL replay remains skipped because `MIGRATION_TEST_DATABASE_URL` is not configured.
