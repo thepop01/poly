@@ -1077,12 +1077,10 @@ def _create_functions_and_triggers() -> None:
                         USING ERRCODE = '23514';
                 END IF;
                 IF p_evidence_id IS NULL THEN
-                    IF p_table_name <> 'wallet_closed_positions_v2' THEN
-                        RAISE EXCEPTION
-                            'redeemable -> redeemed requires authoritative '
-                            'redemption/closed evidence'
-                            USING ERRCODE = '23514';
-                    END IF;
+                    RAISE EXCEPTION
+                        'redeemable -> redeemed requires authoritative '
+                        'redemption/closed evidence'
+                        USING ERRCODE = '23514';
                 ELSE
                     SELECT evidence_type, snapshot_id, event_sha256, transaction_hash
                       INTO v_evidence_type, v_evidence_snapshot_id,
@@ -1382,7 +1380,7 @@ _EXPECTED_INDEX_DEFINITIONS: Final[dict[str, tuple[str, str]]] = {
         EVIDENCE_TABLE,
         f"create unique index uq_wallet_position_identity_evidence_v2 on "
         f"public.{EVIDENCE_TABLE} using btree "
-        "(address, condition_id, outcome, snapshot_id, "
+        "(address, condition_id, snapshot_id, coalesce(outcome, ''::text), "
         "coalesce(asset_token_id, ''::text), coalesce(source_asset, ''::text), "
         "coalesce(event_sha256, ''::text))",
     ),
@@ -1409,8 +1407,9 @@ _INDEX_DDL: Final[dict[str, str]] = {
     "uq_wallet_position_identity_evidence_v2": (
         "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "
         "uq_wallet_position_identity_evidence_v2 "
-        f"ON {EVIDENCE_TABLE} (address, condition_id, outcome, snapshot_id, "
-        "COALESCE(asset_token_id, ''), COALESCE(source_asset, ''), "
+        f"ON {EVIDENCE_TABLE} (address, condition_id, snapshot_id, "
+        "COALESCE(outcome, ''), COALESCE(asset_token_id, ''), "
+        "COALESCE(source_asset, ''), "
         "COALESCE(event_sha256, ''))"
     ),
     "uq_wallet_position_identity_decisions_v2": (

@@ -749,6 +749,32 @@ def test_identity_evidence_and_decisions_are_append_only(prepared_db):
                 """
             )
 
+            # NULL outcomes are normalized by the evidence uniqueness expression;
+            # repeated observations in the same snapshot must still collide.
+            await conn.execute(
+                """
+                INSERT INTO wallet_position_identity_evidence_v2
+                    (address, condition_id, asset_token_id, evidence_type,
+                     snapshot_id)
+                VALUES ('0xappend', 'condition-null', 'null-token',
+                        'activity_event', $1)
+                """,
+                snapshot_id,
+            )
+            await _assert_rejects(
+                lambda: conn.execute(
+                    """
+                    INSERT INTO wallet_position_identity_evidence_v2
+                        (address, condition_id, asset_token_id, evidence_type,
+                         snapshot_id)
+                    VALUES ('0xappend', 'condition-null', 'null-token',
+                            'redemption', $1)
+                    """,
+                    snapshot_id,
+                ),
+                "uq_wallet_position_identity_evidence_v2",
+            )
+
             for table in (
                 "wallet_position_identity_evidence_v2",
                 "wallet_position_identity_decisions_v2",
@@ -1146,6 +1172,21 @@ def test_closed_positions_enforce_the_same_provenance_semantics(prepared_db):
                 WHERE address = '0xclosed'
                 """,
                 snapshot_id,
+            )
+            await _assert_rejects(
+                lambda: conn.execute(
+                    """
+                    UPDATE wallet_closed_positions_v2
+                    SET lifecycle_state = 'redeemed',
+                        redeemed_at = NOW(),
+                        provenance_snapshot_id = $1,
+                        provenance_evidence_id = NULL,
+                        last_seen_at = NOW()
+                    WHERE address = '0xclosed'
+                    """,
+                    redemption_snapshot,
+                ),
+                "redeemable -> redeemed requires authoritative",
             )
             await conn.execute(
                 """
