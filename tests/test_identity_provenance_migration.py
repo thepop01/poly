@@ -775,9 +775,9 @@ def test_identity_evidence_and_decisions_are_append_only(prepared_db):
                 "uq_wallet_position_identity_evidence_v2",
             )
 
-            for table in (
-                "wallet_position_identity_evidence_v2",
-                "wallet_position_identity_decisions_v2",
+            for table, expected_count in (
+                ("wallet_position_identity_evidence_v2", 2),
+                ("wallet_position_identity_decisions_v2", 1),
             ):
                 await _assert_rejects(
                     lambda table=table: conn.execute(
@@ -789,7 +789,10 @@ def test_identity_evidence_and_decisions_are_append_only(prepared_db):
                     lambda table=table: conn.execute(f"DELETE FROM {table}"),
                     "append-only",
                 )
-                assert await conn.fetchval(f"SELECT count(*) FROM {table}") == 1
+                assert (
+                    await conn.fetchval(f"SELECT count(*) FROM {table}")
+                    == expected_count
+                )
 
             # A duplicate decision for the same audit/address/condition/outcome/
             # token identity is refused by the unique expression index.
