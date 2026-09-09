@@ -35,8 +35,14 @@ def test_revision_is_after_actual_current_head_and_graph_has_one_head():
     scripts = ScriptDirectory.from_config(config)
 
     assert module.down_revision == "a0b1c2d3e4f5"
-    assert scripts.get_current_head() == module.revision
-    assert list(scripts.get_heads()) == [module.revision]
+    # The graph must stay single-headed.  This revision is no longer the head
+    # itself once later expand revisions are added on top of it, but it must
+    # remain a linear ancestor of the one head.
+    heads = list(scripts.get_heads())
+    assert heads == [scripts.get_current_head()]
+    assert len(heads) == 1
+    ancestors = {script.revision for script in scripts.walk_revisions()}
+    assert module.revision in ancestors
 
 
 def test_required_columns_cover_supported_v2_contract():
