@@ -75,6 +75,7 @@ REQUIRED_PROVENANCE_COLUMNS: Final[tuple[str, ...]] = (
     "last_seen_at",
 )
 OPTIONAL_PROVENANCE_COLUMNS: Final[tuple[str, ...]] = (
+    "provenance_evidence_id",
     "provenance_event_hash",
     "provenance_reason",
 )
@@ -84,6 +85,7 @@ PROVENANCE_COLUMNS: Final[tuple[str, ...]] = (
 # Immutable once provenance is initialized.
 IMMUTABLE_PROVENANCE_COLUMNS: Final[tuple[str, ...]] = (
     "provenance_kind",
+    "provenance_evidence_id",
     "first_seen_at",
 )
 
@@ -120,6 +122,7 @@ EVIDENCE_TYPES: Final[tuple[str, ...]] = (
     "positions_snapshot",
     "activity_event",
     "redemption",
+    "resolution",
     "mint",
     "split",
     "merge",
@@ -130,6 +133,7 @@ PROVENANCE_COLUMN_DEFINITIONS: Final[dict[str, str]] = {
     "provenance_kind": "TEXT",
     "lifecycle_state": "TEXT",
     "provenance_snapshot_id": "BIGINT",
+    "provenance_evidence_id": "BIGINT",
     "provenance_event_hash": "TEXT",
     "provenance_reason": "TEXT",
     "first_seen_at": "TIMESTAMPTZ",
@@ -154,6 +158,12 @@ APPEND_ONLY_TRIGGERS: Final[dict[str, str]] = {
     EVIDENCE_TABLE: "trg_wallet_position_identity_evidence_v2_append_only",
     DECISION_TABLE: "trg_wallet_position_identity_decisions_v2_append_only",
 }
+APPEND_ONLY_TRUNCATE_TRIGGERS: Final[dict[str, str]] = {
+    EVIDENCE_TABLE: "trg_wallet_position_identity_evidence_v2_no_truncate",
+    DECISION_TABLE: "trg_wallet_position_identity_decisions_v2_no_truncate",
+}
+
+EVIDENCE_CHECK_FUNCTION: Final[str] = "ledger_require_provenance_evidence_v2"
 
 CREATED_INDEXES: Final[tuple[str, ...]] = (
     "idx_wallet_position_identity_evidence_lookup_v2",
@@ -476,13 +486,13 @@ def _assert_exact_token_identity(table: str, column: str) -> None:
     if actual is None:
         raise RuntimeError(f"{table}.{column} is missing")
     actual_type, actual_notnull, actual_default = actual
-    if actual_type != "text" and not re.fullmatch(
-        r"character varying\(\d+\)", actual_type
-    ):
+    if actual_type != "text":
         raise RuntimeError(
             f"{table}.{column} has incompatible exact-identity type "
-            f"{actual_type!r}; numeric legacy values cannot recover leading "
-            "zeros; repair the source-backed schema before upgrading"
+            f"{actual_type!r}; exact token identity must use TEXT; numeric legacy "
+            "values cannot recover leading zeros and bounded character values are "
+            "rejected because they cannot guarantee lossless round-tripping; repair "
+            "the source-backed schema before upgrading"
         )
     if actual_notnull or actual_default is not None:
         raise RuntimeError(
@@ -904,6 +914,18 @@ def _add_provenance_columns() -> None:
             )
         _record_object(f"{table}.{fk_name}", "constraint", fk_existed)
 
+        evidence_fk_name = f"fk_{table}_provenance_evidence"
+        evidence_fk_existed = _constraint_exists(table, evidence_fk_name)
+        if not evidence_fk_existed:
+            op.execute(
+                f"ALTER TABLE {table} ADD CONSTRAINT {evidence_fk_name} "
+                f"FOREIGN KEY (provenance_evidence_id) "
+                f"REFERENCES {EVIDENCE_TABLE}(id)"
+            )
+        _record_object(
+            f"{table}.{evidence_fk_name}", "constraint", evidence_fk_existed
+        )
+
 
 def _validate_provenance_columns() -> None:
     for table in POSITION_TABLES:
@@ -927,6 +949,8 @@ def _validate_provenance_columns() -> None:
             (
                 f"foreign key (provenance_snapshot_id) references "
                 f"{SNAPSHOT_TABLE}(id)",
+                f"foreign key (provenance_evidence_id) references "
+                f"{EVIDENCE_TABLE}(id)",
             ),
         )
         # The published metric grain must not change.
@@ -987,6 +1011,123 @@ def _create_functions_and_triggers() -> None:
     )
     _record_object(f"{SNAPSHOT_CHECK_FUNCTION}()", "function", snapshot_fn_existed)
 
+    evidence_fn_existed = _function_exists(EVIDENCE_CHECK_FUNCTION)
+    op.execute(
+        f"""
+        CREATE OR REPLACE FUNCTION {EVIDENCE_CHECK_FUNCTION}(
+            p_snapshot_id BIGINT,
+            p_evidence_id BIGINT,
+            p_table_name TEXT,
+            p_old_state TEXT,
+            p_new_state TEXT,
+            p_provenance_kind TEXT,
+            p_redeemed_at TIMESTAMPTZ
+        )
+        RETURNS VOID
+        LANGUAGE plpgsql
+        SET search_path TO public, pg_temp
+        AS $fn$
+        DECLARE
+            v_snapshot_source TEXT;
+            v_evidence_type TEXT;
+            v_evidence_snapshot_id BIGINT;
+            v_event_sha256 TEXT;
+            v_transaction_hash TEXT;
+        BEGIN
+            SELECT LOWER(source) INTO v_snapshot_source
+            FROM {SNAPSHOT_TABLE}
+            WHERE id = p_snapshot_id;
+
+            IF p_provenance_kind = 'synthetic' THEN
+                IF p_evidence_id IS NULL THEN
+                    RAISE EXCEPTION
+                        'synthetic provenance requires explicit mint, split, merge, '
+                        'or transfer evidence'
+                        USING ERRCODE = '23514';
+                END IF;
+                SELECT evidence_type, snapshot_id, event_sha256, transaction_hash
+                  INTO v_evidence_type, v_evidence_snapshot_id,
+                       v_event_sha256, v_transaction_hash
+                FROM {EVIDENCE_TABLE}
+                WHERE id = p_evidence_id;
+                IF v_evidence_type IS NULL
+                   OR v_evidence_type NOT IN ('mint', 'split', 'merge', 'transfer')
+                   OR v_evidence_snapshot_id IS DISTINCT FROM p_snapshot_id
+                   OR (v_event_sha256 IS NULL AND v_transaction_hash IS NULL) THEN
+                    RAISE EXCEPTION
+                        'synthetic provenance evidence must link to an explicit '
+                        'mint, split, merge, or transfer event'
+                        USING ERRCODE = '23514';
+                END IF;
+            END IF;
+
+            IF p_old_state = 'ordinary' AND p_new_state = 'redeemable' THEN
+                IF v_snapshot_source IS DISTINCT FROM 'positions' THEN
+                    RAISE EXCEPTION
+                        'ordinary -> redeemable requires a complete positions '
+                        'snapshot'
+                        USING ERRCODE = '23514';
+                END IF;
+            ELSIF p_old_state = 'redeemable' AND p_new_state = 'redeemed' THEN
+                IF p_table_name = 'wallet_closed_positions_v2'
+                   AND p_redeemed_at IS NULL THEN
+                    RAISE EXCEPTION
+                        'redeemable -> redeemed on closed positions requires '
+                        'redeemed_at'
+                        USING ERRCODE = '23514';
+                END IF;
+                IF p_evidence_id IS NULL THEN
+                    IF p_table_name <> 'wallet_closed_positions_v2' THEN
+                        RAISE EXCEPTION
+                            'redeemable -> redeemed requires authoritative '
+                            'redemption/closed evidence'
+                            USING ERRCODE = '23514';
+                    END IF;
+                ELSE
+                    SELECT evidence_type, snapshot_id, event_sha256, transaction_hash
+                      INTO v_evidence_type, v_evidence_snapshot_id,
+                           v_event_sha256, v_transaction_hash
+                    FROM {EVIDENCE_TABLE}
+                    WHERE id = p_evidence_id;
+                    IF v_evidence_type IS NULL
+                       OR v_evidence_type <> 'redemption'
+                       OR v_evidence_snapshot_id IS DISTINCT FROM p_snapshot_id
+                       OR v_snapshot_source NOT IN ('redemption', 'closed', 'closed_positions') THEN
+                        RAISE EXCEPTION
+                            'redeemable -> redeemed evidence must be an authoritative '
+                            'closed/redemption event or snapshot'
+                            USING ERRCODE = '23514';
+                    END IF;
+                END IF;
+            ELSIF p_old_state = 'redeemable' AND p_new_state = 'expired' THEN
+                IF p_evidence_id IS NULL THEN
+                    RAISE EXCEPTION
+                        'redeemable -> expired requires authoritative resolution '
+                        'evidence'
+                        USING ERRCODE = '23514';
+                END IF;
+                SELECT evidence_type, snapshot_id, event_sha256, transaction_hash
+                  INTO v_evidence_type, v_evidence_snapshot_id,
+                       v_event_sha256, v_transaction_hash
+                FROM {EVIDENCE_TABLE}
+                WHERE id = p_evidence_id;
+                IF v_evidence_type IS NULL
+                   OR v_evidence_type <> 'resolution'
+                   OR v_evidence_snapshot_id IS DISTINCT FROM p_snapshot_id
+                   OR (v_event_sha256 IS NULL AND v_transaction_hash IS NULL)
+                   OR v_snapshot_source NOT IN ('resolution', 'market_resolution', 'markets') THEN
+                    RAISE EXCEPTION
+                        'redeemable -> expired evidence must be an authoritative '
+                        'resolution event or snapshot'
+                        USING ERRCODE = '23514';
+                END IF;
+            END IF;
+        END;
+        $fn$
+        """
+    )
+    _record_object(f"{EVIDENCE_CHECK_FUNCTION}()", "function", evidence_fn_existed)
+
     guard_fn_existed = _function_exists(GUARD_FUNCTION)
     op.execute(
         f"""
@@ -1017,6 +1158,14 @@ def _create_functions_and_triggers() -> None:
                         USING ERRCODE = '23514';
                 END IF;
                 PERFORM {SNAPSHOT_CHECK_FUNCTION}(NEW.provenance_snapshot_id);
+                PERFORM {EVIDENCE_CHECK_FUNCTION}(
+                    NEW.provenance_snapshot_id, NEW.provenance_evidence_id,
+                    TG_TABLE_NAME, NULL, NEW.lifecycle_state,
+                    NEW.provenance_kind,
+                    CASE WHEN TG_TABLE_NAME = 'wallet_closed_positions_v2'
+                         THEN (to_jsonb(NEW)->>'redeemed_at')::timestamptz
+                         ELSE NULL END
+                );
                 RETURN NEW;
             END IF;
 
@@ -1039,6 +1188,14 @@ def _create_functions_and_triggers() -> None:
                         USING ERRCODE = '23514';
                 END IF;
                 PERFORM {SNAPSHOT_CHECK_FUNCTION}(NEW.provenance_snapshot_id);
+                PERFORM {EVIDENCE_CHECK_FUNCTION}(
+                    NEW.provenance_snapshot_id, NEW.provenance_evidence_id,
+                    TG_TABLE_NAME, NULL, NEW.lifecycle_state,
+                    NEW.provenance_kind,
+                    CASE WHEN TG_TABLE_NAME = 'wallet_closed_positions_v2'
+                         THEN (to_jsonb(NEW)->>'redeemed_at')::timestamptz
+                         ELSE NULL END
+                );
                 RETURN NEW;
             END IF;
 
@@ -1085,6 +1242,8 @@ def _create_functions_and_triggers() -> None:
             IF NEW.lifecycle_state = OLD.lifecycle_state THEN
                 IF NEW.provenance_snapshot_id
                        IS DISTINCT FROM OLD.provenance_snapshot_id
+                   OR NEW.provenance_evidence_id
+                       IS DISTINCT FROM OLD.provenance_evidence_id
                    OR NEW.provenance_event_hash
                        IS DISTINCT FROM OLD.provenance_event_hash
                    OR NEW.provenance_reason
@@ -1115,6 +1274,13 @@ def _create_functions_and_triggers() -> None:
                     USING ERRCODE = '23514';
             END IF;
             PERFORM {SNAPSHOT_CHECK_FUNCTION}(NEW.provenance_snapshot_id);
+            PERFORM {EVIDENCE_CHECK_FUNCTION}(
+                NEW.provenance_snapshot_id, NEW.provenance_evidence_id,
+                TG_TABLE_NAME, OLD.lifecycle_state, NEW.lifecycle_state,
+                NEW.provenance_kind,
+                CASE WHEN TG_TABLE_NAME = 'wallet_closed_positions_v2'
+                     THEN NEW.redeemed_at ELSE NULL END
+            );
             RETURN NEW;
         END;
         $fn$
@@ -1165,12 +1331,33 @@ def _create_functions_and_triggers() -> None:
         )
         _record_object(f"{table}.{trigger}", "trigger", existed)
 
+    for table, trigger in APPEND_ONLY_TRUNCATE_TRIGGERS.items():
+        existed = _trigger_exists(table, trigger)
+        op.execute(f"DROP TRIGGER IF EXISTS {trigger} ON {table}")
+        op.execute(
+            f"""
+            CREATE TRIGGER {trigger}
+            BEFORE TRUNCATE ON {table}
+            FOR EACH STATEMENT EXECUTE FUNCTION {APPEND_ONLY_FUNCTION}()
+            """
+        )
+        _record_object(f"{table}.{trigger}", "trigger", existed)
+
 
 def _validate_functions_and_triggers() -> None:
-    for function in (SNAPSHOT_CHECK_FUNCTION, GUARD_FUNCTION, APPEND_ONLY_FUNCTION):
+    for function in (
+        SNAPSHOT_CHECK_FUNCTION,
+        GUARD_FUNCTION,
+        APPEND_ONLY_FUNCTION,
+        EVIDENCE_CHECK_FUNCTION,
+    ):
         if not _function_exists(function):
             raise RuntimeError(f"{function} was not created")
-    for table, trigger in {**PROVENANCE_TRIGGERS, **APPEND_ONLY_TRIGGERS}.items():
+    for table, trigger in {
+        **PROVENANCE_TRIGGERS,
+        **APPEND_ONLY_TRIGGERS,
+        **APPEND_ONLY_TRUNCATE_TRIGGERS,
+    }.items():
         if not _trigger_exists(table, trigger):
             raise RuntimeError(f"{trigger} on {table} was not created")
 
@@ -1195,9 +1382,9 @@ _EXPECTED_INDEX_DEFINITIONS: Final[dict[str, tuple[str, str]]] = {
         EVIDENCE_TABLE,
         f"create unique index uq_wallet_position_identity_evidence_v2 on "
         f"public.{EVIDENCE_TABLE} using btree "
-        "(address, condition_id, coalesce(outcome, ''::text), "
+        "(address, condition_id, outcome, snapshot_id, "
         "coalesce(asset_token_id, ''::text), coalesce(source_asset, ''::text), "
-        "evidence_type, coalesce(event_sha256, ''::text))",
+        "coalesce(event_sha256, ''::text))",
     ),
     "uq_wallet_position_identity_decisions_v2": (
         DECISION_TABLE,
@@ -1222,9 +1409,9 @@ _INDEX_DDL: Final[dict[str, str]] = {
     "uq_wallet_position_identity_evidence_v2": (
         "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "
         "uq_wallet_position_identity_evidence_v2 "
-        f"ON {EVIDENCE_TABLE} (address, condition_id, COALESCE(outcome, ''), "
+        f"ON {EVIDENCE_TABLE} (address, condition_id, outcome, snapshot_id, "
         "COALESCE(asset_token_id, ''), COALESCE(source_asset, ''), "
-        "evidence_type, COALESCE(event_sha256, ''))"
+        "COALESCE(event_sha256, ''))"
     ),
     "uq_wallet_position_identity_decisions_v2": (
         "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "
@@ -1286,7 +1473,11 @@ def _downgrade_plan() -> list[tuple[str, str]]:
     plan: list[tuple[str, str]] = []
 
     # Triggers first so append-only/provenance guards cannot block cleanup.
-    for table, trigger in {**PROVENANCE_TRIGGERS, **APPEND_ONLY_TRIGGERS}.items():
+    for table, trigger in {
+        **PROVENANCE_TRIGGERS,
+        **APPEND_ONLY_TRIGGERS,
+        **APPEND_ONLY_TRUNCATE_TRIGGERS,
+    }.items():
         exists = _table_exists(table) and _trigger_exists(table, trigger)
         if _is_droppable(f"{table}.{trigger}", "trigger", exists):
             plan.append(("trigger", f"DROP TRIGGER IF EXISTS {trigger} ON {table}"))
@@ -1300,6 +1491,7 @@ def _downgrade_plan() -> list[tuple[str, str]]:
             continue
         for constraint in (
             f"fk_{table}_provenance_snapshot",
+            f"fk_{table}_provenance_evidence",
             f"ck_{table}_lifecycle_state",
             f"ck_{table}_provenance_kind",
         ):
@@ -1335,6 +1527,7 @@ def _downgrade_plan() -> list[tuple[str, str]]:
     for function, signature in (
         (GUARD_FUNCTION, ""),
         (APPEND_ONLY_FUNCTION, ""),
+        (EVIDENCE_CHECK_FUNCTION, "BIGINT, BIGINT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ"),
         (SNAPSHOT_CHECK_FUNCTION, "BIGINT"),
     ):
         if _is_droppable(f"{function}()", "function", _function_exists(function)):

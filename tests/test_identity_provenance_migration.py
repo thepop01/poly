@@ -136,6 +136,7 @@ def test_provenance_columns_are_nullable_with_no_backfill_default():
         "last_seen_at",
     }
     assert set(module.OPTIONAL_PROVENANCE_COLUMNS) == {
+        "provenance_evidence_id",
         "provenance_event_hash",
         "provenance_reason",
     }
@@ -144,6 +145,7 @@ def test_provenance_columns_are_nullable_with_no_backfill_default():
     ) | set(module.OPTIONAL_PROVENANCE_COLUMNS)
     assert set(module.IMMUTABLE_PROVENANCE_COLUMNS) == {
         "provenance_kind",
+        "provenance_evidence_id",
         "first_seen_at",
     }
     # No DEFAULT and no NOT NULL anywhere: the large position tables are never
@@ -235,34 +237,36 @@ def test_every_created_object_kind_is_tracked_for_ownership():
     for table, trigger in {
         **module.PROVENANCE_TRIGGERS,
         **module.APPEND_ONLY_TRIGGERS,
+        **module.APPEND_ONLY_TRUNCATE_TRIGGERS,
     }.items():
         assert f"{table}.{trigger}" in names
     for function in (
         module.GUARD_FUNCTION,
         module.APPEND_ONLY_FUNCTION,
+        module.EVIDENCE_CHECK_FUNCTION,
         module.SNAPSHOT_CHECK_FUNCTION,
     ):
         assert f"{function}()" in names
     assert module.METADATA_OBJECT in names
 
 
-def test_exact_token_identity_accepts_text_and_bounded_varchar_only(monkeypatch):
+def test_exact_token_identity_accepts_text_only(monkeypatch):
     module = _load_migration()
-    for type_name in ("text", "character varying(255)", "varchar(255)"):
-        monkeypatch.setattr(
-            module,
-            "_catalog_columns",
-            lambda _table, type_name=type_name: {
-                "asset_token_id": (
-                    module._normalize_catalog_type(type_name),
-                    False,
-                    None,
-                )
-            },
-        )
-        module._assert_exact_token_identity("wallet_positions_v2", "asset_token_id")
+    monkeypatch.setattr(
+        module,
+        "_catalog_columns",
+        lambda _table: {"asset_token_id": ("text", False, None)},
+    )
+    module._assert_exact_token_identity("wallet_positions_v2", "asset_token_id")
 
-    for type_name in ("numeric", "double precision", "bigint", "character varying"):
+    for type_name in (
+        "numeric",
+        "double precision",
+        "bigint",
+        "character varying",
+        "character varying(255)",
+        "varchar(255)",
+    ):
         monkeypatch.setattr(
             module,
             "_catalog_columns",
@@ -415,16 +419,41 @@ async def _connect():
     return await asyncpg.connect(DATABASE_URL)
 
 
-async def _seed_snapshot(conn, address: str, complete: bool = True) -> int:
+async def _seed_snapshot(
+    conn, address: str, complete: bool = True, source: str = "positions"
+) -> int:
     return await conn.fetchval(
         """
         INSERT INTO wallet_source_snapshots_v2
             (address, source, complete, payload_sha256)
-        VALUES ($1, 'positions', $2, 'sha')
+        VALUES ($1, $2, $3, 'sha')
         RETURNING id
         """,
         address,
+        source,
         complete,
+    )
+
+
+async def _seed_evidence(
+    conn,
+    address: str,
+    snapshot_id: int,
+    evidence_type: str,
+    event_sha256: str = "event-sha",
+) -> int:
+    return await conn.fetchval(
+        """
+        INSERT INTO wallet_position_identity_evidence_v2
+            (address, condition_id, asset_token_id, evidence_type,
+             event_sha256, snapshot_id)
+        VALUES ($1, 'condition-1', 'token-1', $2, $3, $4)
+        RETURNING id
+        """,
+        address,
+        evidence_type,
+        event_sha256,
+        snapshot_id,
     )
 
 
@@ -975,6 +1004,12 @@ def test_lifecycle_transitions_are_validated_and_terminal_states_are_frozen(
             snapshot_id = await _seed_snapshot(conn, "0xlifecycle")
             incomplete = await _seed_snapshot(conn, "0xlifecycle", complete=False)
             transition_snapshot = await _seed_snapshot(conn, "0xlifecycle")
+            redemption_snapshot = await _seed_snapshot(
+                conn, "0xlifecycle", source="redemption"
+            )
+            redemption_evidence = await _seed_evidence(
+                conn, "0xlifecycle", redemption_snapshot, "redemption"
+            )
             await _seed_open_position(conn, "0xlifecycle")
             await _initialize_provenance(conn, "0xlifecycle", snapshot_id)
 
@@ -1030,12 +1065,14 @@ def test_lifecycle_transitions_are_validated_and_terminal_states_are_frozen(
                 UPDATE wallet_positions_v2
                 SET lifecycle_state = 'redeemed',
                     provenance_snapshot_id = $1,
+                    provenance_evidence_id = $2,
                     provenance_event_hash = 'hash-3',
                     provenance_reason = 'authoritative redemption',
                     last_seen_at = NOW()
                 WHERE address = '0xlifecycle'
                 """,
-                snapshot_id,
+                redemption_snapshot,
+                redemption_evidence,
             )
 
             # Terminal states cannot transition anywhere, including back.
@@ -1073,6 +1110,12 @@ def test_closed_positions_enforce_the_same_provenance_semantics(prepared_db):
         conn = await _connect()
         try:
             snapshot_id = await _seed_snapshot(conn, "0xclosed")
+            redemption_snapshot = await _seed_snapshot(
+                conn, "0xclosed", source="redemption"
+            )
+            redemption_evidence = await _seed_evidence(
+                conn, "0xclosed", redemption_snapshot, "redemption"
+            )
             await conn.execute(
                 """
                 INSERT INTO wallet_closed_positions_v2
@@ -1110,10 +1153,12 @@ def test_closed_positions_enforce_the_same_provenance_semantics(prepared_db):
                 SET lifecycle_state = 'redeemed',
                     redeemed_at = NOW(),
                     provenance_snapshot_id = $1,
+                    provenance_evidence_id = $2,
                     last_seen_at = NOW()
                 WHERE address = '0xclosed'
                 """,
-                snapshot_id,
+                redemption_snapshot,
+                redemption_evidence,
             )
             await _assert_rejects(
                 lambda: conn.execute(
