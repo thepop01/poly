@@ -86,6 +86,9 @@ backup.sql
 /uv.lock
 
 # Local agent/editor state and worktrees
+.opencode/
+hooks/
+.mcp.json
 .agent/
 .agents/
 .claude/
@@ -97,3 +100,8 @@ backup.sql
 .worktrees/
 memory/
 extract/
+.memory-journal.jsonl
+.opencode/memory-prefetch.json
+
+# Maintained test suite kept local per operator request (not pushed)
+tests/
