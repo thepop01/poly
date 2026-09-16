@@ -4,6 +4,7 @@ import jwt
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse
 from datetime import datetime, timedelta, timezone
+from src.api.routers.auth import JWT_SECRET
 
 router = APIRouter(prefix="/discord", tags=["discord"])
 
@@ -101,7 +102,7 @@ async def discord_callback(request: Request, code: str):
             user_id = user["user_id"]
 
     # Generate JWT
-    secret = os.getenv("JWT_SECRET", "super-secret")
+    secret = JWT_SECRET
     expire_minutes = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
     expires_delta = timedelta(minutes=expire_minutes)
     expire = datetime.now(timezone.utc) + expires_delta

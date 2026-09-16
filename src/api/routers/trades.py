@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
+from src.api.routers.auth import get_current_user
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -16,7 +17,6 @@ class TradeResponse(BaseModel):
     price: float
     size: float
     timestamp: datetime
-    tier: Optional[str] = None
     strategy: Optional[str] = None
 
 @router.get("", response_model=List[TradeResponse])
@@ -30,7 +30,7 @@ async def get_recent_trades(request: Request, limit: int = 50, min_size: Optiona
         SELECT 
             t.trade_id, t.tx_hash, t.wallet_address, t.market_id, 
             m.title as market_title, t.token_id, t.side, t.price, t.size, t.timestamp,
-            ws.tier, ws.strategy
+            ws.strategy
         FROM trades t
         JOIN markets m ON t.market_id = m.market_id
         LEFT JOIN wallet_stats ws ON t.wallet_address = ws.address
@@ -57,7 +57,7 @@ async def get_recent_trades(request: Request, limit: int = 50, min_size: Optiona
 from fastapi.responses import Response
 
 @router.get("/export")
-async def export_trades(request: Request, market_id: Optional[str] = None):
+async def export_trades(request: Request, market_id: Optional[str] = None, _user: dict = Depends(get_current_user)):
     pool = request.app.state.pool
     if not pool:
         raise HTTPException(status_code=503, detail="Database pool not initialized")

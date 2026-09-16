@@ -23,10 +23,7 @@ async def get_smart_money_alerts(
     query = """
     SELECT 
         sma.*,
-        tw.win_rate as wallet_win_rate,
-        tw.roi_pct as wallet_roi_pct,
         tw.total_volume as wallet_total_volume,
-        tw.tier as wallet_tier,
         tw.balance as wallet_balance,
         tw.position_value as wallet_position_value
     FROM smart_money_alerts sma
@@ -68,8 +65,8 @@ async def get_smart_money_alerts(
             query += " AND sma.amount_usdc >= 20000 AND sma.amount_usdc < 50000"
             count_query += " AND sma.amount_usdc >= 20000 AND sma.amount_usdc < 50000"
         elif tier == "Tier 1":
-            query += " AND sma.amount_usdc >= 10000 AND sma.amount_usdc < 20000"
-            count_query += " AND sma.amount_usdc >= 10000 AND sma.amount_usdc < 20000"
+            query += " AND sma.amount_usdc >= 5000 AND sma.amount_usdc < 20000"
+            count_query += " AND sma.amount_usdc >= 5000 AND sma.amount_usdc < 20000"
         
     query += f" ORDER BY sma.created_at DESC LIMIT ${len(args) + 1} OFFSET ${len(args) + 2}"
     args_with_pagination = args + [limit, offset]
@@ -82,10 +79,7 @@ async def get_smart_money_alerts(
         for r in rows:
             alert = dict(r)
             wallet_stats = {
-                "win_rate": alert.pop("wallet_win_rate", None),
-                "roi_pct": alert.pop("wallet_roi_pct", None),
                 "total_volume": alert.pop("wallet_total_volume", None),
-                "tier": alert.pop("wallet_tier", None),
                 "balance": alert.pop("wallet_balance", None),
                 "position_value": alert.pop("wallet_position_value", None)
             }

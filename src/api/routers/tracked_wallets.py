@@ -6,7 +6,7 @@ import time
 import aiohttp
 import logging
 
-from src.utils.alchemy_client import alchemy_get_token_balances, USDC_CONTRACT
+from src.utils.alchemy_client import alchemy_get_token_balances, PUSD_CONTRACT
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -23,19 +23,19 @@ async def get_tracked_wallets(
     limit: int = 50,
     offset: int = 0,
     sort_by: str = "total_pnl",
+    sort_order: str = "desc",
     timeframe: str = "all",          # all | monthly | weekly
     source: Optional[str] = None,    # pnl_alltime | volume_alltime | whale_trade | etc.
     min_win_rate: Optional[float] = None,
     min_volume: Optional[float] = None,
     min_trade_size: Optional[float] = None,
-    min_realized_pnl: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Get the tracked high-performance wallets.
     Supports sorting by PnL, volume, win_rate, roi_pct.
     Timeframe filters to weekly or monthly columns.
     """
-    cache_key = f"{limit}_{offset}_{sort_by}_{timeframe}_{source}_{min_win_rate}_{min_volume}_{min_trade_size}_{min_realized_pnl}"
+    cache_key = f"{limit}_{offset}_{sort_by}_{sort_order}_{timeframe}_{source}_{min_win_rate}_{min_volume}_{min_trade_size}"
     cached = _cache.get(cache_key)
     if cached and time.time() - cached["time"] < CACHE_TTL:
         return cached["data"]
@@ -58,8 +58,6 @@ async def get_tracked_wallets(
         "total_volume": tf["volume"],
         "win_rate":     "win_rate",
         "roi_pct":      "roi_pct",
-        "alpha_score":  "alpha_score",
-        "realized_pnl": "realized_pnl",
         "deposits":     "deposits",
         "withdrawals":  "withdrawals",
         "balance":      "balance",
@@ -85,10 +83,6 @@ async def get_tracked_wallets(
         conditions.append(f"max_trade_size >= ${len(args)+1}")
         args.append(min_trade_size)
         
-    if min_realized_pnl is not None:
-        conditions.append(f"realized_pnl >= ${len(args)+1}")
-        args.append(min_realized_pnl)
-
     where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     query = f"""
@@ -96,25 +90,19 @@ async def get_tracked_wallets(
             tw.address,
             tw.discovery_source,
             tw.total_pnl,
-            tw.realized_pnl,
-            tw.unrealized_pnl,
             tw.total_volume,
             tw.pnl_weekly,
             tw.pnl_monthly,
             tw.volume_weekly,
             tw.volume_monthly,
-            tw.win_rate,
-            tw.roi_pct,
-            tw.resolved_count,
-            tw.winning_count,
-            tw.tier,
-            tw.alpha_score,
             tw.added_at,
             tw.last_indexed,
             tw.max_trade_size,
             tw.balance,
             tw.deposits,
             tw.withdrawals,
+            tw.track_count,
+            tw.last_checked_for_curated,
             EXISTS (
                 SELECT 1 FROM wallet_deposits wd 
                 WHERE wd.wallet_address = tw.address 
@@ -191,7 +179,7 @@ async def add_to_discovery_queue(request: Request, address: str) -> dict[str, st
 
 async def _fetch_balance(session: aiohttp.ClientSession, address: str) -> float:
     try:
-        b = await alchemy_get_token_balances(session, address, [USDC_CONTRACT])
+        b = await alchemy_get_token_balances(session, address, [PUSD_CONTRACT])
         if b and b.get("tokenBalances"):
             val = b["tokenBalances"][0].get("tokenBalance")
             if val and val != "0x":
@@ -256,12 +244,11 @@ async def add_tracked_wallet_direct(
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO tracked_wallets (
-                address, discovery_source, total_pnl, realized_pnl, unrealized_pnl, total_volume,
+                address, discovery_source, total_pnl, total_volume,
                 pnl_weekly, pnl_monthly, volume_weekly, volume_monthly,
-                win_rate, roi_pct, resolved_count, winning_count, tier, alpha_score,
                 last_indexed, max_trade_size, balance, deposits, withdrawals, position_value,
                 start_balance, start_deposits, start_withdrawals, start_stats_at
-            ) VALUES ($1, $2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 'Silver', 0, NOW(), 0, $3, 0, 0, $4,
+            ) VALUES ($1, $2, 0, 0, 0, 0, 0, 0, NOW(), 0, $3, 0, 0, $4,
                      $3, 0, 0, NOW())
             ON CONFLICT (address) DO UPDATE SET
                 balance = EXCLUDED.balance,
@@ -274,10 +261,8 @@ async def add_tracked_wallet_direct(
                 address, total_pnl, total_volume, win_rate, roi_pct,
                 resolved_count, winning_count, active_days,
                 avg_position_size, avg_hold_time_hours,
-                biggest_win, biggest_loss, unrealised_pnl,
-                tier, alpha_score, last_updated,
-                trades_2x, trades_1_5x, strategy, added_reason
-            ) VALUES ($1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 'Silver', 0, NOW(), 0, 0, 'Unknown', 'Manual')
+                biggest_win, biggest_loss, unrealised_pnl, last_updated, strategy, added_reason
+            ) VALUES ($1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, NOW(), 0, 0, 'Unknown', 'Manual')
             ON CONFLICT (address) DO NOTHING
         """, address)
 

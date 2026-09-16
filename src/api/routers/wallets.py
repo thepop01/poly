@@ -22,21 +22,21 @@ def _parse_num(val, default=0.0) -> float:
         return default
 
 
-async def _pm_fetch(session: aiohttp.ClientSession, endpoint: str, params: dict) -> list[dict]:
+async def _pm_fetch(session: aiohttp.ClientSession, endpoint: str, params: dict, max_items: int = 200000) -> list[dict]:
     all_results: list[dict] = []
     offset = 0
-    limit = 500
-    max_offset = 10000
+    page_size = 50  # Polymarket Data API maximum limit per request is 50
+    max_offset = 200000
 
-    while offset < max_offset:
+    while offset < max_offset and len(all_results) < max_items:
         p = dict(params)
-        p["limit"] = str(limit)
+        p["limit"] = str(page_size)
         p["offset"] = str(offset)
         qs = "&".join(f"{k}={v}" for k, v in p.items())
         url = f"{DATA_API}/{endpoint}?{qs}"
 
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status != 200:
                     break
                 data = await resp.json()
@@ -45,9 +45,9 @@ async def _pm_fetch(session: aiohttp.ClientSession, endpoint: str, params: dict)
                 if not isinstance(data, list) or (len(data) > 0 and not isinstance(data[0], dict)):
                     break
                 all_results.extend(data)
-                if len(data) < limit:
+                if len(data) < page_size:
                     break
-                offset += limit
+                offset += len(data)
         except Exception as e:
             logger.warning(f"PM API {endpoint} error: {e}")
             break
@@ -75,7 +75,7 @@ async def get_wallet_stats(request: Request, address: str) -> dict[str, Any]:
 async def get_wallet_trades(
     request: Request,
     address: str,
-    limit: int = 50,
+    limit: Optional[int] = None,
     offset: int = 0,
     live: bool = True
 ) -> list[dict[str, Any]]:
@@ -83,18 +83,26 @@ async def get_wallet_trades(
         pool = getattr(request.app.state, "pool", None)
         if pool:
             async with pool.acquire() as conn:
-                rows = await conn.fetch("""
+                q = """
                     SELECT t.*, m.title as market_title
                     FROM trades t JOIN markets m ON t.market_id = m.market_id
-                    WHERE t.wallet_address = $1 ORDER BY t.timestamp DESC LIMIT $2 OFFSET $3
-                """, address, limit, offset)
+                    WHERE t.wallet_address = $1 ORDER BY t.timestamp DESC
+                """
+                if limit is not None and limit > 0:
+                    rows = await conn.fetch(q + " LIMIT $2 OFFSET $3", address, limit, offset)
+                else:
+                    rows = await conn.fetch(q + " OFFSET $2", address, offset)
                 return [dict(r) for r in rows]
         return []
 
     async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
         results = await _pm_fetch(session, "trades", {"user": address})
     results.sort(key=lambda t: int(t.get("timestamp", 0) or 0), reverse=True)
-    return results[offset:offset + limit]
+    if limit is not None and limit > 0:
+        return results[offset:offset + limit]
+    elif offset > 0:
+        return results[offset:]
+    return results
 
 
 # ── Open Positions (live) ──────────────────────────────────────────
@@ -103,24 +111,35 @@ async def get_wallet_trades(
 async def get_wallet_positions(
     request: Request,
     address: str,
+    limit: Optional[int] = None,
+    offset: int = 0,
     live: bool = True
 ) -> list[dict[str, Any]]:
     if not live:
         pool = getattr(request.app.state, "pool", None)
         if pool:
             async with pool.acquire() as conn:
-                rows = await conn.fetch("""
+                q = """
                     SELECT t.market_id, t.side, SUM(t.size) as total_size, m.title as market_title
                     FROM trades t JOIN markets m ON t.market_id = m.market_id
                     WHERE t.wallet_address = $1 AND t.is_exit_trade = false AND m.status = 'active'
                     GROUP BY t.market_id, t.side, m.title ORDER BY total_size DESC
-                """, address)
+                """
+                if limit is not None and limit > 0:
+                    rows = await conn.fetch(q + " LIMIT $2 OFFSET $3", address, limit, offset)
+                else:
+                    rows = await conn.fetch(q + " OFFSET $2", address, offset)
                 return [dict(r) for r in rows]
         return []
 
     async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
         results = await _pm_fetch(session, "positions", {"user": address})
-    return [p for p in results if _parse_num(p.get("currentValue")) > 0]
+    results = [p for p in results if _parse_num(p.get("currentValue")) > 0]
+    if limit is not None and limit > 0:
+        results = results[offset:offset + limit]
+    elif offset > 0:
+        results = results[offset:]
+    return results
 
 
 # ── Closed Positions (live) ────────────────────────────────────────
@@ -129,13 +148,20 @@ async def get_wallet_positions(
 async def get_wallet_closed_positions(
     request: Request,
     address: str,
-    limit: int = 50,
+    limit: Optional[int] = None,
     offset: int = 0
 ) -> list[dict[str, Any]]:
     async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
         results = await _pm_fetch(session, "closed-positions", {"user": address})
-    results.sort(key=lambda p: _parse_num(p.get("realizedPnl", 0)), reverse=True)
-    return results[offset:offset + limit]
+    results.sort(
+        key=lambda p: str(p.get("endDate") or p.get("end_date") or p.get("closed_at") or ""),
+        reverse=True,
+    )
+    if limit is not None and limit > 0:
+        results = results[offset:offset + limit]
+    elif offset > 0:
+        results = results[offset:]
+    return results
 
 
 # ── PnL Chart (live, from closed-positions) ────────────────────────
@@ -184,10 +210,10 @@ async def get_curated_whales(request: Request, limit: int = 50) -> list[dict[str
         raise HTTPException(status_code=500, detail="Database pool not initialized")
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT address, win_rate, roi_pct, resolved_count, total_volume, tier, alpha_score
+            SELECT address, win_rate, roi_pct, resolved_count, total_volume
             FROM wallet_stats
-            WHERE win_rate > 0.70 AND resolved_count >= 20 AND total_volume >= 10000
-            ORDER BY alpha_score DESC NULLS LAST LIMIT $1
+            WHERE win_rate >= 70 AND resolved_count >= 20 AND total_volume >= 5000
+            ORDER BY COALESCE(total_pnl, 0) DESC NULLS LAST LIMIT $1
         """, limit)
     return [dict(r) for r in rows]
 
@@ -214,7 +240,7 @@ async def get_deposit_alerts(request: Request, limit: int = 50) -> list[dict[str
         raise HTTPException(status_code=500, detail="Database pool not initialized")
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT wd.*, tw.total_pnl, tw.total_volume, tw.win_rate, tw.roi_pct
+            SELECT wd.*, tw.total_pnl, tw.total_volume
             FROM wallet_deposits wd
             LEFT JOIN tracked_wallets tw ON wd.wallet_address = tw.address
             WHERE wd.flagged_single = TRUE OR wd.flagged_cumulative = TRUE
@@ -232,7 +258,7 @@ async def get_smart_money_trades(request: Request, limit: int = 50) -> list[dict
         rows = await conn.fetch("""
             SELECT st.id as trade_id, st.wallet_address, st.tx_hash, st.market_name,
                    st.side, st.amount_usdc, st.traded_at as timestamp,
-                   tw.total_pnl, tw.total_volume, tw.win_rate, tw.roi_pct, tw.tier
+                   tw.total_pnl, tw.total_volume
             FROM smart_money_trades st
             LEFT JOIN tracked_wallets tw ON st.wallet_address = tw.address
             ORDER BY st.traded_at DESC LIMIT $1

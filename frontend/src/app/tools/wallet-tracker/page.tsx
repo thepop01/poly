@@ -134,7 +134,6 @@ export default function WalletTrackerPage() {
                 <th className="py-3 px-4 font-semibold w-16 text-center">Status</th>
                 <th className="py-3 px-4 font-semibold">Wallet</th>
                 <th className="py-3 px-4 font-semibold text-right">Volume</th>
-                <th className="py-3 px-4 font-semibold text-right">Win Rate</th>
                 <th className="py-3 px-4 font-semibold text-right">ROI</th>
                 <th className="py-3 px-4 font-semibold text-right">Profit</th>
                 <th className="py-3 px-4 font-semibold text-center w-24">Actions</th>
@@ -159,8 +158,8 @@ export default function WalletTrackerPage() {
                   <td colSpan={7} className="py-12 text-center text-muted-fg font-mono text-sm">
                     You are not tracking any wallets yet. 
                     <br />
-                    <Link href="/leaderboard" className="inline-flex items-center gap-2 mt-4 text-primary hover:underline">
-                      Find wallets on the Leaderboard <ArrowRight size={14} />
+                    <Link href="/wallets" className="inline-flex items-center gap-2 mt-4 text-primary hover:underline">
+                      Find wallets on the Wallets page <ArrowRight size={14} />
                     </Link>
                   </td>
                 </tr>
@@ -169,8 +168,6 @@ export default function WalletTrackerPage() {
                   const pnlVal = parseFloat(entry.total_pnl || "0");
                   const volVal = parseFloat(entry.total_volume || "0");
                   const roiVal = parseFloat(String(entry.roi_pct || 0));
-                  const winRateVal = parseFloat(String(entry.win_rate || 0)) * 100;
-
                   return (
                     <tr
                       key={entry.address}
@@ -186,9 +183,9 @@ export default function WalletTrackerPage() {
                         </button>
                       </td>
                       <td className="py-2.5 px-4 font-medium text-foreground flex items-center gap-2">
-                        <Link href={`/wallet/${entry.address}`} className="hover:text-primary transition-colors font-mono bg-primary/5 px-2 py-0.5 rounded border border-primary/10">
+                        <span className="font-mono bg-primary/5 px-2 py-0.5 rounded border border-primary/10">
                           {formatAddress(entry.address)}
-                        </Link>
+                        </span>
                         <button
                           onClick={(e) => handleCopy(e, entry.address)}
                           className="p-1 hover:bg-surface-2 rounded text-muted-fg hover:text-foreground transition-colors"
@@ -199,9 +196,6 @@ export default function WalletTrackerPage() {
                       </td>
                       <td className="py-2.5 px-4 text-right font-mono font-medium text-foreground whitespace-nowrap">
                         {formatCurrency(volVal)}
-                      </td>
-                      <td className="py-2.5 px-4 text-right font-mono font-medium text-foreground whitespace-nowrap">
-                        {winRateVal.toFixed(1)}%
                       </td>
                       <td className="py-2.5 px-4 text-right font-mono font-medium whitespace-nowrap">
                         <span className={roiVal >= 0 ? "text-green-500" : "text-red-500"}>

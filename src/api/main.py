@@ -1,4 +1,4 @@
-﻿"""FastAPI initialization and lifespan management."""
+"""FastAPI initialization and lifespan management. Database accounting active v2."""
 
 import logging
 from contextlib import asynccontextmanager
@@ -9,6 +9,7 @@ load_dotenv()
 
 from src.db import get_pool, close_pool, init_db
 from src.api.routers import trades, ws, leaderboard, wallets, watchlist, alpha_calls, tracker, discord, auth, tracked_wallets
+from src.api.routers import leaderboard_v2, wallets_v2, alpha_calls_v2, tracked_wallets_v2, trades_v2, custom_wallets, agents, notifications, research
 import asyncio
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
@@ -48,10 +49,14 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore
 
-# CORS configuration
+import os
+
+raw_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+allowed_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For MVP, allow all. Restrict to NEXT_PUBLIC_API_URL in production.
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -84,7 +89,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(asyncpg.exceptions.PostgresError)
 async def postgres_error_handler(request: Request, exc: asyncpg.exceptions.PostgresError):
     logger.error(f"Database Error: {exc}")
-    # In production, never leak exact SQL errors. 
     return JSONResponse(
         status_code=500,
         content={"error": {"code": "DATABASE_ERROR", "message": "A database operation failed.", "details": None}}
@@ -108,6 +112,17 @@ app.include_router(alpha_calls.router, prefix="/api")
 app.include_router(tracker.router, prefix="/api")
 app.include_router(discord.router, prefix="/api")
 app.include_router(tracked_wallets.router, prefix="/api")
+
+# Mount V2 routers
+app.include_router(leaderboard_v2.router, prefix="/api")
+app.include_router(wallets_v2.router, prefix="/api")
+app.include_router(alpha_calls_v2.router, prefix="/api")
+app.include_router(tracked_wallets_v2.router, prefix="/api")
+app.include_router(trades_v2.router, prefix="/api")
+app.include_router(custom_wallets.router, prefix="/api")
+app.include_router(agents.router, prefix="/api")
+app.include_router(notifications.router, prefix="/api")
+app.include_router(research.router, prefix="/api")
 
 @app.get("/health")
 async def health_check():
