@@ -75,6 +75,7 @@ async def compute_core_metrics_for_wallet(
             ON p.address = c.address AND p.condition_id = c.condition_id AND p.outcome = c.outcome
         WHERE c.address = $1
           AND COALESCE(c.metrics_eligible, TRUE)
+          AND COALESCE(c.cost_basis_confidence, 'high') = 'high'
     """, address)
 
     # Official pm_* and capital fields are read-only inputs to this pass.  Do
