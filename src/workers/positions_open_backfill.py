@@ -213,7 +213,10 @@ async def sync_redeemable_positions(
 
 
 async def upsert_position_with_quarantine(conn: asyncpg.Connection, row: dict) -> str:
-    """Upsert a position row after checking invariants. Quarantine if invariants fail.
+    """Validate a v2 position row and upsert it.
+
+    Hard failures → quarantine (row not written to canonical table).
+    Soft warnings → logged, row written with warning flag.
 
     Args:
         conn: asyncpg connection
@@ -223,23 +226,78 @@ async def upsert_position_with_quarantine(conn: asyncpg.Connection, row: dict) -
         "quarantined" if invariants failed, "ok" if upserted successfully
     """
     failures, warnings = check_row_invariants(row)
+
     if warnings:
         logging.getLogger("data_quality").warning(
-            "Soft invariant: wallet=%s condition=%s warnings=%s",
+            "Soft invariant: wallet=%s condition=%s %s",
             row.get("address"), row.get("condition_id"),
             [f"{w.rule}:{w.actual}" for w in warnings],
         )
+
     if failures:
-        reasons = "; ".join(f"{f.rule}: expected {f.expected}, got {f.actual}" for f in failures)
+        reasons = "; ".join(
+            f"{f.rule}: expected {f.expected}, got {f.actual}"
+            for f in failures
+        )
         await conn.execute(
             """INSERT INTO position_quarantine
                (address, condition_id, outcome, status, failure_reason, raw_row)
-               VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING""",
-            row.get("address"), row.get("condition_id"), row.get("outcome"),
-            row.get("status"), reasons, json.dumps(row),
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT DO NOTHING""",
+            row.get("address"), row.get("condition_id"),
+            row.get("outcome"), row.get("status"),
+            reasons, json.dumps(row),
         )
         return "quarantined"
-    # For now, return "ok" — actual upsert logic would go here if integrated into workflow
+
+    # ── Persist the valid row ─────────────────────────────────────────────
+    await conn.execute(
+        """INSERT INTO wallet_positions_v2 (
+               address, condition_id, outcome, size, avg_price,
+               current_value, unrealized_pnl, is_parlay, is_resolved,
+               asset_token_id, event_id, entry_cost_usdc, total_cost_usdc,
+               entry_fees_usdc, source_total_pnl, outcome_index, mergeable,
+               cost_basis_confidence, entry_at, computed_at
+           ) VALUES (
+               $1, $2, $3, $4, $5,
+               $6, $7, FALSE, FALSE,
+               $8, $9, $10, $11,
+               $12, $13, $14, $15,
+               'high', NOW(), NOW()
+           )
+           ON CONFLICT (address, condition_id, outcome) DO UPDATE SET
+               size             = EXCLUDED.size,
+               avg_price        = EXCLUDED.avg_price,
+               current_value    = EXCLUDED.current_value,
+               unrealized_pnl   = EXCLUDED.unrealized_pnl,
+               asset_token_id   = COALESCE(EXCLUDED.asset_token_id,
+                                           wallet_positions_v2.asset_token_id),
+               event_id         = COALESCE(EXCLUDED.event_id,
+                                           wallet_positions_v2.event_id),
+               entry_cost_usdc  = EXCLUDED.entry_cost_usdc,
+               total_cost_usdc  = EXCLUDED.total_cost_usdc,
+               entry_fees_usdc  = EXCLUDED.entry_fees_usdc,
+               source_total_pnl = EXCLUDED.source_total_pnl,
+               outcome_index    = EXCLUDED.outcome_index,
+               mergeable        = EXCLUDED.mergeable,
+               computed_at      = NOW()
+        """,
+        row.get("address"),
+        row.get("condition_id"),
+        row.get("outcome") or row.get("outcome_index"),   # fallback if label absent
+        row.get("current_size"),
+        row.get("avg_price"),
+        None,                   # current_value — not provided by v2 positions endpoint
+        row.get("unrealized_pnl"),
+        row.get("asset_token_id"),
+        row.get("event_id"),
+        row.get("entry_cost_usdc"),
+        row.get("total_cost_usdc"),
+        row.get("entry_fees_usdc"),
+        row.get("source_total_pnl"),
+        row.get("outcome_index"),
+        row.get("mergeable", False),
+    )
     return "ok"
 
 

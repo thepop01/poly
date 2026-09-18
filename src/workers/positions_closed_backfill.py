@@ -113,7 +113,10 @@ def _parse_token_id(value) -> str | None:
 
 
 async def upsert_position_with_quarantine(conn: asyncpg.Connection, row: dict) -> str:
-    """Upsert a position row after checking invariants. Quarantine if invariants fail.
+    """Validate a v2 closed-position row and upsert it.
+
+    Hard failures → quarantine (row not written to canonical table).
+    Soft warnings → logged, row written with warning flag.
 
     Args:
         conn: asyncpg connection
@@ -123,23 +126,47 @@ async def upsert_position_with_quarantine(conn: asyncpg.Connection, row: dict) -
         "quarantined" if invariants failed, "ok" if upserted successfully
     """
     failures, warnings = check_row_invariants(row)
+
     if warnings:
         logging.getLogger("data_quality").warning(
-            "Soft invariant: wallet=%s condition=%s warnings=%s",
+            "Soft invariant: wallet=%s condition=%s %s",
             row.get("address"), row.get("condition_id"),
             [f"{w.rule}:{w.actual}" for w in warnings],
         )
+
     if failures:
-        reasons = "; ".join(f"{f.rule}: expected {f.expected}, got {f.actual}" for f in failures)
+        reasons = "; ".join(
+            f"{f.rule}: expected {f.expected}, got {f.actual}"
+            for f in failures
+        )
         await conn.execute(
             """INSERT INTO position_quarantine
                (address, condition_id, outcome, status, failure_reason, raw_row)
-               VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING""",
-            row.get("address"), row.get("condition_id"), row.get("outcome"),
-            row.get("status"), reasons, json.dumps(row),
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT DO NOTHING""",
+            row.get("address"), row.get("condition_id"),
+            row.get("outcome"), row.get("status"),
+            reasons, json.dumps(row),
         )
         return "quarantined"
-    # For now, return "ok" — actual upsert logic would go here if integrated into workflow
+
+    # Reuse existing closed upsert helper. It reads the API's camelCase keys,
+    # so translate the sweep's snake_case row before handing it over —
+    # passing `row` raw would silently skip it (no `conditionId` key).
+    payload = {
+        "conditionId": row.get("condition_id"),
+        "outcome": row.get("outcome") or row.get("outcome_index"),
+        "asset": row.get("asset_token_id"),
+        "avgPrice": row.get("avg_price"),
+        "avgSellPrice": row.get("avg_sell_price"),
+        "totalBought": row.get("total_bought") if row.get("total_bought") is not None else row.get("total_size"),
+        "totalSold": row.get("total_sold"),
+        "realizedPnl": row.get("realized_pnl"),
+        "endDate": row.get("closed_at"),
+        "timestamp": row.get("timestamp"),
+        "is_parlay": row.get("is_parlay", False),
+    }
+    await upsert_closed_positions_v2(conn, row.get("address", ""), [payload])
     return "ok"
 
 
