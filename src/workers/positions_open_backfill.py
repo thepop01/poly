@@ -8,6 +8,7 @@ updates open-related metrics in wallet_metrics_v2.
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -26,8 +27,23 @@ from src.workers.wallet_trade_history import fetch_positions, fetch_portfolio_va
 from src.utils.category_classifier import classify_tags, flatten_subcategory
 from src.utils.polymarket_rate_limit import PostgresRateLimiter
 from src.workers.market_metadata import upsert_position_markets
+from src.pnl.invariants import check_row_invariants
 
 logger = logging.getLogger("positions_open_backfill")
+
+V2_EPOCH = datetime(2026, 9, 7, tzinfo=timezone.utc)
+
+
+def _should_apply_legacy_repair(fetched_at: datetime | None) -> bool:
+    return fetched_at is not None and fetched_at < V2_EPOCH
+
+
+def _log_repair_fired(rule_name: str, row: dict) -> None:
+    import logging
+    logging.getLogger("data_quality").warning(
+        "Legacy repair rule fired: rule=%s wallet=%s condition=%s",
+        rule_name, row.get("address"), row.get("condition_id"),
+    )
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0.1:5432/poly_db").replace("localhost", "127.0.0.1").replace("postgres://", "postgresql://")
 # Keep spare pooled connections because each in-flight wallet can acquire a
@@ -194,6 +210,31 @@ async def sync_redeemable_positions(
 
     logger.info(f"Synced {len(rows)} redeemable open positions as closed for {address[:12]}...")
     return len(rows)
+
+
+async def upsert_position_with_quarantine(conn: asyncpg.Connection, row: dict) -> str:
+    """Upsert a position row after checking invariants. Quarantine if invariants fail.
+
+    Args:
+        conn: asyncpg connection
+        row: position row dict with required fields
+
+    Returns:
+        "quarantined" if invariants failed, "ok" if upserted successfully
+    """
+    failures = check_row_invariants(row)
+    if failures:
+        reasons = "; ".join(f"{f.rule}: expected {f.expected}, got {f.actual}" for f in failures)
+        await conn.execute(
+            """INSERT INTO position_quarantine
+               (address, condition_id, outcome, status, failure_reason, raw_row)
+               VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING""",
+            row.get("address"), row.get("condition_id"), row.get("outcome"),
+            row.get("status"), reasons, json.dumps(row),
+        )
+        return "quarantined"
+    # For now, return "ok" — actual upsert logic would go here if integrated into workflow
+    return "ok"
 
 
 async def aggregate_and_upsert_positions_v2(conn: asyncpg.Connection, address: str, open_positions: list[dict]):

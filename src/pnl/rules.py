@@ -81,6 +81,13 @@ def closed_contribution(row: dict) -> float:
     return max(realized, -cost)
 
 
+def remaining_cost(row: dict) -> float:
+    """Replaces min(initialValue, totalBought*avgPrice). current_size * avg_price is exact."""
+    current_size = parse_num(_get(row, "currentSize", "current_size")) or 0.0
+    avg_price    = parse_num(_get(row, "avgPrice",    "avg_price"))    or 0.0
+    return current_size * avg_price
+
+
 def open_contribution(row: dict) -> float:
     """PnL for a live or resolved-but-unclaimed position.
 
