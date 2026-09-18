@@ -28,6 +28,11 @@ def parse_num(value) -> float:
         return 0.0
 
 
+def _get(row: dict, camel: str, snake: str):
+    """Try snake_case (v2) first, fall back to camelCase (v1/legacy)."""
+    return row.get(snake) if snake in row else row.get(camel)
+
+
 def is_winning_pnl(value) -> bool:
     """Classify one resolved contract row at its native position grain.
 
@@ -40,17 +45,17 @@ def is_winning_pnl(value) -> bool:
 
 def is_synthetic_mint(row: dict) -> bool:
     """True when avgPrice is Polymarket's 0.50 mint estimate and nothing sold."""
-    avg_price = parse_num(row.get("avgPrice"))
+    avg_price = parse_num(_get(row, "avgPrice", "avg_price"))
     if not (SYNTHETIC_MINT_LOW <= avg_price <= SYNTHETIC_MINT_HIGH):
         return False
-    return parse_num(row.get("totalSold")) == 0.0
+    return parse_num(_get(row, "totalSold", "total_sold")) == 0.0
 
 
 def cost_basis(row: dict) -> tuple[float, CostRule]:
     """Return (cost_basis_usd, rule_applied) for one position row."""
-    total_bought = parse_num(row.get("totalBought"))
-    avg_price = parse_num(row.get("avgPrice"))
-    initial_value = parse_num(row.get("initialValue"))
+    total_bought = parse_num(_get(row, "totalBought", "total_bought"))
+    avg_price = parse_num(_get(row, "avgPrice", "avg_price"))
+    initial_value = parse_num(_get(row, "initialValue", "initial_value"))
 
     if total_bought <= ZERO_BOUGHT_EPSILON:
         return 0.0, CostRule.ZERO_BOUGHT
@@ -72,8 +77,15 @@ def closed_contribution(row: dict) -> float:
     realizedPnl on minted residuals violates this, which is the phantom loss.
     """
     cost, _rule = cost_basis(row)
-    realized = parse_num(row.get("realizedPnl"))
+    realized = parse_num(_get(row, "realizedPnl", "realized_pnl"))
     return max(realized, -cost)
+
+
+def remaining_cost(row: dict) -> float:
+    """Replaces min(initialValue, totalBought*avgPrice). current_size * avg_price is exact."""
+    current_size = parse_num(_get(row, "currentSize", "current_size")) or 0.0
+    avg_price    = parse_num(_get(row, "avgPrice",    "avg_price"))    or 0.0
+    return current_size * avg_price
 
 
 def open_contribution(row: dict) -> float:
@@ -87,7 +99,7 @@ def open_contribution(row: dict) -> float:
     """
     cost, _rule = cost_basis(row)
     return (
-        parse_num(row.get("realizedPnl"))
-        + parse_num(row.get("currentValue"))
+        parse_num(_get(row, "realizedPnl", "realized_pnl"))
+        + parse_num(_get(row, "currentValue", "current_value"))
         - cost
     )

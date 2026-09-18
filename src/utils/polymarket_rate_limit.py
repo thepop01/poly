@@ -7,6 +7,19 @@ from datetime import datetime, timezone
 
 import asyncpg
 
+
+async def respect_retry_after(response) -> None:
+    """Sleep for the duration specified in a 429 Retry-After header."""
+    if getattr(response, "status", None) != 429:
+        return
+    header = (response.headers or {}).get("Retry-After", "")
+    try:
+        wait = float(header)
+        if wait > 0:
+            await asyncio.sleep(wait)
+    except (TypeError, ValueError):
+        pass
+
 DEFAULT_LIMITS: dict[str, tuple[float, float]] = {
     "positions": (15.0, 15.0),
     "closed-positions": (15.0, 15.0),

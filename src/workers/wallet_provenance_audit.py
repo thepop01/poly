@@ -25,6 +25,40 @@ def normalize_outcome(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", text)
 
 
+def classify_position_coverage(positions: list[dict], activity: list[dict]) -> dict[str, str]:
+    """Classify each position at event grain.
+
+    Recognizes when CONVERSION activity on an event_id authorizes all sibling
+    minted legs on that same event.
+
+    Args:
+        positions: List of position dicts with condition_id and event_id keys
+        activity: List of activity dicts with type and event_id keys
+
+    Returns:
+        Dict mapping condition_id to classification: "direct_buy", "conversion_authorized", or "activity_absent"
+    """
+    conversion_events: set[str] = set()
+    for ev in activity:
+        if ev.get("type") == "CONVERSION":
+            eid = ev.get("event_id") or ev.get("eventId")
+            if eid:
+                conversion_events.add(eid)
+
+    result: dict[str, str] = {}
+    for pos in positions:
+        cid = pos.get("condition_id") or pos.get("conditionId") or ""
+        eid = pos.get("event_id") or pos.get("eventId")
+        has_fills = float(pos.get("fills_size") or 0) > 0
+        if has_fills:
+            result[cid] = "direct_buy"
+        elif eid and eid in conversion_events:
+            result[cid] = "conversion_authorized"
+        else:
+            result[cid] = "activity_absent"
+    return result
+
+
 def classify_row(
     position: Mapping[str, object],
     sibling_rows: Iterable[Mapping[str, object]],
