@@ -4,7 +4,9 @@ import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
-DB_URL = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0.1:5432/poly_db")
+DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise ValueError("DATABASE_URL environment variable not set")
 logger = logging.getLogger("purge_synthetic")
 
 FILTER = """
