@@ -1,6 +1,9 @@
 """Tier 1: v2 positions sweep with per-wallet watermark."""
 from __future__ import annotations
-import asyncio, logging, os, argparse
+import argparse
+import asyncio
+import logging
+import os
 import asyncpg
 from dotenv import load_dotenv
 from src.pnl.v2_adapter import V2Adapter
