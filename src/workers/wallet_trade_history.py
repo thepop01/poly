@@ -58,6 +58,26 @@ def canonical_source(queue_source: str) -> str:
     return "manual"
 
 
+def aggregate_redeem_events(events: list[dict]) -> list[dict]:
+    """Collapse multi-row redemptions sharing a transactionHash by summing usdcSize."""
+    grouped: dict[str, dict] = {}
+    order: list[str] = []
+    for ev in events:
+        tx = str(ev.get("transactionHash") or "")
+        if tx not in grouped:
+            grouped[tx] = dict(ev)
+            order.append(tx)
+        else:
+            try:
+                grouped[tx]["usdcSize"] = str(
+                    float(grouped[tx].get("usdcSize") or 0)
+                    + float(ev.get("usdcSize") or 0)
+                )
+            except (TypeError, ValueError):
+                pass
+    return [grouped[tx] for tx in order]
+
+
 async def fetch_combo_activity(
     session: aiohttp.ClientSession,
     address: str,
@@ -71,7 +91,7 @@ async def fetch_combo_activity(
     open_combos = []
     closed_combos = []
     buy_events: dict[str, dict] = {}
-    redeem_events: dict[str, dict] = {}
+    redeem_events_list: list[dict] = []
     offset = 0
 
     for _page in range(max_pages):
@@ -120,8 +140,7 @@ async def fetch_combo_activity(
                             if price > 0:
                                 buy_events[cid]["last_price"] = price
                     elif ev_type in ("REDEEM", "REDEMPTION"):
-                        if cid not in redeem_events:
-                            redeem_events[cid] = a
+                        redeem_events_list.append(a)
 
                 if len(data) < 500:
                     break
@@ -134,6 +153,17 @@ async def fetch_combo_activity(
     # NOTE: feed is newest-first; buy_events accumulate ALL buys per combo, so
     # the true average entry cost is total_usdc / total_size (volume-weighted),
     # NOT the most recent top-up price.
+
+    # Aggregate REDEEM events by transactionHash to handle multi-row redemptions
+    aggregated_redeem_events = aggregate_redeem_events(redeem_events_list)
+
+    # Build a dict keyed by conditionId for processing
+    redeem_events: dict[str, dict] = {}
+    for red in aggregated_redeem_events:
+        cid = red.get("conditionId") or ""
+        if cid and cid not in redeem_events:
+            redeem_events[cid] = red
+
     for cid, red in redeem_events.items():
         buy = buy_events.get(cid, {})
         title = buy.get("title") or red.get("title", "")
