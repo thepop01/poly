@@ -122,7 +122,13 @@ async def upsert_position_with_quarantine(conn: asyncpg.Connection, row: dict) -
     Returns:
         "quarantined" if invariants failed, "ok" if upserted successfully
     """
-    failures = check_row_invariants(row)
+    failures, warnings = check_row_invariants(row)
+    if warnings:
+        logging.getLogger("data_quality").warning(
+            "Soft invariant: wallet=%s condition=%s warnings=%s",
+            row.get("address"), row.get("condition_id"),
+            [f"{w.rule}:{w.actual}" for w in warnings],
+        )
     if failures:
         reasons = "; ".join(f"{f.rule}: expected {f.expected}, got {f.actual}" for f in failures)
         await conn.execute(
