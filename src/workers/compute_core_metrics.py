@@ -243,6 +243,24 @@ async def compute_core_metrics_for_wallet(
         "winning_count": wins,
     }
 
+async def compute_residual_for_wallet(conn: asyncpg.Connection, address: str) -> None:
+    """Store position_pnl and residual = pm_pnl - position_pnl. Never scale."""
+    position_pnl = await conn.fetchval("""
+        SELECT COALESCE(SUM(source_total_pnl), 0) FROM (
+            SELECT source_total_pnl FROM wallet_positions_v2 WHERE address = $1
+            UNION ALL
+            SELECT source_total_pnl FROM wallet_closed_positions_v2 WHERE address = $1
+        ) t
+    """, address)
+    pm_pnl = await conn.fetchval(
+        "SELECT pm_pnl FROM wallet_metrics_v2 WHERE address = $1", address
+    )
+    residual = (float(pm_pnl) - float(position_pnl)) if pm_pnl is not None else None
+    await conn.execute("""
+        UPDATE wallet_metrics_v2
+        SET position_pnl = $2, residual = $3 WHERE address = $1
+    """, address, position_pnl, residual)
+
 async def main():
     parser = argparse.ArgumentParser(description="Worker A: Core Account Metrics Computer")
     parser.add_argument("--concurrency", type=int, default=250, help="Number of concurrent workers")
