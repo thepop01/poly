@@ -19,3 +19,12 @@ async def test_no_sleep_on_200():
     with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         await respect_retry_after(response)
     mock_sleep.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_no_sleep_when_header_absent():
+    response = MagicMock()
+    response.status = 429
+    response.headers = {}
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        await respect_retry_after(response)
+    mock_sleep.assert_not_called()
