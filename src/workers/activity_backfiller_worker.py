@@ -27,6 +27,18 @@ DB_URL = os.getenv(
 logger = logging.getLogger("activity_backfiller")
 
 
+def _should_escalate(unexplained_residual: float, phase1_failure: bool) -> bool:
+    """Determine if a wallet should be escalated for activity backfill.
+
+    Escalate if:
+    - Phase 1 failure is detected, OR
+    - Unexplained residual magnitude exceeds threshold (10,000)
+    """
+    if phase1_failure:
+        return True
+    return abs(unexplained_residual) >= 10_000
+
+
 async def select_candidates(conn: asyncpg.Connection, limit: int | None = None) -> list[str]:
     """Select wallets needing activity backfill.
 
@@ -43,10 +55,10 @@ async def select_candidates(conn: asyncpg.Connection, limit: int | None = None) 
           AND m.total_pnl IS NOT NULL
           AND w.is_dormant = FALSE
           AND (
-              ABS(m.total_pnl - m.pm_pnl) >= 10000
-              OR (
-                  ABS(m.total_pnl - m.pm_pnl) >= 1000
-                  AND ABS(m.total_pnl - m.pm_pnl) / GREATEST(ABS(m.pm_pnl), 1000) >= 0.10
+              (m.unexplained_residual IS NOT NULL AND ABS(m.unexplained_residual) >= 10000)
+              OR EXISTS (
+                  SELECT 1 FROM position_quarantine pq
+                  WHERE pq.address = m.address AND pq.resolved_at IS NULL
               )
           )
           AND NOT EXISTS (
