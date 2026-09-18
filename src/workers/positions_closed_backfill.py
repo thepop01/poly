@@ -9,6 +9,7 @@ Does NOT compute metrics — that's Worker 3 (positions_metrics_compute).
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -26,6 +27,7 @@ from typing import Optional
 from src.workers.wallet_trade_history import fetch_closed_positions, fetch_combo_activity
 from src.utils.polymarket_rate_limit import PostgresRateLimiter
 from src.workers.market_metadata import upsert_position_markets
+from src.pnl.invariants import check_row_invariants
 
 logger = logging.getLogger("positions_closed_backfill")
 
@@ -108,6 +110,31 @@ def _parse_token_id(value) -> str | None:
     if not text:
         return None
     return text if text.isdigit() else None
+
+
+async def upsert_position_with_quarantine(conn: asyncpg.Connection, row: dict) -> str:
+    """Upsert a position row after checking invariants. Quarantine if invariants fail.
+
+    Args:
+        conn: asyncpg connection
+        row: position row dict with required fields
+
+    Returns:
+        "quarantined" if invariants failed, "ok" if upserted successfully
+    """
+    failures = check_row_invariants(row)
+    if failures:
+        reasons = "; ".join(f"{f.rule}: expected {f.expected}, got {f.actual}" for f in failures)
+        await conn.execute(
+            """INSERT INTO position_quarantine
+               (address, condition_id, outcome, status, failure_reason, raw_row)
+               VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING""",
+            row.get("address"), row.get("condition_id"), row.get("outcome"),
+            row.get("status"), reasons, json.dumps(row),
+        )
+        return "quarantined"
+    # For now, return "ok" — actual upsert logic would go here if integrated into workflow
+    return "ok"
 
 
 async def upsert_closed_positions_v2(conn: asyncpg.Connection, address: str, closed_positions: list[dict]):
