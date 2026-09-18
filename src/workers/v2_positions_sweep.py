@@ -1,23 +1,17 @@
 """Tier 1: v2 positions sweep with per-wallet watermark."""
 from __future__ import annotations
-import asyncio
-import logging
-import os
-import argparse
-import sys
-from dotenv import load_dotenv
+import asyncio, logging, os
 import asyncpg
-
+from dotenv import load_dotenv
 from src.pnl.v2_adapter import V2Adapter
 from src.workers.positions_open_backfill import upsert_position_with_quarantine
 
 load_dotenv()
-DB_URL = os.getenv("DATABASE_URL", "postgresql://poly_user:poly_password@127.0.0.1:5432/poly_db").replace("localhost", "127.0.0.1").replace("postgres://", "postgresql://")
+DB_URL = os.getenv("DATABASE_URL")
 logger = logging.getLogger("v2_positions_sweep")
 
 
 async def sweep_wallet(conn: asyncpg.Connection, address: str) -> dict:
-    """Sweep all positions (OPEN/CLOSED) for a single wallet and persist watermark."""
     ok = quarantined = 0
     async with V2Adapter() as adapter:
         for status in ("OPEN", "CLOSED"):
@@ -53,7 +47,6 @@ async def sweep_wallet(conn: asyncpg.Connection, address: str) -> dict:
 
 
 async def run_fleet_sweep(concurrency: int = 100, limit: int | None = None) -> None:
-    """Sweep all non-dormant wallets in parallel with concurrency limit."""
     pool = await asyncpg.create_pool(DB_URL, min_size=2, max_size=min(concurrency, 20))
     try:
         async with pool.acquire() as conn:
@@ -78,32 +71,25 @@ async def run_fleet_sweep(concurrency: int = 100, limit: int | None = None) -> N
 
 
 async def main():
-    """CLI entry point with --deep-history guard."""
-    parser = argparse.ArgumentParser(description="v2 positions sweep with optional deep-history fetch")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--deep-history", action="store_true",
                         help="Fetch pre-2026-09-07 data. EXPLICIT OPT-IN ONLY.")
     parser.add_argument("--wallet", help="Single wallet targeted sweep")
-    parser.add_argument("--concurrency", type=int, default=100,
-                        help="Concurrency for fleet sweep (default: 100)")
-    parser.add_argument("--limit", type=int,
-                        help="Maximum number of wallets to sweep")
+    parser.add_argument("--concurrency", type=int, default=100)
+    parser.add_argument("--limit", type=int)
     args = parser.parse_args()
-
     if args.deep_history:
         logger.warning("DEEP HISTORY MODE — fetching pre-Sept-7 data (explicit opt-in)")
-
     if args.wallet:
         pool = await asyncpg.create_pool(DB_URL)
-        try:
-            async with pool.acquire() as conn:
-                result = await sweep_wallet(conn, args.wallet)
-            print(result)
-        finally:
-            await pool.close()
+        async with pool.acquire() as conn:
+            result = await sweep_wallet(conn, args.wallet)
+        print(result)
+        await pool.close()
     else:
         await run_fleet_sweep(concurrency=args.concurrency, limit=args.limit)
 
-
 if __name__ == "__main__":
+    import asyncio, logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     asyncio.run(main())
