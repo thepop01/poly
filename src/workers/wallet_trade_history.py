@@ -78,6 +78,15 @@ def aggregate_redeem_events(events: list[dict]) -> list[dict]:
     return [grouped[tx] for tx in order]
 
 
+def aggregate_redeem_events_with_raw(
+    events: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Return (aggregated_for_cash, raw_for_provenance).
+    Never use the aggregated list for per-outcome position tracking.
+    """
+    return aggregate_redeem_events(events), list(events)
+
+
 async def fetch_combo_activity(
     session: aiohttp.ClientSession,
     address: str,
@@ -154,8 +163,21 @@ async def fetch_combo_activity(
     # the true average entry cost is total_usdc / total_size (volume-weighted),
     # NOT the most recent top-up price.
 
-    # Aggregate REDEEM events by transactionHash to handle multi-row redemptions
-    aggregated_redeem_events = aggregate_redeem_events(redeem_events_list)
+    # Aggregate REDEEM events by transactionHash to handle multi-row redemptions.
+    # `aggregated_redeem_events` is the transaction-level cash view; the raw
+    # per-outcome rows are kept for position-level provenance (share sizes).
+    aggregated_redeem_events, raw_redeem_events = aggregate_redeem_events_with_raw(redeem_events_list)
+
+    # Provenance: per-transactionHash sum of share sizes across the raw
+    # per-outcome rows. Aggregation only sums usdcSize, so relying on the
+    # first row's partial `size` would understate redeemed shares.
+    raw_size_by_tx: dict[str, float] = {}
+    for red in raw_redeem_events:
+        tx = str(red.get("transactionHash") or "")
+        try:
+            raw_size_by_tx[tx] = raw_size_by_tx.get(tx, 0.0) + float(red.get("size") or 0)
+        except (TypeError, ValueError):
+            pass
 
     # Build a dict keyed by conditionId for processing
     redeem_events: dict[str, dict] = {}
@@ -175,7 +197,10 @@ async def fetch_combo_activity(
         else:
             cat, subcat = "Sports", "Sports"
 
-        size = _parse(red.get("size")) or buy.get("total_size", 0.0)
+        # Position provenance: redeemed share size comes from the raw
+        # per-outcome rows of this transaction (summed), falling back to the
+        # accumulated buy size when the redemption rows carry no size.
+        size = raw_size_by_tx.get(str(red.get("transactionHash") or ""), 0.0) or buy.get("total_size", 0.0)
         payout = _parse(red.get("usdcSize"))
         entry_cost = buy.get("total_usdc", 0.0)
         entry_price = (entry_cost / size) if (size > 0 and entry_cost > 0) else 0.0
